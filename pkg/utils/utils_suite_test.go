@@ -15,19 +15,15 @@
 package utils
 
 import (
-	"context"
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
-	"github.com/onsi/gomega"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
 	"github.com/open-cluster-management/multicloud-integrations/pkg/apis"
@@ -60,17 +56,4 @@ func TestMain(m *testing.M) {
 
 	t.Stop()
 	os.Exit(code)
-}
-
-// StartTestManager adds recFn
-func StartTestManager(ctx context.Context, mgr manager.Manager, g *gomega.GomegaWithT) *sync.WaitGroup {
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		mgr.Start(ctx)
-	}()
-
-	return wg
 }
