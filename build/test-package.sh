@@ -28,8 +28,8 @@ _tap_name=${_tap_name//\//_}
 mkdir -p $_tap_out_dir
 
 PATH=/go/src/github.com/open-cluster-management/multicloud-operators-placementrule/test_tmp/bin/kubebuilder/bin:${PATH}
-export PATH
-export KUBEBUILDER_ASSETS=/go/src/github.com/open-cluster-management/multicloud-operators-placementrule/test_tmp/bin/kubebuilder/bin
+#export PATH
+#export KUBEBUILDER_ASSETS=/go/src/github.com/open-cluster-management/multicloud-operators-placementrule/test_tmp/bin/kubebuilder/bin
 
 # Run tests
 # DO NOT USE -coverpkg=./...
