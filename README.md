@@ -23,7 +23,7 @@ This repository hosts a controller that imports ManagedCluster kind resources in
 
 
 ### Troubleshooting
-1. Check the logs for the multicloud-integration pod.
+1. Check the logs for the multicloud-integration pod. 
 2. Make sure the Placement resource generated a PlacementDecision resource kind and that the status has a decision list.
 
 ## Community, discussion, contribution, and support
