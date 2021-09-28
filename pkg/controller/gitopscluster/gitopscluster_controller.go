@@ -555,7 +555,7 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetRbac(namespace string) erro
 		}
 	}
 
-	err = r.Get(context.Background(), types.NamespacedName{Name: ROLEBINDINGNAME, Namespace: namespace}, &rbacv1.ClusterRoleBinding{})
+	err = r.Get(context.Background(), types.NamespacedName{Name: ROLEBINDINGNAME, Namespace: namespace}, &rbacv1.RoleBinding{})
 	if k8errors.IsNotFound(err) {
 		klog.Infof("creating roleBinding %s, in namespace %s", ROLEBINDINGNAME, namespace)
 
@@ -572,6 +572,7 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetRbac(namespace string) erro
 func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementref v1.ObjectReference) ([]string, error) {
 	if placementref.Kind != "Placement" ||
 		placementref.APIVersion != "cluster.open-cluster-management.io/v1alpha1" {
+		klog.Error("Invalid Kind or APIVersion, must be \"Placement\" and \"cluster.open-cluster-management.io/v1alpha1\"")
 		return nil, errInvalidPlacementRef
 	}
 
