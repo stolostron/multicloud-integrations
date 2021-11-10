@@ -5,7 +5,7 @@
 #  Placement resource "all-openshift-clusters" exists
 #  A clusterSet is bound to the openshift-gitops namespace 
 ---
-apiVersion: apps.open-cluster-management.io/v1alpha1
+apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
 metadata:
   name: argo-acm-importer
