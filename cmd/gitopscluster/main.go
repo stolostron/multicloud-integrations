@@ -24,7 +24,7 @@ import (
 
 	"k8s.io/klog"
 
-	"github.com/open-cluster-management/multicloud-integrations/cmd/gitopscluster/exec"
+	"open-cluster-management.io/multicloud-integrations/cmd/gitopscluster/exec"
 )
 
 func main() {

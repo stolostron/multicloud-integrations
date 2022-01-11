@@ -19,9 +19,9 @@ import (
 	"os"
 	"time"
 
-	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
+	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

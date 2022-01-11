@@ -21,13 +21,13 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
-	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
-	gitopsclusterV1beta1 "github.com/open-cluster-management/multicloud-integrations/pkg/apis/apps/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
+	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )

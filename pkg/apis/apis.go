@@ -15,9 +15,9 @@
 package apis
 
 import (
-	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
 )
 
 // AddToSchemes may be used to add all resources defined in the project to a Scheme.

@@ -28,23 +28,12 @@ This repository hosts a controller that imports ManagedCluster kind resources in
 
 ## Community, discussion, contribution, and support
 
-Check the [CONTRIBUTING Doc](CONTRIBUTING.md) for how to contribute to the repository.
+Check the [CONTRIBUTING Doc](CONTRIBUTING.md) for how to contribute to the repo.
 
-------
+### Communication channels
 
-## Getting started
+Slack channel: [#open-cluster-mgmt](http://slack.k8s.io/#open-cluster-mgmt)
 
-## Security response
+## License
 
-Check the [Security Doc](SECURITY.md) if you find a security issue.
-
-## References
-
-### Multicloud-operators repositories
-
-- [multicloud-operators-application](https://github.com/open-cluster-management/multicloud-operators-application)
-- [multicloud-operators-channel](https://github.com/open-cluster-management/multicloud-operators-channel)
-- [multicloud-operators-deployable](https://github.com/open-cluster-management/multicloud-operators-deployable)
-- [multicloud-operators-placementrule](https://github.com/open-cluster-management/multicloud-operators-placementrule)
-- [multicloud-operators-subscription](https://github.com/open-cluster-management/multicloud-operators-subscription)
-- [multicloud-operators-subscription-release](https://github.com/open-cluster-management/multicloud-operators-subscription-release)
+This code is released under the Apache 2.0 license. See the file LICENSE for more information.

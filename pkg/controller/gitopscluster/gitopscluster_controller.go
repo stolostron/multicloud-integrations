@@ -25,14 +25,14 @@ import (
 	"sync"
 	"time"
 
-	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
-	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
 	agentv1 "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis/agent/v1"
-	gitopsclusterV1beta1 "github.com/open-cluster-management/multicloud-integrations/pkg/apis/apps/v1beta1"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/utils"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
+	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
+	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
+	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
