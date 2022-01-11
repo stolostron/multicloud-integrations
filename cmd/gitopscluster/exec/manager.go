@@ -19,13 +19,13 @@ import (
 	"os"
 
 	"github.com/IBM/controller-filtered-cache/filteredcache"
-	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
 	endpointapis "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/apis"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/controller"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/utils"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
+	"open-cluster-management.io/multicloud-integrations/pkg/apis"
+	"open-cluster-management.io/multicloud-integrations/pkg/controller"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"

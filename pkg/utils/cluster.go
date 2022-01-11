@@ -22,10 +22,10 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog"
 
-	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
-	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
-	gitopsclusterV1beta1 "github.com/open-cluster-management/multicloud-integrations/pkg/apis/apps/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
+	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
+	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
