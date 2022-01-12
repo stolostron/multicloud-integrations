@@ -19,7 +19,6 @@ import (
 	"os"
 
 	"github.com/IBM/controller-filtered-cache/filteredcache"
-	endpointapis "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
@@ -83,11 +82,6 @@ func RunManager() {
 	}
 
 	if err := v1.AddToScheme(mgr.GetScheme()); err != nil {
-		klog.Error(err, "")
-		os.Exit(1)
-	}
-
-	if err := endpointapis.AddToScheme(mgr.GetScheme()); err != nil {
 		klog.Error(err, "")
 		os.Exit(1)
 	}

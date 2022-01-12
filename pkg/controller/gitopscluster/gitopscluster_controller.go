@@ -20,16 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	agentv1 "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis/agent/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
-	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
 	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
@@ -64,8 +61,6 @@ func Add(mgr manager.Manager) error {
 var _ reconcile.Reconciler = &ReconcileGitOpsCluster{}
 
 var errInvalidPlacementRef = errors.New("invalid placement reference")
-
-var migrationDone = true
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
@@ -173,25 +168,6 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 	if err != nil {
 		klog.Error("failed to get all existing managed cluster secrets for ArgoCD, ", err)
 		return reconcile.Result{Requeue: false}, nil
-	}
-
-	if !migrationDone {
-		argoNamespace := ""
-		if len(managedClusterSecretsInArgo.Items) > 0 {
-			// If migration is required, use this namespace as target ArgoCD namespace because we supported only one instance of
-			// ArgoCD server previously
-			argoNamespace = managedClusterSecretsInArgo.Items[0].Namespace
-		}
-
-		err := r.MigrateManagedClusterSecrets(argoNamespace)
-
-		if err != nil {
-			klog.Info("failed to migrate managed cluster secrets, err: ", err)
-			return reconcile.Result{Requeue: true, RequeueAfter: time.Duration(2) * time.Minute}, err
-		}
-	} else {
-		// If there is no managed cluster secret in any ArgoCD namespace, migration is not necessary
-		migrationDone = true
 	}
 
 	// Then save it in a map. As we create/update GitOps managed cluster secrets while
@@ -727,223 +703,6 @@ func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretInArgo(argoNamespace 
 		if err != nil {
 			klog.Errorf("failed to update managed cluster secret. name: %v/%v, error: %v", argoNamespace, managedClusterSecret.Name, err)
 			return err
-		}
-	}
-
-	return nil
-}
-
-func (r *ReconcileGitOpsCluster) MigrateManagedClusterSecrets(argoNamespace string) error {
-	klog.Info("trying to migrate managed cluster secrets")
-
-	allManagedClusters := &spokeClusterV1.ManagedClusterList{}
-
-	err := r.List(context.TODO(), allManagedClusters)
-
-	if err != nil {
-		klog.Errorf("failed to migrate managed cluster secrets, err: %v", err.Error())
-		return err
-	}
-
-	clustersToMigrate := make([]string, 0)
-
-	// Find managed clusters with ArgoCDCluster enabled but do not disable it yet
-	for _, managedCluster := range allManagedClusters.Items {
-		klog.Infof("checking for migrating secret for managed cluster: %s ", managedCluster.Name)
-		wasEnabled, err := r.CheckAndDisableInKlusterletAddonConfig(managedCluster.Name, true)
-
-		if err == nil {
-			if wasEnabled {
-				klog.Infof("klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster is enabled for managed cluster %s", managedCluster.Name)
-				clustersToMigrate = append(clustersToMigrate, managedCluster.Name)
-			}
-		} else {
-			return err
-		}
-	}
-
-	// Do the migration only if there is at least one managed cluster with ArgoCDCluster enabled
-	if len(clustersToMigrate) > 0 {
-		// Create a placement rule with those managed clusters
-		klog.Infof("migrating secret for managed cluster: %v, ", clustersToMigrate)
-
-		// Create a placement rule for migration
-		err = r.CreateMigrationPlacement(clustersToMigrate)
-
-		if err != nil {
-			return err
-		}
-
-		klog.Info("placement rule CR was successfully created for migration")
-
-		// Now create GitOpsCluster CR with the placement rule in POD_NAMESPACE
-		err = r.CreateMigrationGitOpsCluster(argoNamespace, clustersToMigrate)
-
-		if err != nil {
-			return err
-		}
-
-		klog.Info("gitOpsCluster CR was successfully created for migration")
-
-		// After the GitOpsCluster CR is successfully created, disable ArgoCDCluster in klusterletAddonConfig
-		for _, cluster := range clustersToMigrate {
-			klog.Infof("disabling ArgoCDCluster in klusterletAddonConfig for managed cluster: %s ", cluster)
-			_, err := r.CheckAndDisableInKlusterletAddonConfig(cluster, false)
-
-			if err == nil {
-				klog.Infof("klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster is now disabled for managed cluster %s", cluster)
-			} else {
-				return err
-			}
-		}
-
-		klog.Info("argocdcluster was successfully disabled in managed clusters")
-	} else {
-		klog.Infof("no managed cluster secret to migrate")
-	}
-
-	migrationDone = true
-
-	klog.Info("argocdcluster migration was done successfully")
-
-	return nil
-}
-
-func (r *ReconcileGitOpsCluster) CheckAndDisableInKlusterletAddonConfig(clusterName string, checkOnly bool) (bool, error) {
-	klusterletAddonConfigKey := types.NamespacedName{Name: clusterName, Namespace: clusterName}
-
-	klusterletAddonConfig := &agentv1.KlusterletAddonConfig{}
-
-	err := r.Get(context.TODO(), klusterletAddonConfigKey, klusterletAddonConfig)
-
-	if err != nil {
-		return false, err
-	}
-
-	if klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster {
-		if !checkOnly {
-			klog.Info("disabling klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster")
-
-			klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster = false
-			err = r.Update(context.TODO(), klusterletAddonConfig)
-
-			if err != nil {
-				time.Sleep(time.Second * 2)
-
-				err = r.Update(context.TODO(), klusterletAddonConfig)
-
-				if err != nil {
-					klog.Errorf("failed to disable ApplicationManagerConfig in klusterletAddonConfig %s, error: %v", klusterletAddonConfigKey, err.Error())
-					return false, err
-				}
-
-				klog.Info("successfully disabled klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster")
-
-				return true, nil
-			}
-
-			klog.Info("successfully disabled klusterletAddonConfig.Spec.ApplicationManagerConfig.ArgoCDCluster")
-
-			return true, nil
-		}
-
-		return true, nil
-	}
-
-	return false, nil
-}
-
-func (r *ReconcileGitOpsCluster) CreateMigrationPlacement(clusterNames []string) error {
-	namespace := os.Getenv("POD_NAMESPACE")
-
-	if namespace == "" {
-		return errors.New("environment variable POD_NAMESPACE is empty")
-	}
-
-	migrationPlacement := &clusterv1alpha1.Placement{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "managed-cluster-secret-migration",
-			Namespace: namespace,
-		},
-		Spec: clusterv1alpha1.PlacementSpec{
-			Predicates: []clusterv1alpha1.ClusterPredicate{
-				{
-					RequiredClusterSelector: clusterv1alpha1.ClusterSelector{
-						ClaimSelector: clusterv1alpha1.ClusterClaimSelector{
-							MatchExpressions: []metav1.LabelSelectorRequirement{
-								{
-									Key:      "id.k8s.io",
-									Operator: "In",
-									Values:   clusterNames,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err := r.Create(context.TODO(), migrationPlacement)
-
-	if err != nil {
-		klog.Error("failed to create migration placement CR. will try again. ", err.Error())
-
-		time.Sleep(time.Second * 2)
-
-		err := r.Create(context.TODO(), migrationPlacement)
-
-		if err != nil {
-			klog.Error("failed to create migration placement CR again. ", err.Error())
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (r *ReconcileGitOpsCluster) CreateMigrationGitOpsCluster(argoNamespace string, clusterNames []string) error {
-	namespace := os.Getenv("POD_NAMESPACE")
-
-	if namespace == "" {
-		return errors.New("environment variable POD_NAMESPACE is empty")
-	}
-
-	newGitOpsClusterCR := &gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "managed-cluster-secret-migration",
-			Namespace: namespace,
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-				Cluster:       "local-cluster",
-				ArgoNamespace: argoNamespace,
-			},
-			PlacementRef: &v1.ObjectReference{
-				Kind:       "Placement",
-				APIVersion: "cluster.open-cluster-management.io/v1alpha1",
-				Namespace:  namespace,
-				Name:       "managed-cluster-secret-migration",
-			},
-		},
-	}
-
-	err := r.Create(context.TODO(), newGitOpsClusterCR)
-
-	if err != nil && !k8errors.IsAlreadyExists(err) {
-		if k8errors.IsAlreadyExists(err) {
-			klog.Info("managed-cluster-secret-migration GitOpsCluster CR already exists. Skip migration.")
-		} else {
-			klog.Error("failed to create migration GitOpsCluster CR. will try again. ", err.Error())
-
-			time.Sleep(time.Second * 2)
-
-			err := r.Create(context.TODO(), newGitOpsClusterCR)
-
-			if err != nil {
-				klog.Error("failed to create migration GitOpsCluster CR again. ", err.Error())
-				return err
-			}
 		}
 	}
 
