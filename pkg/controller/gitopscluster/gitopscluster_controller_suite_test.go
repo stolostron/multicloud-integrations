@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
-	endpointapis "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
@@ -44,7 +43,6 @@ func TestMain(m *testing.M) {
 		},
 	}
 
-	endpointapis.AddToScheme(scheme.Scheme)
 	spokeClusterV1.AddToScheme(scheme.Scheme)
 	clusterv1alpha1.AddToScheme(scheme.Scheme)
 
