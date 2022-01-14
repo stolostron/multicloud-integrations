@@ -21,9 +21,9 @@ import (
 	"github.com/IBM/controller-filtered-cache/filteredcache"
 	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
 	endpointapis "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/apis"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/controller"
-	"github.com/open-cluster-management/multicloud-integrations/pkg/utils"
+	"github.com/stolostron/multicloud-integrations/pkg/apis"
+	"github.com/stolostron/multicloud-integrations/pkg/controller"
+	"github.com/stolostron/multicloud-integrations/pkg/utils"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 

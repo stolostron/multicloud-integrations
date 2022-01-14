@@ -26,7 +26,7 @@ import (
 	spokeClusterV1 "github.com/open-cluster-management/api/cluster/v1"
 	clusterv1alpha1 "github.com/open-cluster-management/api/cluster/v1alpha1"
 	endpointapis "github.com/open-cluster-management/klusterlet-addon-controller/pkg/apis"
-	gitopsclusterV1beta1 "github.com/open-cluster-management/multicloud-integrations/pkg/apis/apps/v1beta1"
+	gitopsclusterV1beta1 "github.com/stolostron/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
