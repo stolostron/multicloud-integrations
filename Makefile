@@ -23,7 +23,7 @@ REGISTRY ?= quay.io/open-cluster-management
 
 # Github host to use for checking the source tree;
 # Override this variable ue with your own value if you're working on forked repo.
-GIT_HOST ?= github.com/open-cluster-management
+GIT_HOST ?= github.com/stolostron
 
 PWD := $(shell pwd)
 BASE_DIR := $(shell basename $(PWD))
