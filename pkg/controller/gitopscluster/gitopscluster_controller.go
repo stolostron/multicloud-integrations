@@ -27,7 +27,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
-	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 
@@ -147,7 +147,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		// Watch cluster list changes in placement decision
 		pdMapper := &placementDecisionMapper{mgr.GetClient()}
 		err = c.Watch(
-			&source.Kind{Type: &clusterv1alpha1.PlacementDecision{}},
+			&source.Kind{Type: &clusterv1beta1.PlacementDecision{}},
 			handler.EnqueueRequestsFromMapFunc(pdMapper.Map),
 			utils.PlacementDecisionPredicateFunc)
 
@@ -493,7 +493,7 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetConfigMaps(namespace string
 	// Create two configMaps, one for placementrules.apps and placementdecisions.cluster
 	maps := []v1.ConfigMap{
 		getConfigMapDuck(configMapNameOld, namespace, "apps.open-cluster-management.io/v1", "placementrules"),
-		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1alpha1", "placementdecisions"),
+		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1beta1", "placementdecisions"),
 	}
 
 	for _, duckMap := range maps {
@@ -547,12 +547,12 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetRbac(namespace string) erro
 // GetManagedClusters retrieves managed cluster names from placement decision
 func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementref v1.ObjectReference) ([]string, error) {
 	if placementref.Kind != "Placement" ||
-		placementref.APIVersion != "cluster.open-cluster-management.io/v1alpha1" {
-		klog.Error("Invalid Kind or APIVersion, must be \"Placement\" and \"cluster.open-cluster-management.io/v1alpha1\"")
+		placementref.APIVersion != "cluster.open-cluster-management.io/v1beta1" {
+		klog.Error("Invalid Kind or APIVersion, must be \"Placement\" and \"cluster.open-cluster-management.io/v1beta1\"")
 		return nil, errInvalidPlacementRef
 	}
 
-	placement := &clusterv1alpha1.Placement{}
+	placement := &clusterv1beta1.Placement{}
 	err := r.Get(context.TODO(), types.NamespacedName{Namespace: namespace, Name: placementref.Name}, placement)
 
 	if err != nil {
@@ -562,7 +562,7 @@ func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementr
 
 	klog.Infof("looking for placement decisions for placement %s", placementref.Name)
 
-	placementDecisions := &clusterv1alpha1.PlacementDecisionList{}
+	placementDecisions := &clusterv1beta1.PlacementDecisionList{}
 
 	listopts := &client.ListOptions{Namespace: namespace}
 
