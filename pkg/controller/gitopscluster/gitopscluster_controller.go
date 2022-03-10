@@ -550,7 +550,7 @@ func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementr
 	if placementref.Kind != "Placement" ||
 		!strings.EqualFold(placementref.APIVersion, "cluster.open-cluster-management.io/v1alpha1") ||
 		!strings.EqualFold(placementref.APIVersion, "cluster.open-cluster-management.io/v1beta1") {
-		klog.Error("Invalid Kind or APIVersion, must be \"Placement\" and \"cluster.open-cluster-management.io/v1beta1\" or \"cluster.open-cluster-management.io/v1alpha1\"")
+		klog.Error("Invalid Kind or APIVersion, kind: " + placementref.Kind + " apiVerion: " + placementref.APIVersion)
 		return nil, errInvalidPlacementRef
 	}
 
