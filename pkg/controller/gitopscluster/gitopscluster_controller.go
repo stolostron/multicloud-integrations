@@ -493,6 +493,7 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetConfigMaps(namespace string
 	// Create two configMaps, one for placementrules.apps and placementdecisions.cluster
 	maps := []v1.ConfigMap{
 		getConfigMapDuck(configMapNameOld, namespace, "apps.open-cluster-management.io/v1", "placementrules"),
+		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1alpha1", "placementdecisions"),
 		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1beta1", "placementdecisions"),
 	}
 
@@ -546,9 +547,10 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetRbac(namespace string) erro
 
 // GetManagedClusters retrieves managed cluster names from placement decision
 func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementref v1.ObjectReference) ([]string, error) {
-	if placementref.Kind != "Placement" ||
-		placementref.APIVersion != "cluster.open-cluster-management.io/v1beta1" {
-		klog.Error("Invalid Kind or APIVersion, must be \"Placement\" and \"cluster.open-cluster-management.io/v1beta1\"")
+	if !(placementref.Kind == "Placement" &&
+		(strings.EqualFold(placementref.APIVersion, "cluster.open-cluster-management.io/v1alpha1") ||
+			strings.EqualFold(placementref.APIVersion, "cluster.open-cluster-management.io/v1beta1"))) {
+		klog.Error("Invalid Kind or APIVersion, kind: " + placementref.Kind + " apiVerion: " + placementref.APIVersion)
 		return nil, errInvalidPlacementRef
 	}
 
