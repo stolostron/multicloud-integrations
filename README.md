@@ -2,7 +2,7 @@
 
 ------
 
-This repository hosts a controller that imports ManagedCluster kind resources into Argo CD (OpenShift GitOps), based on Placement resource. 
+This repository hosts a controller that imports ManagedCluster kind resources into Argo CD (OpenShift GitOps), based on Placement resource.
 
 ## Quick start
 
