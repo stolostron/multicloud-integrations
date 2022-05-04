@@ -517,7 +517,6 @@ func (r *ReconcileGitOpsCluster) getAppSetServiceAccountName(namespace string) s
 }
 
 func (r *ReconcileGitOpsCluster) getRoleBindingDuck(namespace string) *rbacv1.RoleBinding {
-	klog.Info("====================> getRoleBindingDuck")
 	saName := r.getAppSetServiceAccountName(namespace)
 
 	return &rbacv1.RoleBinding{
