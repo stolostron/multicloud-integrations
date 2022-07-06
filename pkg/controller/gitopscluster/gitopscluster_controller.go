@@ -546,7 +546,6 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetConfigMaps(namespace string
 	// Create two configMaps, one for placementrules.apps and placementdecisions.cluster
 	maps := []v1.ConfigMap{
 		getConfigMapDuck(configMapNameOld, namespace, "apps.open-cluster-management.io/v1", "placementrules"),
-		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1alpha1", "placementdecisions"),
 		getConfigMapDuck(configMapNameNew, namespace, "cluster.open-cluster-management.io/v1beta1", "placementdecisions"),
 	}
 
