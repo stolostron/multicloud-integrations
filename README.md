@@ -16,7 +16,7 @@ This repository hosts a controller that imports ManagedCluster kind resources in
    #TBD oc apply -f deploy/controller
    ```
 
-## Usage
+## Usage 
 1. Create a placement resource
 2. Create a GitOpsCluster resource kind that points to placement and an Argo CD namespace
 3. Check Argo CD >> Configuration >> Clusters to make sure you see the imported ManagedClusters
