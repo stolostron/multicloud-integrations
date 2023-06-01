@@ -1168,7 +1168,7 @@ func getManagedClusterURL(managedCluster *spokeclusterv1.ManagedCluster, token s
 		httpClient.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
 				RootCAs:    caCertPool,
-				MinVersion: tls.VersionTLS12,
+				MinVersion: tls.VersionTLS13,
 			},
 		}
 
