@@ -32,7 +32,7 @@ import (
 
 	"path/filepath"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 	"k8s.io/klog"
 	"k8s.io/utils/strings/slices"
 
