@@ -3,7 +3,7 @@ module open-cluster-management.io/multicloud-integrations
 go 1.22.0
 
 require (
-	github.com/ghodss/yaml v1.0.1-0.20190212211648-25d852aebe32
+	github.com/ghodss/yaml v1.0.1-0.20220118164431-d8423dcdf344
 	github.com/onsi/ginkgo/v2 v2.17.1
 	github.com/onsi/gomega v1.32.0
 	github.com/spf13/pflag v1.0.5
@@ -164,5 +164,5 @@ require (
 	k8s.io/utils v0.0.0-20240310230437-4693a0247e57
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
-	sigs.k8s.io/yaml v1.4.0 // indirect
+	sigs.k8s.io/yaml v1.4.0
 )
