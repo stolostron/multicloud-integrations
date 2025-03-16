@@ -15,7 +15,7 @@ require (
 	k8s.io/client-go v0.30.2
 	k8s.io/klog v1.0.0
 	k8s.io/kubectl v0.29.0
-	open-cluster-management.io/api v0.15.0
+	open-cluster-management.io/api v0.16.1
 	open-cluster-management.io/managed-serviceaccount v0.7.0
 	sigs.k8s.io/controller-runtime v0.18.4
 )
@@ -164,5 +164,5 @@ require (
 	k8s.io/utils v0.0.0-20240310230437-4693a0247e57
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
-	sigs.k8s.io/yaml v1.4.0 // indirect
+	sigs.k8s.io/yaml v1.4.0
 )
