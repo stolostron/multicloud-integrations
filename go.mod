@@ -8,7 +8,7 @@ require (
 	github.com/ghodss/yaml v1.0.1-0.20190212211648-25d852aebe32
 	github.com/onsi/ginkgo/v2 v2.17.1
 	github.com/onsi/gomega v1.32.0
-	github.com/spf13/pflag v1.0.5
+	github.com/spf13/pflag v1.0.6
 	helm.sh/helm/v3 v3.14.2
 	k8s.io/api v0.30.2
 	k8s.io/apiextensions-apiserver v0.30.2
