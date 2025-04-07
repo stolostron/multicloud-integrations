@@ -141,6 +141,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 					i--
 				}
 			}
+
 			application.SetFinalizers(f)
 		}
 
