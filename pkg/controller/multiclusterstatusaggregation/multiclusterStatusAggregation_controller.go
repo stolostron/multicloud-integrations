@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	appsetreportV1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
 	propagation "open-cluster-management.io/multicloud-integrations/propagation-controller/application"
@@ -86,6 +87,18 @@ type AppSetClusterConditionsSorter []appsetreportV1alpha1.ClusterCondition
 func (a AppSetClusterConditionsSorter) Len() int           { return len(a) }
 func (a AppSetClusterConditionsSorter) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a AppSetClusterConditionsSorter) Less(i, j int) bool { return a[i].Cluster < a[j].Cluster }
+
+var AppSetGVR = schema.GroupVersionKind{
+	Group:   "argoproj.io",
+	Version: "v1alpha1",
+	Kind:    "ApplicationSet",
+}
+
+var AppSetListGVR = schema.GroupVersionKind{
+	Group:   "argoproj.io",
+	Version: "v1alpha1",
+	Kind:    "ApplicationSetList",
+}
 
 func Add(mgr manager.Manager, interval int, resourceDir string) error {
 	dsRS := &ReconcilePullModelAggregation{
@@ -171,11 +184,41 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 
 		klog.Info(GetMemUsage("Initialize AppSet Map."))
 
+		appsetClusters := make(map[string]map[string]bool)
 		for _, manifestWork := range appSetClusterList.Items {
 			appsetNs, appsetName := ParseNamespacedName(manifestWork.Annotations[propagation.AnnotationKeyAppSet])
 
 			if appsetNs == "" || appsetName == "" {
 				klog.Warningf("Appset namespace: %v , Appset name: %v", appsetNs, appsetName)
+			}
+
+			appsetCR := &unstructured.Unstructured{}
+			appsetCR.SetGroupVersionKind(AppSetGVR)
+
+			// Get placement selected clusters
+			if _, appsetExists := appsetClusters[appsetNs+"."+appsetName]; !appsetExists {
+				if err := r.Get(context.TODO(),
+					types.NamespacedName{Namespace: appsetNs, Name: appsetName},
+					appsetCR); err != nil {
+					if errors.IsNotFound(err) {
+						klog.Info("Appset not found for YAML ", appsetName)
+					} else {
+						klog.Warning("Error retrieving appset ", err)
+					}
+				} else {
+					spec := appsetCR.Object["spec"].(map[string]interface{})
+					if spec["generators"] != nil {
+						generators := spec["generators"].([]interface{})
+						r.getPlacementClusters(generators, appsetNs, appsetName, appsetClusters)
+					}
+				}
+			}
+
+			if clusters, appsetExists := appsetClusters[appsetNs+"."+appsetName]; appsetExists {
+				_, clusterExists := clusters[manifestWork.Namespace]
+				if !clusterExists {
+					continue
+				}
 			}
 
 			// Need to allocate a map of clusters for each appset only once.
@@ -190,6 +233,12 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 
 			appsetNs, appsetName := ParseNamespacedName(manifestWork.Annotations[propagation.AnnotationKeyAppSet])
 
+			if clusters, appsetExists := appsetClusters[appsetNs+"."+appsetName]; appsetExists {
+				_, clusterExists := clusters[manifestWork.Namespace]
+				if !clusterExists {
+					continue
+				}
+			}
 			if appsetNs == "" && appsetName == "" {
 				klog.Warningf("Appset namespace: %v , Appset name: %v", appsetNs, appsetName)
 			}
@@ -212,6 +261,47 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 				SyncStatus:   syncStatus,
 				App: appsetNs + "/" + manifestWork.Annotations[propagation.AnnotationKeyHubApplicationName] +
 					"/" + manifestWork.Namespace + "/" + manifestWork.Name,
+			}
+		}
+
+		// Add appSet to appSetClusterStatusMap so the report can be updated with zero clusters
+		// For scenario where the number of clusters selected changes to zero
+		appSetCRList := &unstructured.UnstructuredList{}
+		appSetCRList.SetGroupVersionKind(AppSetListGVR)
+		err = r.List(context.TODO(), appSetCRList)
+		if err != nil {
+			klog.Errorf("Failed to list Argo ApplicationSets, err: %v", err)
+		}
+
+		for _, appset := range appSetCRList.Items {
+			// filter out non-pull-model AppSets
+			spec := appset.Object["spec"].(map[string]interface{})
+			if spec["template"] != nil {
+				template := spec["template"].(map[string]interface{})
+				if template["metadata"] != nil {
+					metadata := template["metadata"].(map[string]interface{})
+					if metadata["labels"] != nil {
+						labels := metadata["labels"].(map[string]interface{})
+						if labels["apps.open-cluster-management.io/pull-to-ocm-managed-cluster"] == nil {
+							continue
+						}
+					} else {
+						continue
+					}
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
+			appsetNs := appset.Object["metadata"].(map[string]interface{})["namespace"].(string)
+			appsetName := appset.Object["metadata"].(map[string]interface{})["name"].(string)
+			appSetKey := AppSet{types.NamespacedName{Namespace: appsetNs, Name: appsetName}}
+			_, appSetExists := appSetClusterStatusMap[appSetKey]
+
+			// If the key is missing then there are no clusters selected
+			if !appSetExists {
+				appSetClusterStatusMap[appSetKey] = make(map[Cluster]OverallStatus)
 			}
 		}
 
@@ -299,10 +389,10 @@ func (r *ReconcilePullModelAggregation) generateAppSetReport(appSetClusterStatus
 			klog.V(1).Info("Clusterconditions: ", appSetCRD.ClusterConditions)
 			klog.V(1).Info("Resources: ", appSetCRD.Resources)
 			klog.V(1).Info("Summary: ", appSetCRD.Summary)
-			newSummary, appSetClusterConditions := r.generateSummary(appSetClusterStatusMap, appset, appSetCRD.ClusterConditions)
+			newSummary, appSetClusterConditions := r.generateSummary(appSetClusterStatusMap, appset)
 			newAppSetReport = r.newAppSetReport(appsetNs, appsetName, appSetCRD.Resources, appSetClusterConditions, newSummary)
 		} else {
-			newSummary, appSetClusterConditions := r.generateSummary(appSetClusterStatusMap, appset, []appsetreportV1alpha1.ClusterCondition{})
+			newSummary, appSetClusterConditions := r.generateSummary(appSetClusterStatusMap, appset)
 			newAppSetReport = r.newAppSetReport(appsetNs, appsetName, []appsetreportV1alpha1.ResourceRef{}, appSetClusterConditions, newSummary)
 		}
 
@@ -333,7 +423,7 @@ func (r *ReconcilePullModelAggregation) generateAppSetReport(appSetClusterStatus
 }
 
 func (r *ReconcilePullModelAggregation) generateSummary(appSetClusterStatusMap map[AppSet]map[Cluster]OverallStatus,
-	appset AppSet, appSetCRDConditions []appsetreportV1alpha1.ClusterCondition) (appsetreportV1alpha1.ReportSummary, []appsetreportV1alpha1.ClusterCondition) {
+	appset AppSet) (appsetreportV1alpha1.ReportSummary, []appsetreportV1alpha1.ClusterCondition) {
 	var (
 		synced, notSynced, healthy, notHealthy, inProgress, clusters int
 	)
@@ -383,18 +473,6 @@ func (r *ReconcilePullModelAggregation) generateSummary(appSetClusterStatusMap m
 	}
 	if clusters != (synced+notSynced) || clusters != (healthy+notHealthy) {
 		klog.Warningf("Total number of clusters does not add up, %v", summary)
-	}
-
-	// Combine cluster conditions from manifestwork and yaml
-	for _, yamlConditions := range appSetCRDConditions {
-		klog.V(1).Info("AppSetCRD conditions item: ", yamlConditions)
-
-		if cCond, ok := appSetClusterConditionsMap[yamlConditions.Cluster]; ok {
-			cCond.Conditions = yamlConditions.Conditions
-			appSetClusterConditionsMap[yamlConditions.Cluster] = cCond
-		} else {
-			appSetClusterConditionsMap[yamlConditions.Cluster] = yamlConditions
-		}
 	}
 
 	res := make([]appsetreportV1alpha1.ClusterCondition, 0, len(appSetClusterConditionsMap))
@@ -496,7 +574,7 @@ func (r *ReconcilePullModelAggregation) cleanupReports() error {
 	var missingAppset []types.NamespacedName
 
 	for _, file := range files {
-		appsetName := strings.TrimRight(file.Name(), ".yaml")
+		appsetName := strings.TrimSuffix(file.Name(), ".yaml")
 		names := strings.Split(appsetName, "_")
 		klog.V(1).Info("Checking file ", appsetName)
 
@@ -505,11 +583,7 @@ func (r *ReconcilePullModelAggregation) cleanupReports() error {
 			klog.V(1).Info("Check if corresponding appset exists for YAML, ", appsetNsN)
 
 			existingAppset := &unstructured.Unstructured{}
-			existingAppset.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "argoproj.io",
-				Version: "v1alpha1",
-				Kind:    "ApplicationSet",
-			})
+			existingAppset.SetGroupVersionKind(AppSetGVR)
 
 			if err := r.Get(context.TODO(), appsetNsN, existingAppset); err != nil {
 				if errors.IsNotFound(err) {
@@ -553,11 +627,7 @@ func (r *ReconcilePullModelAggregation) cleanupOrphanReports() error {
 		klog.V(1).Info("Check if corresponding appset exists for Report, ", appsetReport.Namespace, appsetReport.Name)
 
 		existingAppset := &unstructured.Unstructured{}
-		existingAppset.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "argoproj.io",
-			Version: "v1alpha1",
-			Kind:    "ApplicationSet",
-		})
+		existingAppset.SetGroupVersionKind(AppSetGVR)
 
 		if err := r.Get(context.TODO(), types.NamespacedName{Namespace: appsetReport.Namespace,
 			Name: appsetReport.Name}, existingAppset); err != nil {
@@ -619,6 +689,50 @@ func (r *ReconcilePullModelAggregation) cleanupOrphanReports() error {
 	}
 
 	return nil
+}
+
+// Recursive func to handle matrix generators if used
+func (r *ReconcilePullModelAggregation) getPlacementClusters(
+	generators []interface{}, appsetNs string, appsetName string, appsetClusters map[string]map[string]bool) {
+	for _, generator := range generators {
+		if generator.(map[string]interface{})["clusterDecisionResource"] != nil {
+			clusterDecisionResourceGen := generator.(map[string]interface{})["clusterDecisionResource"]
+			if clusterDecisionResourceGen.(map[string]interface{})["labelSelector"] != nil {
+				labelSelector := clusterDecisionResourceGen.(map[string]interface{})["labelSelector"]
+				if labelSelector.(map[string]interface{})["matchLabels"] != nil {
+					matchLabels := labelSelector.(map[string]interface{})["matchLabels"]
+					if matchLabels.(map[string]interface{})["cluster.open-cluster-management.io/placement"] != nil {
+						placementName := matchLabels.(map[string]interface{})["cluster.open-cluster-management.io/placement"]
+						if placementName != "" {
+							placementDecisionName := placementName.(string) + "-decision-1"
+							placementDecision := &clusterv1beta1.PlacementDecision{}
+							err := r.Get(context.TODO(), types.NamespacedName{
+								Namespace: appsetNs,
+								Name:      placementDecisionName,
+							}, placementDecision)
+							if err != nil {
+								klog.Warningf("Failed to get PlacementDecision namespace: %v ,name: %v",
+									appsetNs, placementDecisionName)
+							} else {
+								appsetClusters[appsetNs+"."+appsetName] = make(map[string]bool)
+								for _, clusterDecision := range placementDecision.Status.Decisions {
+									appsetClusters[appsetNs+"."+appsetName][clusterDecision.ClusterName] = true
+								}
+								break
+							}
+						}
+					}
+				}
+			}
+		} else if generator.(map[string]interface{})["matrix"] != nil {
+			r.getPlacementClusters(
+				generator.(map[string]interface{})["matrix"].(map[string]interface{})["generators"].([]interface{}),
+				appsetNs,
+				appsetName,
+				appsetClusters,
+			)
+		}
+	}
 }
 
 func loadAppSetCRD(pathname string) (*appsetreportV1alpha1.MulticlusterApplicationSetReport, error) {
