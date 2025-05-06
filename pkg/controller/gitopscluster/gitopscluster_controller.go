@@ -906,6 +906,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 			errorOccurred = true
 
 			saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 			continue
 		}
 
@@ -925,8 +926,8 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 					msaExists = true
 				} else {
 					klog.Error("failed to find ManagedServiceAccount created secret application-manager")
-
 					saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 					continue
 				}
 			} else {
@@ -955,6 +956,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				returnErr = err
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 				continue
 			}
 
@@ -973,6 +975,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				returnErr = err
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 				continue
 			}
 		} else {
@@ -986,6 +989,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				returnErr = err
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 				continue
 			}
 		}
@@ -1007,6 +1011,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				returnErr = err
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 				continue
 			}
 		} else if k8errors.IsNotFound(err) {
@@ -1021,6 +1026,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				returnErr = err
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 				continue
 			}
 		} else {
@@ -1028,7 +1034,9 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 
 			errorOccurred = true
 			returnErr = err
+
 			saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+
 			continue
 		}
 
