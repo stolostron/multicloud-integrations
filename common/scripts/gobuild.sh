@@ -28,8 +28,8 @@ shift
 
 set -e
 
-BUILD_GOOS=${GOOS:-linux}
-BUILD_GOARCH=${GOARCH:-amd64}
+BUILD_GOOS=${GOOS:-$(go env GOOS)}
+BUILD_GOARCH=${GOARCH:-$(go env GOARCH)}
 GOBINARY=${GOBINARY:-go}
 BUILDINFO=${BUILDINFO:-""}
 STATIC=${STATIC:-1}
@@ -44,6 +44,8 @@ export CGO_ENABLED=1
 if [[ "${STATIC}" !=  "1" ]];then
     LDFLAGS=""
 fi
+
+echo "Building for OS: ${BUILD_GOOS}, Architecture: ${BUILD_GOARCH}"
 
 time GOOS=${BUILD_GOOS} GOARCH=${BUILD_GOARCH} ${GOBINARY} build \
         ${V} "${GOBUILDFLAGS_ARRAY[@]}" ${GCFLAGS:+-gcflags "${GCFLAGS}"} \
