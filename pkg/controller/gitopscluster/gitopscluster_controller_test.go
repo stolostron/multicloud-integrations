@@ -177,6 +177,97 @@ var (
 		},
 	}
 
+	// Test6 resources
+	test6GitopsServerNamespace6 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-gitops6",
+		},
+	}
+
+	test6ArgoService = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argo-server6",
+			Namespace: test6GitopsServerNamespace6.Name,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":   "argocd",
+				"app.kubernetes.io/component": "server",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:       "10.0.0.16",
+			SessionAffinity: corev1.ServiceAffinityNone,
+			Type:            corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       int32(443),
+					TargetPort: intstr.FromInt(443),
+				},
+			},
+		},
+	}
+
+	test6GitopsPlacement = &clusterv1beta1.Placement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+		},
+		Spec: clusterv1beta1.PlacementSpec{},
+	}
+
+	test6GitopsCluster = &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-cluster-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				Cluster:       "local-cluster",
+				ArgoNamespace: test6GitopsServerNamespace6.Name,
+			},
+			PlacementRef: &corev1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Namespace:  test6GitopsServerNamespace6.Name,
+				Name:       "git-ops-placement-6",
+			},
+		},
+	}
+
+	test6ManagedClusterNamespace6 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster6",
+		},
+	}
+
+	test6ManagedCluster6 = &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster6",
+			Labels: map[string]string{
+				"test-label": "test-value",
+			},
+		},
+		Spec: clusterv1.ManagedClusterSpec{
+			HubAcceptsClient: true,
+		},
+	}
+
+	test6GitopsPlacementDecision = &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-decision-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+			Labels: map[string]string{
+				"cluster.open-cluster-management.io/placement": "git-ops-placement-6",
+			},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: test6ManagedCluster6.Name,
+				},
+			},
+		},
+	}
+
 	// Namespace where GitOpsCluster1 CR is
 	testNamespace1 = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -903,6 +994,56 @@ func TestReconcileCreateSecretInOpenshiftGitops(t *testing.T) {
 
 		g2.Expect(err).ToNot(gomega.BeNil())
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	// Test6 *-cluster-secret and *-application-manager-cluster-secret are not found
+
+	// Create managed cluster namespace
+	c.Create(context.TODO(), test6ManagedClusterNamespace6)
+
+	// Create managed cluster
+	c.Create(context.TODO(), test6ManagedCluster6)
+
+	// Create Gitops namespace
+	c.Create(context.TODO(), test6GitopsServerNamespace6)
+
+	// Create Argo service
+	c.Create(context.TODO(), test6ArgoService)
+
+	// Create Gitops placement
+	c.Create(context.TODO(), test6GitopsPlacement)
+
+	// Creat Gitops placement decision
+	c.Create(context.TODO(), test6GitopsPlacementDecision)
+
+	tempPlacementDecisionObject := &clusterv1beta1.PlacementDecision{}
+	err = c.Get(context.TODO(), types.NamespacedName{
+		Name:      test6GitopsPlacementDecision.Name,
+		Namespace: test6GitopsPlacementDecision.Namespace,
+	}, tempPlacementDecisionObject)
+
+	g.Expect(err).To(gomega.BeNil())
+
+	tempPlacementDecisionObject.Status = clusterv1beta1.PlacementDecisionStatus{
+		Decisions: []clusterv1beta1.ClusterDecision{
+			{
+				ClusterName: test6ManagedCluster6.Name,
+				Reason:      "",
+			},
+		},
+	}
+
+	c.Status().Update(context.TODO(), tempPlacementDecisionObject)
+
+	// Create GitopsCluster
+	c.Create(context.TODO(), test6GitopsCluster)
+
+	// Validate cluster secret is not created in Gitops namespace
+	test6ClusterSecret := expectedSecretCreated(c, types.NamespacedName{
+		Name:      test6ManagedCluster6.Name + "-cluster-secret",
+		Namespace: test6GitopsServerNamespace6.Name,
+	})
+
+	g.Expect(test6ClusterSecret).To(gomega.BeNil())
 }
 
 // test managed cluster secret creation for non OCP clusters
