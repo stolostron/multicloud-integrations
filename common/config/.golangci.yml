@@ -41,6 +41,7 @@ linters:
     - interfacebloat
     - ireturn
     - loggercheck
+    - maintidx
     - musttag
     - mnd
     - nakedret
