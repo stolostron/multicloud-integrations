@@ -887,7 +887,6 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 
 		var newSecret *v1.Secret
 		msaExists := false
-		longLivedSecretExists := false
 		managedClusterSecret := &v1.Secret{}
 		secretObjectKey := types.NamespacedName{
 			Name:      managedCluster.Name + clusterSecretSuffix,
@@ -943,8 +942,6 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 					secretName = managedCluster.Name + "-" + componentName + clusterSecretSuffix
 					managedClusterSecretKey = types.NamespacedName{Name: secretName, Namespace: managedCluster.Name}
 					err = r.Get(context.TODO(), managedClusterSecretKey, managedClusterSecret)
-				} else {
-					longLivedSecretExists = true
 				}
 			}
 
@@ -1041,7 +1038,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 		}
 
 		// Cleanup managed cluster secret from managed cluster namespace
-		if longLivedSecretExists && msaExists {
+		if msaExists {
 			longLivedSecretKey := types.NamespacedName{
 				Name:      managedCluster.Name + clusterSecretSuffix,
 				Namespace: managedCluster.Name,
