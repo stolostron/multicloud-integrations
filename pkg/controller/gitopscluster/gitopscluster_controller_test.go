@@ -1273,6 +1273,7 @@ func TestReconcileCreateSecretInOpenshiftGitops(t *testing.T) {
 
 	// Validate cluster secret is created in Gitops namespace
 	test7ClusterSecret := &corev1.Secret{}
+
 	g.Eventually(func(g2 gomega.Gomega) {
 		err = c.Get(context.TODO(), types.NamespacedName{
 			Name:      test7ManagedCluster7.Name + "-application-manager-cluster-secret",
