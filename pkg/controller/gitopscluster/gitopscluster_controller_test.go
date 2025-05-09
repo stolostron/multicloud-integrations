@@ -177,6 +177,250 @@ var (
 		},
 	}
 
+	// Test6 resources
+	test6GitopsServerNamespace6 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-gitops6",
+		},
+	}
+
+	test6ArgoService = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argo-server6",
+			Namespace: test6GitopsServerNamespace6.Name,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":   "argocd",
+				"app.kubernetes.io/component": "server",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:       "10.0.0.16",
+			SessionAffinity: corev1.ServiceAffinityNone,
+			Type:            corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       int32(443),
+					TargetPort: intstr.FromInt(443),
+				},
+			},
+		},
+	}
+
+	test6GitopsPlacement = &clusterv1beta1.Placement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+		},
+		Spec: clusterv1beta1.PlacementSpec{},
+	}
+
+	test6GitopsCluster = &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-cluster-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				Cluster:       "local-cluster",
+				ArgoNamespace: test6GitopsServerNamespace6.Name,
+			},
+			PlacementRef: &corev1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Namespace:  test6GitopsServerNamespace6.Name,
+				Name:       "git-ops-placement-6",
+			},
+		},
+	}
+
+	test6ManagedClusterNamespace6 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster6",
+		},
+	}
+
+	test6ManagedCluster6 = &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster6",
+			Labels: map[string]string{
+				"test-label": "test-value",
+			},
+		},
+		Spec: clusterv1.ManagedClusterSpec{
+			HubAcceptsClient: true,
+		},
+	}
+
+	test6GitopsPlacementDecision = &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-decision-6",
+			Namespace: test6GitopsServerNamespace6.Name,
+			Labels: map[string]string{
+				"cluster.open-cluster-management.io/placement": "git-ops-placement-6",
+			},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: test6ManagedCluster6.Name,
+				},
+			},
+		},
+	}
+
+	// Test7 resources
+	test7GitopsServerNamespace7 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-gitops7",
+		},
+	}
+
+	test7ArgoService = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argo-server7",
+			Namespace: test7GitopsServerNamespace7.Name,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":   "argocd",
+				"app.kubernetes.io/component": "server",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:       "10.0.0.17",
+			SessionAffinity: corev1.ServiceAffinityNone,
+			Type:            corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       int32(443),
+					TargetPort: intstr.FromInt(443),
+				},
+			},
+		},
+	}
+
+	test7GitopsPlacement = &clusterv1beta1.Placement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-7",
+			Namespace: test7GitopsServerNamespace7.Name,
+		},
+		Spec: clusterv1beta1.PlacementSpec{},
+	}
+
+	test7GitopsCluster = &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-cluster-7",
+			Namespace: test7GitopsServerNamespace7.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				Cluster:       "local-cluster",
+				ArgoNamespace: test7GitopsServerNamespace7.Name,
+			},
+			PlacementRef: &corev1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Namespace:  test7GitopsServerNamespace7.Name,
+				Name:       "git-ops-placement-7",
+			},
+		},
+	}
+
+	test7ManagedClusterNamespace7 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster7",
+		},
+	}
+
+	test7ManagedCluster7 = &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster7",
+			Labels: map[string]string{
+				"test-label": "test-value",
+			},
+		},
+		Spec: clusterv1.ManagedClusterSpec{
+			HubAcceptsClient: true,
+			ManagedClusterClientConfigs: []clusterv1.ClientConfig{
+				{
+					URL:      "https://local-cluster:6443",
+					CABundle: []byte("abc"),
+				},
+			},
+		},
+	}
+
+	test7GitopsPlacementDecision = &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "git-ops-placement-decision-7",
+			Namespace: test7GitopsServerNamespace7.Name,
+			Labels: map[string]string{
+				"cluster.open-cluster-management.io/placement": "git-ops-placement-7",
+			},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: test7ManagedCluster7.Name,
+				},
+			},
+		},
+	}
+
+	test7ManagedClusterSecret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster7-cluster-secret",
+			Namespace: test7ManagedCluster7.Name,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/secret-type": "acm-cluster",
+			},
+		},
+		StringData: map[string]string{
+			"name":   test7ManagedCluster7.Name,
+			"server": "https://api.cluster7.com:6443",
+			"config": "{\"bearerToken\": \"fakeToken1\", \"tlsClientConfig\": {\"insecure\": true}}",
+		},
+	}
+
+	test7ManagedServiceAccount = &authv1beta1.ManagedServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "application-manager",
+			Namespace: test7ManagedCluster7.Name,
+		},
+		Spec: authv1beta1.ManagedServiceAccountSpec{
+			Rotation: authv1beta1.ManagedServiceAccountRotation{
+				Enabled: true,
+				Validity: metav1.Duration{
+					Duration: time.Hour * 168,
+				},
+			},
+		},
+	}
+
+	test7MSASecret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "application-manager",
+			Namespace: test7ManagedCluster7.Name,
+		},
+		StringData: map[string]string{
+			"token":  "token1",
+			"ca.crt": "caCrt1",
+		},
+	}
+
+	test7GitopsNSSecret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster7-application-manager-cluster-secret",
+			Namespace: test7ManagedCluster7.Name,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/secret-type": "acm-cluster",
+			},
+		},
+		StringData: map[string]string{
+			"name":   test7ManagedCluster7.Name,
+			"server": "https://api.cluster7.com:6443",
+			"config": "{\"bearerToken\": \"fakeToken1\", \"tlsClientConfig\": {\"insecure\": true}}",
+		},
+	}
+
 	// Namespace where GitOpsCluster1 CR is
 	testNamespace1 = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -903,6 +1147,141 @@ func TestReconcileCreateSecretInOpenshiftGitops(t *testing.T) {
 
 		g2.Expect(err).ToNot(gomega.BeNil())
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	// Test6 *-cluster-secret and *-application-manager-cluster-secret are not found
+
+	// Create managed cluster namespace
+	c.Create(context.TODO(), test6ManagedClusterNamespace6)
+
+	// Create managed cluster
+	c.Create(context.TODO(), test6ManagedCluster6)
+
+	// Create Gitops namespace
+	c.Create(context.TODO(), test6GitopsServerNamespace6)
+
+	// Create Argo service
+	c.Create(context.TODO(), test6ArgoService)
+
+	// Create Gitops placement
+	c.Create(context.TODO(), test6GitopsPlacement)
+
+	// Creat Gitops placement decision
+	c.Create(context.TODO(), test6GitopsPlacementDecision)
+
+	g.Eventually(func(g2 gomega.Gomega) {
+		tempPlacementDecisionObject := expectedPlacementDecisionCreated(c,
+			types.NamespacedName{
+				Name:      test6GitopsPlacementDecision.Name,
+				Namespace: test6GitopsPlacementDecision.Namespace,
+			},
+		)
+
+		tempPlacementDecisionObject.Status = clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: test6ManagedCluster6.Name,
+					Reason:      "",
+				},
+			},
+		}
+
+		g2.Expect(c.Status().Update(context.TODO(), tempPlacementDecisionObject)).Should(gomega.Succeed())
+	}, 60*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	// Create GitopsCluster
+	c.Create(context.TODO(), test6GitopsCluster)
+
+	// Validate cluster secret is not created in Gitops namespace
+	test6ClusterSecret := expectedSecretCreated(c, types.NamespacedName{
+		Name:      test6ManagedCluster6.Name + "-cluster-secret",
+		Namespace: test6GitopsServerNamespace6.Name,
+	})
+
+	g.Expect(test6ClusterSecret).To(gomega.BeNil())
+
+	// Test 7 Long lived secret clean up
+
+	// Create managed cluster namespace
+	c.Create(context.TODO(), test7ManagedClusterNamespace7)
+
+	// Create managed cluster
+	c.Create(context.TODO(), test7ManagedCluster7)
+
+	// Create Gitops namespace
+	c.Create(context.TODO(), test7GitopsServerNamespace7)
+
+	// Create Argo service
+	err = c.Create(context.TODO(), test7ArgoService)
+
+	// Create Gitops placement
+	c.Create(context.TODO(), test7GitopsPlacement)
+
+	// Creat Gitops placement decision
+	c.Create(context.TODO(), test7GitopsPlacementDecision)
+
+	g.Eventually(func(g2 gomega.Gomega) {
+		tempPlacementDecisionObject := expectedPlacementDecisionCreated(c,
+			types.NamespacedName{
+				Name:      test7GitopsPlacementDecision.Name,
+				Namespace: test7GitopsPlacementDecision.Namespace,
+			},
+		)
+
+		tempPlacementDecisionObject.Status = clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: test7ManagedCluster7.Name,
+					Reason:      "",
+				},
+			},
+		}
+
+		g2.Expect(c.Status().Update(context.TODO(), tempPlacementDecisionObject)).Should(gomega.Succeed())
+	}, 60*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	// Create MSA
+	c.Create(context.TODO(), test7ManagedServiceAccount)
+
+	g.Eventually(func(g2 gomega.Gomega) {
+		updateManagedServiceAccount := expectedMSACreated(c, types.NamespacedName{
+			Name:      "application-manager",
+			Namespace: test7ManagedCluster7.Name,
+		})
+		test7etime := metav1.NewTime(time.Now().Add(1 * time.Hour))
+		updateManagedServiceAccount.Status = authv1beta1.ManagedServiceAccountStatus{
+			TokenSecretRef: &authv1beta1.SecretRef{
+				Name:                 "application-manager",
+				LastRefreshTimestamp: metav1.Now(),
+			},
+			ExpirationTimestamp: &test7etime,
+		}
+
+		g2.Expect(c.Status().Update(context.TODO(), updateManagedServiceAccount)).Should(gomega.Succeed())
+	}, 60*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	// Create managed cluster secret
+	c.Create(context.TODO(), test7ManagedClusterSecret)
+
+	// Create MSA secret
+	c.Create(context.TODO(), test7MSASecret)
+
+	// Create Gitops namespace cluster secret
+	c.Create(context.TODO(), test7GitopsNSSecret)
+
+	// Create GitopsCluster
+	c.Create(context.TODO(), test7GitopsCluster)
+
+	// Validate cluster secret is created in Gitops namespace
+	test7ClusterSecret := &corev1.Secret{}
+
+	g.Eventually(func(g2 gomega.Gomega) {
+		err = c.Get(context.TODO(), types.NamespacedName{
+			Name:      test7ManagedCluster7.Name + "-application-manager-cluster-secret",
+			Namespace: test7GitopsServerNamespace7.Name,
+		}, test7ClusterSecret)
+
+		g2.Expect(err).ToNot(gomega.BeNil())
+	}, 60*time.Second, 1*time.Second).Should(gomega.Succeed())
 }
 
 // test managed cluster secret creation for non OCP clusters
@@ -1036,6 +1415,48 @@ func expectedSecretCreated(c client.Client, expectedSecretKey types.NamespacedNa
 
 		if err == nil {
 			return secret
+		}
+
+		if timeout > 30 {
+			return nil
+		}
+
+		time.Sleep(time.Second * 3)
+
+		timeout += 3
+	}
+}
+
+func expectedMSACreated(c client.Client, expectedMSAKey types.NamespacedName) *authv1beta1.ManagedServiceAccount {
+	timeout := 0
+
+	for {
+		msa := &authv1beta1.ManagedServiceAccount{}
+		err := c.Get(context.TODO(), expectedMSAKey, msa)
+
+		if err == nil {
+			return msa
+		}
+
+		if timeout > 30 {
+			return nil
+		}
+
+		time.Sleep(time.Second * 3)
+
+		timeout += 3
+	}
+}
+
+func expectedPlacementDecisionCreated(c client.Client, expectedPlacementDecisionKey types.NamespacedName) *clusterv1beta1.PlacementDecision {
+	timeout := 0
+
+	for {
+		pd := &clusterv1beta1.PlacementDecision{}
+		err := c.Get(context.TODO(), expectedPlacementDecisionKey, pd)
+
+		if err == nil {
+			return pd
 		}
 
 		if timeout > 30 {
