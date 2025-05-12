@@ -16,6 +16,18 @@ ENV OPERATOR=/usr/local/bin/multicloud-integrations \
     USER_UID=1001 \
     USER_NAME=multicloud-integrations
 
+LABEL \
+    name="cluster-permission" \
+    com.redhat.component="cluster-permission" \
+    description="Cluster permission controller" \
+    maintainer="acm-contact@redhat.com" \
+    io.k8s.description="Cluster permission controller" \
+    org.label-schema.license="Red Hat Advanced Cluster Management for Kubernetes EULA" \
+    org.label-schema.schema-version="1.0" \
+    summary="Cluster permission controller" \
+    io.k8s.display-name="Cluster permission" \
+    io.openshift.tags="mce acm cluster-permission"
+
 # install operator binary
 COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopscluster /usr/local/bin/gitopscluster
 COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopssyncresc /usr/local/bin/gitopssyncresc
