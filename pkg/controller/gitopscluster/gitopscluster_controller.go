@@ -1090,7 +1090,7 @@ func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretInArgo(argoNamespace 
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      managedCluster.Name + clusterSecretSuffix,
+				Name:      managedCluster.Name + "-" + componentName + clusterSecretSuffix,
 				Namespace: argoNamespace,
 				Labels: map[string]string{
 					"argocd.argoproj.io/secret-type":                 "cluster",
