@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	manifestWorkV1 "open-cluster-management.io/api/work/v1"
 	appsubapi "open-cluster-management.io/multicloud-integrations/pkg/apis"
 	multiclusterappsetreport "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
@@ -111,6 +112,12 @@ func RunManager() {
 
 	// Setup Multiclusterappsetreport Scheme for manager
 	if err := multiclusterappsetreport.AddToScheme(mgr.GetScheme()); err != nil {
+		klog.Error(err, "")
+		os.Exit(1)
+	}
+
+	// Setup PlacementDecision Scheme for manager
+	if err := clusterv1beta1.AddToScheme(mgr.GetScheme()); err != nil {
 		klog.Error(err, "")
 		os.Exit(1)
 	}
