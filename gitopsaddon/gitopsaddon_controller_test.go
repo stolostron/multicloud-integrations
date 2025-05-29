@@ -33,11 +33,11 @@ import (
 
 var (
 	SyncInterval        = 10
-	GitopsOperatorImage = "quay.io/argoprojlabs/argocd-operator@sha256:d7f62482426bd8a1ff99f193f199b11e295a1f9093a8b65fa14ada7eec77e1a3"
+	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a932c0397dcd29a75216a7d0467a640decf8651d41afe74379860035a93a6bd"
 	GitopsOperatorNS    = "openshift-gitops-operator"
-	GitopsImage         = "quay.io/argoproj/argocd@sha256:42a488667bc07b70b16a672f632a5d3f484a262ae5f66b5d161c5be2d905db2f"
+	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:94e19aca2c330ec15a7de3c2d9309bb2e956320ef29dae2df3dfe6b9cad4ed39"
 	GitopsNS            = "openshift-gitops"
-	RedisImage          = "redis:7@sha256:ca65ea36ae16e709b0f1c7534bc7e5b5ac2e5bb3c97236e4fec00e3625eb678d"
+	RedisImage          = "registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371"
 	ReconcileScope      = "Single-Namespace"
 	HTTP_PROXY          = ""
 	HTTPS_PROXY         = ""
@@ -138,11 +138,9 @@ func TestGitopsAddon(t *testing.T) {
 		NO_PROXY:            NO_PROXY,
 		ACTION:              ACTION,
 	}
-	podNS := GetPodNamespace()
 
-	if podNS > "" {
-		g.Expect(gitopsAddonReconciler.createNamespace(podNS)).NotTo(HaveOccurred())
-	}
+	podNS := GetPodNamespace()
+	g.Expect(gitopsAddonReconciler.createDepResources(podNS)).NotTo(HaveOccurred())
 
 	g.Expect(gitopsAddonReconciler.createNamespace(GitopsOperatorNS)).NotTo(HaveOccurred())
 	g.Expect(gitopsAddonReconciler.createNamespace(GitopsNS)).NotTo(HaveOccurred())
@@ -194,6 +192,49 @@ func (r *GitopsAddonReconciler) getServiceAccount(namespace, name string) error 
 	return r.Get(context.TODO(), types.NamespacedName{Namespace: namespace, Name: name}, sa)
 }
 
+func (r *GitopsAddonReconciler) createDepResources(podNamespace string) error {
+	// create app namespace
+	appNS := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "app",
+		},
+	}
+
+	if err := r.Create(context.TODO(), appNS); err != nil {
+		return err
+	}
+
+	// create gitops addon default namespace
+	// podNamespace == "", the unit test is not running inside of k8s cluster pod
+	// podNamespace > "", the unit test is running inside of k8s cluster pod (cpaas prow)
+	if podNamespace == "" {
+		podNamespace = "open-cluster-management-agent-addon"
+	}
+	gitopsNS := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: podNamespace,
+		},
+	}
+
+	if err := r.Create(context.TODO(), gitopsNS); err != nil {
+		return err
+	}
+
+	// create gitops addon image pull secret
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: podNamespace,
+			Name:      "open-cluster-management-image-pull-credentials",
+		},
+	}
+
+	if err := r.Create(context.TODO(), secret); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (r *GitopsAddonReconciler) createNamespace(nameSpaceName string) error {
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -206,17 +247,6 @@ func (r *GitopsAddonReconciler) createNamespace(nameSpaceName string) error {
 	}
 
 	if err := r.Create(context.TODO(), namespace); err != nil {
-		return err
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: nameSpaceName,
-			Name:      "open-cluster-management-image-pull-credentials",
-		},
-	}
-
-	if err := r.Create(context.TODO(), secret); err != nil {
 		return err
 	}
 

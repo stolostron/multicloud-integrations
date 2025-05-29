@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	k8syaml "sigs.k8s.io/yaml"
@@ -672,6 +673,15 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 		}
 	}
 
+	// If on the hcp hosted cluster, there is no klusterlet operator
+	// As a result, the open-cluster-management-image-pull-credentials secret is not automatically synced up
+	// to the new namespace even though the addon.open-cluster-management.io/namespace: true label is specified
+	// To support all kinds of clusters, we proactively copy the original git addon open-cluster-management-image-pull-credentials secret to the new namespace
+	err = r.copyImagePullSecret(nameSpaceKey)
+	if err != nil {
+		return err
+	}
+
 	// Waiting for the two resources ready
 	// 1. the image pull secret `open-cluster-management-image-pull-credentials`  is generated
 	// 2. the image pull secret ref is updated to the openshift-gitops/default SA
@@ -714,6 +724,52 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	klog.Errorf("Timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
 
 	return fmt.Errorf("timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
+}
+
+func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.NamespacedName) error {
+	secretName := "open-cluster-management-image-pull-credentials"
+	secret := &corev1.Secret{}
+	gitopsAddonNs := utils.GetComponentNamespace()
+
+	// Get the original gitops addon image pull secret
+	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: gitopsAddonNs}, secret)
+	if err != nil {
+		klog.Errorf("gitops addon image pull secret no found. secret: %v/%v, err: %v", gitopsAddonNs, secretName, err)
+		return err
+	}
+
+	// Prepare the new Secret
+	newSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        secretName,
+			Namespace:   nameSpaceKey.Name,
+			Labels:      secret.Labels,
+			Annotations: secret.Annotations,
+		},
+		Data:       secret.Data,
+		StringData: secret.StringData,
+		Type:       secret.Type,
+	}
+
+	newSecret.ObjectMeta.UID = ""
+	newSecret.ObjectMeta.ResourceVersion = ""
+	newSecret.ObjectMeta.CreationTimestamp = metav1.Time{}
+	newSecret.ObjectMeta.DeletionTimestamp = nil
+	newSecret.ObjectMeta.DeletionGracePeriodSeconds = nil
+	newSecret.ObjectMeta.OwnerReferences = nil
+	newSecret.ObjectMeta.ManagedFields = nil
+
+	// Create the new Secret in the target namespace
+	err = r.Create(context.TODO(), newSecret)
+	if err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create target secret %s/%s: %w", nameSpaceKey.Name, secretName, err)
+		}
+	}
+
+	fmt.Printf("Successfully copied secret %s/%s to %s/%s\n", secretName, gitopsAddonNs, nameSpaceKey.Name, secretName)
+
+	return nil
 }
 
 func (r *GitopsAddonReconciler) patchDefaultSA(saKey types.NamespacedName) error {
