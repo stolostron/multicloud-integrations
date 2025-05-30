@@ -62,11 +62,11 @@ var (
 	metricsPort = 8387
 
 	// The default values for the latest openshift gitops operator. It requires to refresh in each ACM major release GA
-	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a18db52d160d864f06acf9f995212779fb7c7ecd113363ef7205a7509d80c7f"
+	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a932c0397dcd29a75216a7d0467a640decf8651d41afe74379860035a93a6bd"
 	GitopsOperatorNS    = "openshift-gitops-operator"
-	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:2808a4a071a0ffa6960e40cdec1d2d2905d6116fe26c553612edabc7c2235a34"
+	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:94e19aca2c330ec15a7de3c2d9309bb2e956320ef29dae2df3dfe6b9cad4ed39"
 	GitopsNS            = "openshift-gitops"
-	RedisImage          = "registry.redhat.io/rhel8/redis-6@sha256:5250d644e80aea794b0f732e9285883a4348dace83557f177f64d78fe4dcabd0"
+	RedisImage          = "registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371"
 	ReconcileScope      = "Single-Namespace"
 	HTTP_PROXY          = ""
 	HTTPS_PROXY         = ""
