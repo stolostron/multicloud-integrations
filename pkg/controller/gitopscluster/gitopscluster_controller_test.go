@@ -446,6 +446,24 @@ var (
 		},
 	}
 
+	managedClusterNamespace20 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster20",
+		},
+	}
+
+	managedClusterNamespace30 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster30",
+		},
+	}
+
+	managedClusterNamespace40 = &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster40",
+		},
+	}
+
 	argocdServerNamespace1 = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "argocd1",
@@ -876,6 +894,59 @@ func TestReconcileCreateSecretInArgo(t *testing.T) {
 		err = c.Get(context.TODO(), gitOpsMsaClusterSecretKey, clusterSecret)
 
 		g2.Expect(err).To(gomega.BeNil())
+	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+
+	c.Create(context.TODO(), managedClusterNamespace20)
+	c.Create(context.TODO(), managedClusterNamespace30)
+	c.Create(context.TODO(), managedClusterNamespace40)
+
+	mc20 := managedCluster1.DeepCopy()
+	mc20.Name = managedClusterNamespace20.Name
+	mc20.Spec.ManagedClusterClientConfigs = []clusterv1.ClientConfig{{URL: "https://local-cluster:6443", CABundle: []byte("abc")}}
+	c.Create(context.TODO(), mc20)
+
+	mc30 := managedCluster1.DeepCopy()
+	mc30.Name = managedClusterNamespace30.Name
+	mc30.Spec.ManagedClusterClientConfigs = []clusterv1.ClientConfig{{URL: "https://local-cluster:6443", CABundle: []byte("abc")}}
+	c.Create(context.TODO(), mc30)
+
+	mc40 := managedCluster1.DeepCopy()
+	mc40.Name = managedClusterNamespace40.Name
+	mc40.Spec.ManagedClusterClientConfigs = []clusterv1.ClientConfig{{URL: "https://local-cluster:6443", CABundle: []byte("abc")}}
+	c.Create(context.TODO(), mc40)
+
+	c.Get(context.TODO(), client.ObjectKeyFromObject(pmDC), pmDC)
+	cd20 := &clusterv1beta1.ClusterDecision{
+		ClusterName: managedClusterNamespace20.Name,
+		Reason:      "OK",
+	}
+	cd30 := &clusterv1beta1.ClusterDecision{
+		ClusterName: managedClusterNamespace30.Name,
+		Reason:      "OK",
+	}
+	cd40 := &clusterv1beta1.ClusterDecision{
+		ClusterName: managedClusterNamespace40.Name,
+		Reason:      "OK",
+	}
+	pmDC.Status = clusterv1beta1.PlacementDecisionStatus{
+		Decisions: []clusterv1beta1.ClusterDecision{
+			*cd20, *cd30, *cd40,
+		},
+	}
+	c.Status().Update(context.TODO(), pmDC)
+	gc3 := gitOpsCluster2.DeepCopy()
+	c.Create(context.TODO(), gc3)
+
+	g.Eventually(func(g2 gomega.Gomega) {
+		updated := &gitopsclusterV1beta1.GitOpsCluster{}
+		err := c.Get(context.TODO(), client.ObjectKeyFromObject(gc3), updated)
+		g2.Expect(err).ToNot(gomega.HaveOccurred())
+		g2.Expect(updated.Status.Phase).To(gomega.Equal("failed"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster20"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster30"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster40"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("Secret"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("not found"))
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 }
 
