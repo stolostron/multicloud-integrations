@@ -86,7 +86,10 @@ var _ reconcile.Reconciler = &ReconcileGitOpsCluster{}
 
 var errInvalidPlacementRef = errors.New("invalid placement reference")
 
-const clusterSecretSuffix = "-cluster-secret"
+const (
+	clusterSecretSuffix = "-cluster-secret"
+	maxStatusMsgLen     = 128 * 1024
+)
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
@@ -438,7 +441,13 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 		instance.Status.LastUpdateTime = metav1.Now()
 		instance.Status.Phase = "failed"
-		instance.Status.Message = err.Error()
+
+		msg := err.Error()
+		if len(msg) > maxStatusMsgLen {
+			msg = msg[:maxStatusMsgLen]
+		}
+
+		instance.Status.Message = msg
 
 		err2 := r.Client.Status().Update(context.TODO(), instance)
 
@@ -871,7 +880,7 @@ const componentName = "application-manager"
 func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster,
 	orphanSecretsList map[types.NamespacedName]string, createBlankClusterSecrets bool) error {
-	returnErr := errors.New("")
+	var returnErrs error
 	errorOccurred := false
 	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
 
@@ -899,9 +908,10 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 
 		// Check if there are existing non-acm created cluster secrets
 		if len(nonAcmClusterSecrets[managedCluster.Name]) > 0 {
-			returnErr = fmt.Errorf("founding existing non-ACM ArgoCD clusters secrets for cluster: %v", managedCluster)
+			returnErr := fmt.Errorf("founding existing non-ACM ArgoCD clusters secrets for cluster: %v", managedCluster)
 			klog.Error(returnErr.Error())
 
+			returnErrs = errors.Join(returnErrs, returnErr)
 			errorOccurred = true
 
 			saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
@@ -950,7 +960,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				klog.Error("failed to get managed cluster secret. err: ", err.Error())
 
 				errorOccurred = true
-				returnErr = err
+				returnErrs = errors.Join(returnErrs, err)
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -969,7 +979,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				klog.Error("failed to create managed cluster secret. err: ", err.Error())
 
 				errorOccurred = true
-				returnErr = err
+				returnErrs = errors.Join(returnErrs, err)
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -983,7 +993,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				klog.Error("failed to create managed cluster secret. err: ", err.Error())
 
 				errorOccurred = true
-				returnErr = err
+				returnErrs = errors.Join(returnErrs, err)
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -1005,7 +1015,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				klog.Errorf("failed to update managed cluster secret. name: %v/%v, error: %v", newSecret.Namespace, newSecret.Name, err)
 
 				errorOccurred = true
-				returnErr = err
+				returnErrs = errors.Join(returnErrs, err)
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -1020,7 +1030,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 				klog.Errorf("failed to create managed cluster secret. name: %v/%v, error: %v", newSecret.Namespace, newSecret.Name, err)
 
 				errorOccurred = true
-				returnErr = err
+				returnErrs = errors.Join(returnErrs, err)
 
 				saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -1030,7 +1040,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 			klog.Errorf("failed to get managed cluster secret. name: %v/%v, error: %v", newSecret.Namespace, newSecret.Name, err)
 
 			errorOccurred = true
-			returnErr = err
+			returnErrs = errors.Join(returnErrs, err)
 
 			saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
 
@@ -1067,7 +1077,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 		return nil
 	}
 
-	return returnErr
+	return returnErrs
 }
 
 func saveClusterSecret(orphanSecretsList map[types.NamespacedName]string, secretObjectKey, msaSecretObjectKey types.NamespacedName) {

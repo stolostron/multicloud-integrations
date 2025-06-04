@@ -109,6 +109,23 @@ else
     echo "GitOpsCluster FAILED: cluster1-cluster-secret not updated"
     exit 1
 fi
+# Test GitOpsCluster error
+kubectl -n argocd patch gitopscluster argo-ocm-importer --type merge -p '{"spec":{"createBlankClusterSecrets":false}}'
+sleep 20s
+if kubectl -n argocd get gitopsclusters argo-ocm-importer -o yaml | grep "phase: failed"; then
+    echo "GitOpsCluster: status failed"
+else
+    echo "GitOpsCluster FAILED: status not failed"
+    exit 1
+fi
+if kubectl -n argocd get gitopsclusters argo-ocm-importer -o yaml | grep "not found"; then
+    echo "GitOpsCluster: message not found"
+else
+    echo "GitOpsCluster FAILED: message not not found"
+    exit 1
+fi
+kubectl -n argocd patch gitopscluster argo-ocm-importer --type merge -p '{"spec":{"createBlankClusterSecrets":true}}'
+sleep 20s
 
 ### Propagation
 echo "TEST Propagation"
