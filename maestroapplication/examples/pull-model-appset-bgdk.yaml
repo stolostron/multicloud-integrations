@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: bgdk-app-set
+  namespace: openshift-gitops
+spec:
+  generators:
+  - clusterDecisionResource:
+      configMapRef: acm-placement
+      labelSelector:
+        matchLabels:
+          cluster.open-cluster-management.io/placement: all-openshift-clusters
+      requeueAfterSeconds: 30
+  template:
+    metadata:
+      annotations:
+        apps.open-cluster-management.io/ocm-managed-cluster: '{{name}}'
+        apps.open-cluster-management.io/ocm-managed-cluster-app-namespace: openshift-gitops
+        argocd.argoproj.io/skip-reconcile: "true"
+      labels:
+        apps.open-cluster-management.io/pull-to-ocm-managed-cluster: "true"
+      name: '{{name}}-bgdk-app'
+    spec:
+      destination:
+        namespace: bgdk
+        server: https://kubernetes.default.svc
+      project: default
+      source:
+        path: apps/bgd/overlays/bgdk
+        repoURL: https://github.com/redhat-developer-demos/openshift-gitops-examples
+        targetRevision: HEAD
+      syncPolicy:
+        automated: {}
+        syncOptions:
+        - CreateNamespace=true

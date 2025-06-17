@@ -156,7 +156,12 @@ func (mapper *placementDecisionMapper) Map(ctx context.Context, obj *clusterv1be
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New("gitopscluster-controller", mgr, controller.Options{Reconciler: r})
+	skipValidation := true
+	c, err := controller.New("gitopscluster-controller", mgr, controller.Options{
+		Reconciler:         r,
+		SkipNameValidation: &skipValidation,
+	})
+
 	if err != nil {
 		return err
 	}

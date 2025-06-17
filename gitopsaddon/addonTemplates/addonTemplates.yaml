@@ -27,7 +27,7 @@ spec:
                   serviceAccountName: gitops-addon
                   containers:
                     - name: gitops-addon
-                      image: quay.io/xiangjingli/multicloud-integrations:gitopsaddon-10
+                      image: quay.io/xiangjingli/multicloud-integrations:maestro-integration-4
                       imagePullPolicy: IfNotPresent
                       securityContext:
                         readOnlyRootFilesystem: true
