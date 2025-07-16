@@ -49,9 +49,9 @@ type GitopsAddonAgentOptions struct {
 
 var options = GitopsAddonAgentOptions{
 	MetricsAddr:                 "",
-	LeaderElectionLeaseDuration: 137 * time.Second,
-	LeaderElectionRenewDeadline: 107 * time.Second,
-	LeaderElectionRetryPeriod:   26 * time.Second,
+	LeaderElectionLeaseDuration: 60 * time.Second,
+	LeaderElectionRenewDeadline: 10 * time.Second,
+	LeaderElectionRetryPeriod:   2 * time.Second,
 	SyncInterval:                60,
 }
 
@@ -95,34 +95,6 @@ func main() {
 		"metrics-addr",
 		options.MetricsAddr,
 		"The address the metric endpoint binds to.",
-	)
-
-	flag.DurationVar(
-		&options.LeaderElectionLeaseDuration,
-		"leader-election-lease-duration",
-		options.LeaderElectionLeaseDuration,
-		"The duration that non-leader candidates will wait after observing a leadership "+
-			"renewal until attempting to acquire leadership of a led but unrenewed leader "+
-			"slot. This is effectively the maximum duration that a leader can be stopped "+
-			"before it is replaced by another candidate. This is only applicable if leader "+
-			"election is enabled.",
-	)
-
-	flag.DurationVar(
-		&options.LeaderElectionRenewDeadline,
-		"leader-election-renew-deadline",
-		options.LeaderElectionRenewDeadline,
-		"The interval between attempts by the acting master to renew a leadership slot "+
-			"before it stops leading. This must be less than or equal to the lease duration. "+
-			"This is only applicable if leader election is enabled.",
-	)
-
-	flag.DurationVar(
-		&options.LeaderElectionRetryPeriod,
-		"leader-election-retry-period",
-		options.LeaderElectionRetryPeriod,
-		"The duration the clients should wait between attempting acquisition and renewal "+
-			"of a leadership. This is only applicable if leader election is enabled.",
 	)
 
 	flag.IntVar(
@@ -213,12 +185,11 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: fmt.Sprintf("%s:%d", metricsHost, metricsPort),
 		},
-		LeaderElection:          enableLeaderElection,
-		LeaderElectionID:        "gitops-addon-agent-leader.open-cluster-management.io",
-		LeaderElectionNamespace: "kube-system",
-		LeaseDuration:           &options.LeaderElectionLeaseDuration,
-		RenewDeadline:           &options.LeaderElectionRenewDeadline,
-		RetryPeriod:             &options.LeaderElectionRetryPeriod,
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "gitops-addon-agent-leader.open-cluster-management.io",
+		LeaseDuration:    &options.LeaderElectionLeaseDuration,
+		RenewDeadline:    &options.LeaderElectionRenewDeadline,
+		RetryPeriod:      &options.LeaderElectionRetryPeriod,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start gitops addon agent")
