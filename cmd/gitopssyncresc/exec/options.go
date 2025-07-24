@@ -23,6 +23,7 @@ import (
 // GitOpsClusterCMDOptions for command line flag parsing
 type GitOpsSyncRescCMDOptions struct {
 	MetricsAddr                 string
+	SearchBatchSize             int
 	SyncInterval                int
 	AppSetResourceDir           string
 	LeaderElectionLeaseDuration time.Duration
@@ -32,6 +33,7 @@ type GitOpsSyncRescCMDOptions struct {
 
 var options = GitOpsSyncRescCMDOptions{
 	MetricsAddr:                 "",
+	SearchBatchSize:             5,
 	SyncInterval:                10,
 	AppSetResourceDir:           "/var/appset-resc",
 	LeaderElectionLeaseDuration: 137 * time.Second,
@@ -48,6 +50,13 @@ func ProcessFlags() {
 		"metrics-addr",
 		options.MetricsAddr,
 		"The address the metric endpoint binds to.",
+	)
+
+	flag.IntVar(
+		&options.SearchBatchSize,
+		"search-batch-size",
+		options.SearchBatchSize,
+		"The max nulber of clusters in a single search query.",
 	)
 
 	flag.IntVar(

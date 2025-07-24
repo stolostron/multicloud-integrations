@@ -98,29 +98,31 @@ func (c *HTTPDataSender) Send(httpClient *http.Client, req *http.Request) (map[s
 }
 
 type GitOpsSyncResource struct {
-	Client      client.Client
-	Interval    int
-	ResourceDir string
-	Token       string
-	DataSender  DataSender
+	Client          client.Client
+	Interval        int
+	ResourceDir     string
+	SearchBatchSize int
+	Token           string
+	DataSender      DataSender
 }
 
 var ExcludeResourceList = []string{"ApplicationSet", "Application", "EndpointSlice", "Pod", "ReplicaSet", "Cluster"}
 
 // Add creates a new argocd cluster Controller and adds it to the Manager with default RBAC.
 // The Manager will set fields on the Controller and Start it when the Manager is Started.
-func Add(mgr manager.Manager, interval int, resourceDir string) error {
+func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize int) error {
 	token := os.Getenv(AccessToken)
 	if token == "" {
 		token = mgr.GetConfig().BearerToken
 	}
 
 	gitopsSyncResc := &GitOpsSyncResource{
-		Client:      mgr.GetClient(),
-		Interval:    interval,
-		ResourceDir: resourceDir,
-		Token:       token,
-		DataSender:  &HTTPDataSender{},
+		Client:          mgr.GetClient(),
+		Interval:        interval,
+		ResourceDir:     resourceDir,
+		SearchBatchSize: searchBatchSize,
+		Token:           token,
+		DataSender:      &HTTPDataSender{},
 	}
 
 	// Create resourceDir if it does not exist
@@ -167,7 +169,7 @@ func (r *GitOpsSyncResource) syncResources() error {
 		queryManagedClusters := []clusterv1.ManagedCluster{}
 		queryManagedClustersStr := []string{}
 
-		for len(queryManagedClusters) < 20 && iManagedCluster < mangedClusterTotal {
+		for len(queryManagedClusters) < r.SearchBatchSize && iManagedCluster < mangedClusterTotal {
 			// Ignore local-cluster. managedclusters only include all managed clusters not containing the local-cluster: true label
 			queryManagedClusters = append(queryManagedClusters, managedclusters[iManagedCluster])
 			queryManagedClustersStr = append(queryManagedClustersStr, managedclusters[iManagedCluster].Name)
@@ -356,7 +358,7 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 	searchQuery := make(map[string]interface{})
 	searchQuery["variables"] = searchVars
 
-	searchQuery["query"] = "query mySearch($input: [SearchInput]) {searchResult: search(input: $input) {items, related { kind count items }, count}}"
+	searchQuery["query"] = "query mySearch($input: [SearchInput]) {searchResult: search(input: $input) {items, related { kind items }}}"
 
 	postBody, _ := json.Marshal(searchQuery)
 	klog.V(1).Infof("search: %v", string(postBody[:]))
