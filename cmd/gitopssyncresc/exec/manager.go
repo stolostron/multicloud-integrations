@@ -97,7 +97,7 @@ func RunManager() {
 	}
 
 	// Setup all Controllers
-	if err := controller.AddGitOpsSyncRescToManager(mgr, options.SyncInterval, options.AppSetResourceDir); err != nil {
+	if err := controller.AddGitOpsSyncRescToManager(mgr, options.SyncInterval, options.AppSetResourceDir, options.SearchBatchSize); err != nil {
 		klog.Error(err, "")
 		os.Exit(1)
 	}
