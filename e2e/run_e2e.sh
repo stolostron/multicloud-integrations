@@ -197,3 +197,31 @@ else
     kubectl -n argocd get app cluster1-guestbook-app -o yaml
     exit 1
 fi
+
+echo "TEST Refresh Annotation"
+kubectl apply -f e2e/hub_app/apponly.yaml
+sleep 10s
+if kubectl -n argocd get application cluster1-guestbook-app-only; then
+    echo "Refresh Annotation: standalone application cluster1-guestbook-app-only created"
+else
+    echo "Refresh Annotation FAILED: standalone application cluster1-guestbook-app-only not created"
+    exit 1
+fi
+if kubectl -n argocd annotate app cluster1-guestbook-app-only argocd.argoproj.io/refresh=normal; then
+    echo "Refresh Annotation: annotation added successfully"
+else
+    echo "Refresh Annotation FAILED: annotation command failed"
+    exit 1
+fi
+sleep 60s
+if kubectl -n argocd get app cluster1-guestbook-app-only -o yaml | grep "argocd.argoproj.io/refresh"; then
+    echo "Refresh Annotation FAILED: annotation still exists after 60 seconds"
+    kubectl -n argocd get app cluster1-guestbook-app-only -o yaml
+    echo "=== Checking controller logs for any errors ==="
+    kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager --tail=50
+    echo "=== Checking ManifestWork created ==="
+    kubectl -n cluster1 get manifestwork | grep cluster1-guestbook-app-only || echo "No ManifestWork found"
+    exit 1
+else
+    echo "Refresh Annotation: annotation deleted successfully after 60 seconds"
+fi
