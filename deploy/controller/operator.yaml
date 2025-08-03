@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: multicloud-integrations-syncresource
-        image: quay.io/open-cluster-management/multicloud-integrations:latest
+        image: quay.io/stolostron/multicloud-integrations:latest
         imagePullPolicy: IfNotPresent
         command:
         - /usr/local/bin/gitopssyncresc
@@ -63,7 +63,7 @@ spec:
           name: multicloud-integrations-syncresource
           readOnly: false
       - name: multicloud-integrations-aggregation
-        image: quay.io/open-cluster-management/multicloud-integrations:latest
+        image: quay.io/stolostron/multicloud-integrations:latest
         imagePullPolicy: IfNotPresent
         command:
         - /usr/local/bin/multiclusterstatusaggregation
@@ -109,7 +109,7 @@ spec:
           name: multicloud-integrations-syncresource
           readOnly: false
       - name: argocd-pull-integration-controller-manager
-        image: quay.io/open-cluster-management/multicloud-integrations:latest
+        image: quay.io/stolostron/multicloud-integrations:latest
         imagePullPolicy: IfNotPresent
         command:
         - /usr/local/bin/propagation

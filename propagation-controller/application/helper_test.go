@@ -383,6 +383,79 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 				return expectedApp
 			}(),
 		},
+		{
+			name: "preserve refresh annotation in work payload",
+			args: args{
+				application: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "argoproj.io/v1alpha1",
+						"kind":       "Application",
+						"metadata": map[string]interface{}{
+							"name":      "app1",
+							"namespace": "argocd",
+							"annotations": map[string]interface{}{
+								AnnotationKeyOCMManagedCluster:             "cluster1",
+								AnnotationKeyOCMManagedClusterAppNamespace: "test-ns",
+								AnnotationKeyAppSkipReconcile:              "true",
+								AnnotationKeyAppRefresh:                    "normal",
+								"other.annotation":                         "preserve-me",
+							},
+							"labels": map[string]interface{}{
+								LabelKeyPull:  "true",
+								"other.label": "preserve-me",
+							},
+							"finalizers": []interface{}{
+								ResourcesFinalizerName,
+							},
+						},
+						"spec": map[string]interface{}{
+							"destination": map[string]interface{}{
+								"name":      "in-cluster",
+								"server":    "https://external.server.com",
+								"namespace": "test",
+							},
+						},
+						"operation": map[string]interface{}{
+							"sync": map[string]interface{}{
+								"prune": true,
+							},
+						},
+					},
+				},
+			},
+			want: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "argoproj.io/v1alpha1",
+					"kind":       "Application",
+					"metadata": map[string]interface{}{
+						"name":      "app1",
+						"namespace": "test-ns", // Uses custom namespace from annotation
+						"annotations": map[string]interface{}{
+							AnnotationKeyAppRefresh: "normal",
+							"other.annotation":      "preserve-me",
+						},
+						"labels": map[string]interface{}{
+							"other.label": "preserve-me",
+						},
+						"finalizers": []interface{}{
+							ResourcesFinalizerName,
+						},
+					},
+					"spec": map[string]interface{}{
+						"destination": map[string]interface{}{
+							"name":      "",
+							"server":    KubernetesInternalAPIServerAddr,
+							"namespace": "test",
+						},
+					},
+					"operation": map[string]interface{}{
+						"sync": map[string]interface{}{
+							"prune": true,
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -494,8 +567,13 @@ func Test_generateManifestWork(t *testing.T) {
 				t.Errorf("generateManifestWork() = %v, want %v", got.Labels, tt.want.workLabel)
 			}
 
-			if got.Spec.ManifestConfigs[0].UpdateStrategy.ServerSideApply.IgnoreFields[0].JSONPaths[0] != ".operation" {
-				t.Errorf("generateManifestWork() does not contain operation ignore field")
+			ignoreFields := got.Spec.ManifestConfigs[0].UpdateStrategy.ServerSideApply.IgnoreFields[0].JSONPaths
+			expectedIgnoreFields := []string{".operation", ".metadata.annotations[\"argocd.argoproj.io/refresh\"]"}
+
+			if len(ignoreFields) != 2 ||
+				ignoreFields[0] != expectedIgnoreFields[0] ||
+				ignoreFields[1] != expectedIgnoreFields[1] {
+				t.Errorf("generateManifestWork() ignore fields = %v, want %v", ignoreFields, expectedIgnoreFields)
 			}
 		})
 	}

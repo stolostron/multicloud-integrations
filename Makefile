@@ -40,9 +40,6 @@ GOHOSTARCH ?= $(shell go env GOHOSTARCH)
 KB_TOOLS_ARCHIVE_NAME :=kubebuilder-tools-$(K8S_VERSION)-$(GOHOSTOS)-$(GOHOSTARCH).tar.gz
 KB_TOOLS_ARCHIVE_PATH := $(TEST_TMP)/$(KB_TOOLS_ARCHIVE_NAME)
 
-# specify the tag for ocm foundation images used in e2e test
-OCM_IMAGE_TAG ?= v0.13.0
-
 .PHONY: build
 
 build:
@@ -112,6 +109,7 @@ test: ensure-kubebuilder-tools
 	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./pkg/...
 	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./propagation-controller/...
 	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./gitopsaddon/...
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./maestroapplication/...
 
 .PHONY: manifests
 manifests: controller-gen
@@ -136,7 +134,7 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 
 .PHONY: deploy-ocm
 deploy-ocm:
-	IMAGE_TAG=$(OCM_IMAGE_TAG) deploy/ocm/install.sh
+	deploy/ocm/install.sh
 
 .PHONY: test-e2e
 test-e2e: deploy-ocm
