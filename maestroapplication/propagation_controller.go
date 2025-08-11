@@ -49,6 +49,8 @@ const (
 	AnnotationKeyAppSet = "apps.open-cluster-management.io/hosting-applicationset"
 	// Application annotation that enables the skip reconciliation of an application
 	AnnotationKeyAppSkipReconcile = "argocd.argoproj.io/skip-reconcile"
+	// Application annotation that triggers ArgoCD to refresh the application (propagated like operation field)
+	AnnotationKeyAppRefresh = "argocd.argoproj.io/refresh"
 	// ManifestWork annotation that shows the namespace of the hub Application.
 	AnnotationKeyHubApplicationNamespace = "apps.open-cluster-management.io/hub-application-namespace"
 	// ManifestWork annotation that shows the name of the hub Application.
@@ -247,6 +249,32 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	} else {
 		log.Error(err, "unable to fetch ManifestWork")
 		return ctrl.Result{}, err
+	}
+
+	// remove the operation field and refresh annotation from application after propagation
+	needsUpdate := false
+
+	if _, ok := application.Object["operation"]; ok {
+		delete(application.Object, "operation")
+		needsUpdate = true
+	}
+
+	// remove the refresh annotation from application after propagation (treat same as operation field)
+	annotations := application.GetAnnotations()
+
+	if annotations != nil {
+		if _, exists := annotations[AnnotationKeyAppRefresh]; exists {
+			delete(annotations, AnnotationKeyAppRefresh)
+			application.SetAnnotations(annotations)
+			needsUpdate = true
+		}
+	}
+
+	if needsUpdate {
+		if err := r.Update(ctx, application); err != nil {
+			log.Error(err, "unable to remove operation and/or refresh annotation from Application")
+			return ctrl.Result{}, err
+		}
 	}
 
 	log.Info("done reconciling Application")
