@@ -24,7 +24,7 @@ spec:
         - --leader-election-lease-duration=137s
         - --leader-election-renew-deadline=107s
         - --leader-election-retry-period=26s
-        image: quay.io/open-cluster-management/multicloud-integrations:latest
+        image: quay.io/stolostron/multicloud-integrations:latest
         imagePullPolicy: IfNotPresent
         name: manager
         securityContext:

@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  annotations:
+    apps.open-cluster-management.io/ocm-managed-cluster: cluster1
+    apps.open-cluster-management.io/ocm-managed-cluster-app-namespace: argocd
+    argocd.argoproj.io/skip-reconcile: "true"
+  labels:
+    apps.open-cluster-management.io/pull-to-ocm-managed-cluster: "true"
+  name: cluster1-guestbook-app-only
+  namespace: argocd
+spec:
+  destination:
+    name: ""
+    namespace: guestbook
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: guestbook
+    repoURL: https://github.com/argoproj/argocd-example-apps.git
+    targetRevision: HEAD
+  syncPolicy:
+    automated:
+      prune: true
+    syncOptions:
+    - CreateNamespace=true
