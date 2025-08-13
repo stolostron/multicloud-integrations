@@ -24,6 +24,7 @@ import (
 type GitOpsSyncRescCMDOptions struct {
 	MetricsAddr                 string
 	SearchBatchSize             int
+	SearchSyncInterval          int
 	SyncInterval                int
 	AppSetResourceDir           string
 	LeaderElectionLeaseDuration time.Duration
@@ -34,6 +35,7 @@ type GitOpsSyncRescCMDOptions struct {
 var options = GitOpsSyncRescCMDOptions{
 	MetricsAddr:                 "",
 	SearchBatchSize:             5,
+	SearchSyncInterval:          30,
 	SyncInterval:                10,
 	AppSetResourceDir:           "/var/appset-resc",
 	LeaderElectionLeaseDuration: 137 * time.Second,
@@ -56,7 +58,14 @@ func ProcessFlags() {
 		&options.SearchBatchSize,
 		"search-batch-size",
 		options.SearchBatchSize,
-		"The max nulber of clusters in a single search query.",
+		"The max number of clusters in a single search query.",
+	)
+
+	flag.IntVar(
+		&options.SearchSyncInterval,
+		"search-sync-interval",
+		options.SearchSyncInterval,
+		"The interval for syncing gitops resources from search api in seconds.",
 	)
 
 	flag.IntVar(

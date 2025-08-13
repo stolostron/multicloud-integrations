@@ -98,31 +98,33 @@ func (c *HTTPDataSender) Send(httpClient *http.Client, req *http.Request) (map[s
 }
 
 type GitOpsSyncResource struct {
-	Client          client.Client
-	Interval        int
-	ResourceDir     string
-	SearchBatchSize int
-	Token           string
-	DataSender      DataSender
+	Client             client.Client
+	Interval           int
+	ResourceDir        string
+	SearchBatchSize    int
+	SearchSyncInterval int
+	Token              string
+	DataSender         DataSender
 }
 
 var ExcludeResourceList = []string{"ApplicationSet", "Application", "EndpointSlice", "Pod", "ReplicaSet", "Cluster"}
 
 // Add creates a new argocd cluster Controller and adds it to the Manager with default RBAC.
 // The Manager will set fields on the Controller and Start it when the Manager is Started.
-func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize int) error {
+func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize int, searchSyncInterval int) error {
 	token := os.Getenv(AccessToken)
 	if token == "" {
 		token = mgr.GetConfig().BearerToken
 	}
 
 	gitopsSyncResc := &GitOpsSyncResource{
-		Client:          mgr.GetClient(),
-		Interval:        interval,
-		ResourceDir:     resourceDir,
-		SearchBatchSize: searchBatchSize,
-		Token:           token,
-		DataSender:      &HTTPDataSender{},
+		Client:             mgr.GetClient(),
+		Interval:           interval,
+		ResourceDir:        resourceDir,
+		SearchBatchSize:    searchBatchSize,
+		SearchSyncInterval: searchSyncInterval,
+		Token:              token,
+		DataSender:         &HTTPDataSender{},
 	}
 
 	// Create resourceDir if it does not exist
@@ -144,7 +146,7 @@ func (r *GitOpsSyncResource) Start(ctx context.Context) error {
 		if err != nil {
 			klog.Error("error syncing resources from search", err)
 		}
-	}, time.Duration(r.Interval)*time.Second, ctx.Done())
+	}, time.Duration(r.SearchSyncInterval)*time.Second, ctx.Done())
 
 	return nil
 }
