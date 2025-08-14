@@ -326,6 +326,7 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 	// Build search body
 	kind := "Application"
 	apigroup := "argoproj.io"
+	label := "apps.open-cluster-management.io/application-set=true"
 	limit := int(-1)
 	searchInput := &model.SearchInput{
 		Filters: []*model.SearchFilter{
@@ -336,6 +337,10 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 			{
 				Property: "apigroup",
 				Values:   []*string{&apigroup},
+			},
+			{
+				Property: "label",
+				Values:   []*string{&label},
 			},
 			{
 				Property: "cluster",
@@ -356,7 +361,7 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 	searchQuery := make(map[string]interface{})
 	searchQuery["variables"] = searchVars
 
-	searchQuery["query"] = "query mySearch($input: [SearchInput]) {searchResult: search(input: $input) {items, related { kind count items }, count}}"
+	searchQuery["query"] = "query mySearch($input: [SearchInput]) {searchResult: search(input: $input) {items, related { kind items } }}"
 
 	postBody, _ := json.Marshal(searchQuery)
 	klog.V(1).Infof("search: %v", string(postBody[:]))
