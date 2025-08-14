@@ -688,22 +688,20 @@ func (r *ReconcileGitOpsCluster) getAppSetServiceAccountName(namespace string) s
 		}
 
 		if len(saList.Items) == 1 {
-			klog.Info("found the application set controller service account name by label: " + saList.Items[0].Name)
+			if strings.HasSuffix(saList.Items[0].Name, "-applicationset-controller") {
+				klog.Info("found the application set controller service account name by label: " + saList.Items[0].Name)
 
-			return saList.Items[0].Name
+				return saList.Items[0].Name
+			}
 		}
 
-		if len(saList.Items) > 1 {
-			break
-		}
-	}
+		// find the SA name that ends with -applicationset-controller
+		for _, sa := range saList.Items {
+			if strings.HasSuffix(sa.Name, "-applicationset-controller") {
+				klog.Info("found the application set controller service account name from list: " + sa.Name)
 
-	// find the SA name that ends with -applicationset-controller
-	for _, sa := range saList.Items {
-		if strings.HasSuffix(sa.Name, "-applicationset-controller") {
-			klog.Info("found the application set controller service account name from list: " + sa.Name)
-
-			return sa.Name
+				return sa.Name
+			}
 		}
 	}
 
