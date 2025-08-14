@@ -655,39 +655,47 @@ func getRoleDuck(namespace string) *rbacv1.Role {
 }
 
 func (r *ReconcileGitOpsCluster) getAppSetServiceAccountName(namespace string) string {
-	saName := namespace + RoleSuffix // if every attempt fails, use this name
+	saName := "openshift-gitops-applicationset-controller" // if every attempt fails, use this name
+
+	var labels = [2]map[string]string{
+		{"app.kubernetes.io/part-of": "argocd-applicationset"},
+		{"app.kubernetes.io/part-of": "argocd"},
+	}
 
 	// First, try to get the applicationSet controller service account by label
 	saList := &v1.ServiceAccountList{}
-
 	listopts := &client.ListOptions{Namespace: namespace}
 
-	saSelector := &metav1.LabelSelector{
-		MatchLabels: map[string]string{
-			"app.kubernetes.io/part-of": "argocd-applicationset",
-		},
-	}
+	for _, label := range labels {
+		saSelector := &metav1.LabelSelector{
+			MatchLabels: label,
+		}
 
-	saSelectionLabel, err := utils.ConvertLabels(saSelector)
+		saSelectionLabel, err := utils.ConvertLabels(saSelector)
 
-	if err != nil {
-		klog.Error("Failed to convert managed cluster secret selector, err:", err)
-	} else {
-		listopts.LabelSelector = saSelectionLabel
-	}
+		if err != nil {
+			klog.Error("Failed to convert managed cluster secret selector, err:", err)
+		} else {
+			listopts.LabelSelector = saSelectionLabel
+		}
 
-	err = r.List(context.TODO(), saList, listopts)
+		err = r.List(context.TODO(), saList, listopts)
 
-	if err != nil {
-		klog.Error("Failed to get service account list, err:", err) // Just return the default SA name
+		if err != nil {
+			klog.Error("Failed to get service account list, err:", err) // Just return the default SA name
 
-		return saName
-	}
+			return saName
+		}
 
-	if len(saList.Items) == 1 {
-		klog.Info("found the application set controller service account name by label: " + saList.Items[0].Name)
+		if len(saList.Items) == 1 {
+			klog.Info("found the application set controller service account name by label: " + saList.Items[0].Name)
 
-		return saList.Items[0].Name
+			return saList.Items[0].Name
+		}
+
+		if len(saList.Items) > 1 {
+			break
+		}
 	}
 
 	// find the SA name that ends with -applicationset-controller
