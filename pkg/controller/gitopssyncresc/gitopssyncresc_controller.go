@@ -330,6 +330,7 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 	// Build search body
 	kind := "Application"
 	apigroup := "argoproj.io"
+	label := "apps.open-cluster-management.io/application-set=true"
 	limit := int(-1)
 	searchInput := &model.SearchInput{
 		Filters: []*model.SearchFilter{
@@ -340,6 +341,10 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 			{
 				Property: "apigroup",
 				Values:   []*string{&apigroup},
+			},
+			{
+				Property: "label",
+				Values: []*string{&label},
 			},
 			{
 				Property: "cluster",
