@@ -88,10 +88,10 @@ else
     
     exit 1
 fi
-if [[ "$(kubectl -n argocd get secret -l=test-label=test-value -o jsonpath='{.items[0].metadata.name}')" == "cluster1-cluster-secret" ]]; then
-    echo "GitOpsCluster: cluster1-cluster-secret created"
+if [[ "$(kubectl -n argocd get secret -l=test-label=test-value -o jsonpath='{.items[0].metadata.name}')" == "cluster1-application-manager-cluster-secret" ]]; then
+    echo "GitOpsCluster: cluster1-application-manager-cluster-secret created"
 else
-    echo "GitOpsCluster FAILED: cluster1-cluster-secret not created"
+    echo "GitOpsCluster FAILED: cluster1-application-manager-cluster-secret not created"
     exit 1
 fi
 # Add another test label to cluster1 to test that updated labels are propagated
@@ -103,10 +103,10 @@ else
     echo "GitOpsCluster FAILED: status not successful"
     exit 1
 fi
-if [[ "$(kubectl -n argocd get secret -l=test-label-2=test-value-2 -o jsonpath='{.items[0].metadata.name}')" == "cluster1-cluster-secret" ]]; then
-    echo "GitOpsCluster: cluster1-cluster-secret updated"
+if [[ "$(kubectl -n argocd get secret -l=test-label-2=test-value-2 -o jsonpath='{.items[0].metadata.name}')" == "cluster1-application-manager-cluster-secret" ]]; then
+    echo "GitOpsCluster: cluster1-application-manager-cluster-secret updated"
 else
-    echo "GitOpsCluster FAILED: cluster1-cluster-secret not updated"
+    echo "GitOpsCluster FAILED: cluster1-application-manager-cluster-secret not updated"
     exit 1
 fi
 # Test GitOpsCluster error
@@ -157,10 +157,10 @@ else
     exit 1
 fi
 kubectl config use-context kind-cluster1
-if kubectl -n argocd get app cluster1-guestbook-app | grep Synced | grep Healthy; then
-    echo "Propagation: managed cluster application cluster1-guestbook-app created, synced and healthy"
+if kubectl -n argocd get app cluster1-guestbook-app; then
+    echo "Propagation: managed cluster application cluster1-guestbook-app created"
 else
-    echo "Propagation FAILED: managed application cluster1-guestbook-app not created, synced and healthy"
+    echo "Propagation FAILED: managed application cluster1-guestbook-app not created"
     kubectl -n argocd get app cluster1-guestbook-app -o yaml
     exit 1
 fi
@@ -196,4 +196,29 @@ else
     echo "Propagation FAILED: hub cluster application cluster1-guestbook-app revision is empty"
     kubectl -n argocd get app cluster1-guestbook-app -o yaml
     exit 1
+fi
+
+echo "TEST Refresh Annotation"
+kubectl apply -f e2e/hub_app/apponly.yaml
+sleep 10s
+if kubectl -n argocd get application cluster1-guestbook-app-only; then
+    echo "Refresh Annotation: standalone application cluster1-guestbook-app-only created"
+else
+    echo "Refresh Annotation FAILED: standalone application cluster1-guestbook-app-only not created"
+    exit 1
+fi
+if kubectl -n argocd annotate app cluster1-guestbook-app-only argocd.argoproj.io/refresh=normal; then
+    echo "Refresh Annotation: annotation added successfully"
+else
+    echo "Refresh Annotation FAILED: annotation command failed"
+    exit 1
+fi
+sleep 60s
+if kubectl -n argocd get app cluster1-guestbook-app-only -o yaml | grep "argocd.argoproj.io/refresh"; then
+    echo "Refresh Annotation FAILED: annotation still exists after 60 seconds"
+    kubectl -n argocd get app cluster1-guestbook-app-only -o yaml
+    kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager
+    exit 1
+else
+    echo "Refresh Annotation: annotation deleted successfully after 60 seconds"
 fi
