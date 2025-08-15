@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"strings"
+
+	// "io/ioutil"
 	"net/http"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 
+	"github.com/onsi/gomega"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +35,6 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/onsi/gomega"
 	appsetreport "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -176,9 +178,11 @@ func TestCreateOrUpdateAppSetReport(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	synResc := &GitOpsSyncResource{
-		Client:      nil,
-		Interval:    10,
-		ResourceDir: "/tmp",
+		Client:             nil,
+		Interval:           10,
+		SearchSyncInterval: 10,
+		SearchBatchSize:    5,
+		ResourceDir:        "/tmp",
 	}
 
 	appset1cluster1 := make(map[string]interface{})
@@ -321,9 +325,11 @@ func TestGitOpsSyncResource_getSearchURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := initClient()
 			r := &GitOpsSyncResource{
-				Client:      c,
-				Interval:    60,
-				ResourceDir: "/tmp",
+				Client:             c,
+				Interval:           60,
+				SearchSyncInterval: 60,
+				SearchBatchSize:    5,
+				ResourceDir:        "/tmp",
 			}
 
 			if tt.service != nil {
@@ -389,10 +395,12 @@ func TestGitOpsSyncResource_syncResources(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &GitOpsSyncResource{
-				Client:      c,
-				Interval:    60,
-				ResourceDir: "/tmp",
-				DataSender:  &TestDataSender{tt.data},
+				Client:             c,
+				Interval:           60,
+				SearchSyncInterval: 60,
+				SearchBatchSize:    5,
+				ResourceDir:        "/tmp",
+				DataSender:         &TestDataSender{tt.data},
 			}
 
 			if tt.managedcluster != nil {
