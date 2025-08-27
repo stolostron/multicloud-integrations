@@ -2,7 +2,7 @@ apiVersion: addon.open-cluster-management.io/v1alpha1
 kind: AddOnDeploymentConfig
 metadata:
   name: gitops-addon-config
-  namespace: ocm
+  namespace: open-cluster-management
 spec:
   customizedVariables:
   - name: GITOPS_OPERATOR_IMAGE
@@ -19,4 +19,13 @@ spec:
     value: Single-Namespace
   - name: ACTION
     value: Install
-
+  - name: ARGOCD_AGENT_ENABLED
+    value: "false"
+  - name: ARGOCD_AGENT_IMAGE
+    value: ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest
+  - name: ARGOCD_AGENT_SERVER_ADDRESS
+    value: ""
+  - name: ARGOCD_AGENT_SERVER_PORT
+    value: "443"
+  - name: ARGOCD_AGENT_MODE
+    value: "managed"

@@ -24,6 +24,7 @@ rules:
   - namespaces
   - persistentvolumeclaims
   - pods
+  - resourcequotas
   - secrets
   - serviceaccounts
   - services
@@ -102,6 +103,8 @@ rules:
   - pipelines.openshift.io
   resources:
   - gitopsservices
+  - gitopsservices/finalizers
+  - gitopsservices/status
   verbs:
   - '*'
 - apiGroups:

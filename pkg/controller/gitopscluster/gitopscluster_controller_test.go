@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
+	workv1 "open-cluster-management.io/api/work/v1"
 	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -2435,4 +2436,510 @@ data:
 		cm)).NotTo(gomega.HaveOccurred())
 
 	g.Expect(cm.Data).To(gomega.Equal(map[string]string{"bar": "foo"}))
+}
+
+// Test ArgoCD Agent functionality
+func TestArgoCDAgentEnabled(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Create test resources
+	testNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-argocd-agent",
+		},
+	}
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-agent",
+		},
+	}
+
+	testPlacement := &clusterv1beta1.Placement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-placement-agent",
+			Namespace: testNs.Name,
+		},
+	}
+
+	testPlacementDecision := &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-placement-decision-agent",
+			Namespace: testNs.Name,
+			Labels: map[string]string{
+				"cluster.open-cluster-management.io/placement": "test-placement-agent",
+			},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: "test-cluster-agent",
+					Reason:      "OK",
+				},
+			},
+		},
+	}
+
+	// Create ArgoCD agent CA secret
+	argoCDAgentCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "openshift-gitops",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("-----BEGIN CERTIFICATE-----\nMIIDOjCCAiKgAwIBAgIRAP6XPGEj/+8Ict6b2y015IwDQYJKoZIhvcNAQELBQAw\n-----END CERTIFICATE-----"),
+			"tls.key": []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAzbMjs2eyusPY2xNwVJQMhhi8wKK3sl8CgLhkhKPnkGmtIFmR\n-----END RSA PRIVATE KEY-----"),
+		},
+	}
+
+	// Create GitOpsCluster with ArgoCD agent enabled
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-agent",
+			Namespace: testNs.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			PlacementRef: &corev1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Name:       "test-placement-agent",
+				Namespace:  testNs.Name,
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled: &[]bool{true}[0], // pointer to true
+			},
+		},
+	}
+
+	// Create fake client with test resources
+	objs := []client.Object{
+		testNs,
+		testCluster,
+		testPlacement,
+		testPlacementDecision,
+		argoCDAgentCASecret,
+		testGitOpsCluster,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(objs...).Build()
+
+	// Create reconciler
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	// Test CreateArgoCDAgentManifestWorks function
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was created
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-agent",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork content
+	g.Expect(manifestWork.Name).To(gomega.Equal("argocd-agent-ca-mw"))
+	g.Expect(manifestWork.Namespace).To(gomega.Equal("test-cluster-agent"))
+	g.Expect(len(manifestWork.Spec.Workload.Manifests)).To(gomega.Equal(1))
+
+	// Verify the secret manifest in the ManifestWork
+	manifest := manifestWork.Spec.Workload.Manifests[0]
+	secret := &corev1.Secret{}
+	err = json.Unmarshal(manifest.RawExtension.Raw, secret)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(secret.Name).To(gomega.Equal("argocd-agent-ca"))
+	g.Expect(secret.Namespace).To(gomega.Equal("openshift-gitops"))
+	g.Expect(secret.Type).To(gomega.Equal(corev1.SecretTypeOpaque))
+	g.Expect(secret.Data["ca.crt"]).NotTo(gomega.BeEmpty())
+}
+
+func TestArgoCDAgentDisabled(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Create test resources
+	testNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-argocd-agent-disabled",
+		},
+	}
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-agent-disabled",
+		},
+	}
+
+	// Create GitOpsCluster with ArgoCD agent disabled
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-agent-disabled",
+			Namespace: testNs.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled: &[]bool{false}[0], // pointer to false
+			},
+		},
+	}
+
+	// Create fake client with test resources
+	objs := []client.Object{
+		testNs,
+		testCluster,
+		testGitOpsCluster,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(objs...).Build()
+
+	// Create reconciler
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	// Test CreateArgoCDAgentManifestWorks function
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).To(gomega.HaveOccurred()) // Should fail because CA secret doesn't exist
+
+	// Verify ManifestWork was NOT created
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-agent-disabled",
+	}, manifestWork)
+	g.Expect(err).To(gomega.HaveOccurred()) // Should not exist
+}
+
+func TestGetArgoCDAgentCACert(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Test with valid secret
+	testSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "test-namespace",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("test-certificate-data"),
+			"tls.key": []byte("test-key-data"),
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(testSecret).Build()
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	// Test successful retrieval
+	caCert, err := reconciler.getArgoCDAgentCACert("test-namespace")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(caCert).To(gomega.Equal("test-certificate-data"))
+
+	// Test with missing secret
+	_, err = reconciler.getArgoCDAgentCACert("nonexistent-namespace")
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("failed to get argocd-agent-ca secret"))
+}
+
+func TestGetArgoCDAgentCACertMissingTLSCrt(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Test with secret missing tls.crt
+	testSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "test-namespace",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.key": []byte("test-key-data"),
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(testSecret).Build()
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	// Test missing tls.crt field
+	_, err := reconciler.getArgoCDAgentCACert("test-namespace")
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("neither tls.crt nor ca.crt found in argocd-agent-ca secret"))
+}
+
+func TestCreateArgoCDAgentManifestWork(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	reconciler := &ReconcileGitOpsCluster{}
+
+	// Test ManifestWork creation
+	manifestWork := reconciler.createArgoCDAgentManifestWork("test-cluster", "test-namespace", "test-ca-cert")
+
+	g.Expect(manifestWork.Name).To(gomega.Equal("argocd-agent-ca-mw"))
+	g.Expect(manifestWork.Namespace).To(gomega.Equal("test-cluster"))
+	g.Expect(manifestWork.APIVersion).To(gomega.Equal("work.open-cluster-management.io/v1"))
+	g.Expect(manifestWork.Kind).To(gomega.Equal("ManifestWork"))
+	g.Expect(len(manifestWork.Spec.Workload.Manifests)).To(gomega.Equal(1))
+
+	// Verify the secret manifest
+	manifest := manifestWork.Spec.Workload.Manifests[0]
+	secret := manifest.RawExtension.Object.(*corev1.Secret)
+	g.Expect(secret.Name).To(gomega.Equal("argocd-agent-ca"))
+	g.Expect(secret.Namespace).To(gomega.Equal("test-namespace"))
+	g.Expect(secret.Type).To(gomega.Equal(corev1.SecretTypeOpaque))
+	g.Expect(string(secret.Data["ca.crt"])).To(gomega.Equal("test-ca-cert"))
+}
+
+func TestArgoCDAgentDefaultNamespace(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Create test resources
+	testNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-default-namespace",
+		},
+	}
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-default",
+		},
+	}
+
+	// Create ArgoCD agent CA secret in default namespace
+	argoCDAgentCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "openshift-gitops", // Default namespace
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("test-certificate-data"),
+			"tls.key": []byte("test-key-data"),
+		},
+	}
+
+	// Create GitOpsCluster with empty ArgoNamespace (should default to openshift-gitops)
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-default",
+			Namespace: testNs.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "", // Empty namespace should default to openshift-gitops
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled: &[]bool{true}[0],
+			},
+		},
+	}
+
+	// Create fake client with test resources
+	objs := []client.Object{
+		testNs,
+		testCluster,
+		argoCDAgentCASecret,
+		testGitOpsCluster,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithObjects(objs...).Build()
+
+	// Create reconciler
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	// Test CreateArgoCDAgentManifestWorks function
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was created
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-default",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify the secret manifest uses the default namespace
+	manifest := manifestWork.Spec.Workload.Manifests[0]
+	secret := &corev1.Secret{}
+	err = json.Unmarshal(manifest.RawExtension.Raw, secret)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(secret.Namespace).To(gomega.Equal("openshift-gitops")) // Should use default namespace
+}
+
+func TestEnsureArgoCDAgentCertificatesFailure(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	mgr, err := manager.New(cfg, manager.Options{
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+	})
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	c = mgr.GetClient()
+
+	reconciler, err := newReconciler(mgr)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	recFn := SetupTestReconcile(reconciler)
+	g.Expect(add(mgr, recFn)).NotTo(gomega.HaveOccurred())
+
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	mgrStopped := StartTestManager(ctx, mgr, g)
+
+	defer func() {
+		cancel()
+		mgrStopped.Wait()
+	}()
+
+	// Create test namespace
+	testNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-argocd-cert-failure",
+		},
+	}
+	c.Create(context.TODO(), testNs)
+
+	// Create managed cluster
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-cert-failure",
+		},
+		Spec: clusterv1.ManagedClusterSpec{
+			HubAcceptsClient: true,
+		},
+	}
+	g.Expect(c.Create(context.TODO(), testCluster)).NotTo(gomega.HaveOccurred())
+	defer c.Delete(context.TODO(), testCluster)
+
+	// Create managed cluster namespace
+	testClusterNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testCluster.Name,
+		},
+	}
+	c.Create(context.TODO(), testClusterNs)
+
+	// Create placement
+	testPlacement := &clusterv1beta1.Placement{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-placement-cert-failure",
+			Namespace: testNs.Name,
+		},
+		Spec: clusterv1beta1.PlacementSpec{},
+	}
+	g.Expect(c.Create(context.TODO(), testPlacement)).NotTo(gomega.HaveOccurred())
+	defer c.Delete(context.TODO(), testPlacement)
+
+	// Create placement decision
+	testPlacementDecision := &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-placement-decision-cert-failure",
+			Namespace: testNs.Name,
+			Labels: map[string]string{
+				"cluster.open-cluster-management.io/placement": "test-placement-cert-failure",
+			},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{
+				{
+					ClusterName: testCluster.Name,
+					Reason:      "OK",
+				},
+			},
+		},
+	}
+	g.Expect(c.Create(context.TODO(), testPlacementDecision)).NotTo(gomega.HaveOccurred())
+	defer c.Delete(context.TODO(), testPlacementDecision)
+
+	time.Sleep(time.Second * 5)
+
+	// Create ArgoCD namespace but WITHOUT the required CA secret (this will cause EnsureArgoCDAgentCertificates to fail)
+	argoNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-argocd-cert-failure-ns",
+		},
+	}
+	c.Create(context.TODO(), argoNs)
+
+	// Create ArgoCD server service (needed for validation)
+	argoService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "openshift-gitops-server",
+			Namespace: argoNs.Name,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":   "argocd",
+				"app.kubernetes.io/component": "server",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:       "10.0.0.99",
+			SessionAffinity: corev1.ServiceAffinityNone,
+			Type:            corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       int32(443),
+					TargetPort: intstr.FromInt(443),
+				},
+			},
+		},
+	}
+	g.Expect(c.Create(context.TODO(), argoService)).NotTo(gomega.HaveOccurred())
+	defer c.Delete(context.TODO(), argoService)
+
+	// Create GitOpsCluster with ArgoCD agent enabled
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-cert-failure",
+			Namespace: testNs.Name,
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				Cluster:       "local-cluster",
+				ArgoNamespace: argoNs.Name, // This namespace has no CA secret
+			},
+			PlacementRef: &corev1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Namespace:  testNs.Name,
+				Name:       testPlacement.Name,
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled: &[]bool{true}[0], // ArgoCD agent enabled - this will trigger EnsureArgoCDAgentCertificates
+			},
+		},
+	}
+
+	g.Expect(c.Create(context.TODO(), testGitOpsCluster)).NotTo(gomega.HaveOccurred())
+	defer c.Delete(context.TODO(), testGitOpsCluster)
+
+	// Wait for reconciler to process and verify the status shows failure
+	g.Eventually(func(g2 gomega.Gomega) {
+		updated := &gitopsclusterV1beta1.GitOpsCluster{}
+		err := c.Get(context.TODO(), client.ObjectKeyFromObject(testGitOpsCluster), updated)
+		g2.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify that the reconcile loop detected the certificate failure and set status to failed
+		g2.Expect(updated.Status.Phase).To(gomega.Equal("failed"))
+		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("failed to get argocd-agent-ca secret"))
+		g2.Expect(updated.Status.LastUpdateTime).NotTo(gomega.BeNil())
+	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }

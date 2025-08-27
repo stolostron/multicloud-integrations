@@ -45,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	workv1 "open-cluster-management.io/api/work/v1"
 	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -432,11 +433,22 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	klog.V(1).Infof("adding managed clusters %v into argo namespace %s", managedClusterNames, instance.Spec.ArgoServer.ArgoNamespace)
 
-	// 3. Copy secret contents from the managed cluster namespaces and create the secret in spec.argoServer.argoNamespace
+	// 3. Check if ArgoCD agent is enabled
+	argoCDAgentEnabled := false
+	if instance.Spec.ArgoCDAgent != nil && instance.Spec.ArgoCDAgent.Enabled != nil {
+		argoCDAgentEnabled = *instance.Spec.ArgoCDAgent.Enabled
+	}
+
+	// 4. Copy secret contents from the managed cluster namespaces and create the secret in spec.argoServer.argoNamespace
 	// if spec.createBlankClusterSecrets is true then do err on missing secret from the managed cluster namespace
+	// if argoCDAgent is enabled, createBlankClusterSecrets should also be true
 	createBlankClusterSecrets := false
 	if instance.Spec.CreateBlankClusterSecrets != nil {
 		createBlankClusterSecrets = *instance.Spec.CreateBlankClusterSecrets
+	}
+	// Enable createBlankClusterSecrets when ArgoCD agent is enabled
+	if argoCDAgentEnabled {
+		createBlankClusterSecrets = true
 	}
 
 	err = r.AddManagedClustersToArgo(instance, managedClusters, orphanSecretsList, createBlankClusterSecrets)
@@ -461,8 +473,61 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			return 3, err2
 		}
 
-		// it passed all vaidations but simply failed to create or update secrets. Reconile again in 1 minute.
-		return 1, err
+		return 3, err
+	}
+
+	// 5. Create ManifestWork for ArgoCD agent CA secret if argoCDAgent is enabled
+	if argoCDAgentEnabled {
+		err = r.CreateArgoCDAgentManifestWorks(instance, managedClusters)
+		if err != nil {
+			klog.Errorf("failed to create ArgoCD agent ManifestWorks: %v", err)
+
+			instance.Status.LastUpdateTime = metav1.Now()
+			instance.Status.Phase = "failed"
+
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			instance.Status.Message = msg
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+	}
+
+	// 6. Ensure ArgoCD agent TLS certificates are signed if argoCDAgent is enabled
+	if argoCDAgentEnabled {
+		err = r.EnsureArgoCDAgentCertificates(instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent certificates: %v", err)
+
+			instance.Status.LastUpdateTime = metav1.Now()
+			instance.Status.Phase = "failed"
+
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			instance.Status.Message = msg
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
 	}
 
 	instance.Status.LastUpdateTime = metav1.Now()
@@ -1601,4 +1666,147 @@ spec:
 		gitOpsCluster.Spec.ManagedServiceAccountRef, gitOpsCluster.Name+"-cluster-permission")
 
 	return yamlString
+}
+
+// CreateArgoCDAgentManifestWorks creates ManifestWork resources for ArgoCD agent CA secret in each managed cluster
+func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
+	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
+	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
+	if argoNamespace == "" {
+		argoNamespace = "openshift-gitops"
+	}
+
+	// Get the CA certificate from the argocd-agent-ca secret
+	caCert, err := r.getArgoCDAgentCACert(argoNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to get ArgoCD agent CA certificate: %w", err)
+	}
+
+	for _, managedCluster := range managedClusters {
+		// Skip local-cluster - don't create ManifestWork for local cluster
+		if managedCluster.Name == "local-cluster" {
+			klog.Infof("skipping ManifestWork creation for local-cluster: %s", managedCluster.Name)
+			continue
+		}
+
+		// Skip clusters with local-cluster: "true" label
+		if managedCluster.Labels != nil {
+			if localClusterLabel, exists := managedCluster.Labels["local-cluster"]; exists && localClusterLabel == "true" {
+				klog.Infof("skipping ManifestWork creation for cluster with local-cluster=true label: %s", managedCluster.Name)
+				continue
+			}
+		}
+
+		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, argoNamespace, caCert)
+
+		// Check if ManifestWork already exists
+		existingMW := &workv1.ManifestWork{}
+		err := r.Get(context.TODO(), types.NamespacedName{
+			Name:      manifestWork.Name,
+			Namespace: manifestWork.Namespace,
+		}, existingMW)
+
+		if err != nil {
+			if k8errors.IsNotFound(err) {
+				// Create new ManifestWork
+				err = r.Create(context.TODO(), manifestWork)
+				if err != nil {
+					klog.Errorf("failed to create ManifestWork %s/%s: %v", manifestWork.Namespace, manifestWork.Name, err)
+					return err
+				}
+
+				klog.Infof("created ManifestWork %s/%s for ArgoCD agent CA", manifestWork.Namespace, manifestWork.Name)
+			} else {
+				return fmt.Errorf("failed to get ManifestWork %s/%s: %w", manifestWork.Namespace, manifestWork.Name, err)
+			}
+		} else {
+			// Update existing ManifestWork
+			existingMW.Spec = manifestWork.Spec
+
+			err = r.Update(context.TODO(), existingMW)
+			if err != nil {
+				klog.Errorf("failed to update ManifestWork %s/%s: %v", existingMW.Namespace, existingMW.Name, err)
+				return err
+			}
+
+			klog.Infof("updated ManifestWork %s/%s for ArgoCD agent CA", existingMW.Namespace, existingMW.Name)
+		}
+	}
+
+	return nil
+}
+
+// getArgoCDAgentCACert retrieves the CA certificate from the argocd-agent-ca secret
+func (r *ReconcileGitOpsCluster) getArgoCDAgentCACert(argoNamespace string) (string, error) {
+	secret := &v1.Secret{}
+	err := r.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca",
+		Namespace: argoNamespace,
+	}, secret)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to get argocd-agent-ca secret: %w", err)
+	}
+
+	// Try to get the certificate data from either tls.crt or ca.crt field
+	var caCertBytes []byte
+
+	var exists bool
+
+	// First try tls.crt (expected from ensureArgoCDAgentCASecret)
+	caCertBytes, exists = secret.Data["tls.crt"]
+	if !exists {
+		// Fallback to ca.crt (in case secret was created by ManifestWork)
+		caCertBytes, exists = secret.Data["ca.crt"]
+		if !exists {
+			return "", fmt.Errorf("neither tls.crt nor ca.crt found in argocd-agent-ca secret")
+		}
+	}
+
+	// Return the certificate data as-is (it's already in the correct format)
+	return string(caCertBytes), nil
+}
+
+// createArgoCDAgentManifestWork creates a ManifestWork for deploying the ArgoCD agent CA secret
+func (r *ReconcileGitOpsCluster) createArgoCDAgentManifestWork(clusterName, argoNamespace, caCert string) *workv1.ManifestWork {
+	// Create the secret manifest
+	secretManifest := &v1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: argoNamespace,
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ca.crt": []byte(caCert),
+		},
+	}
+
+	// Create the ManifestWork
+	manifestWork := &workv1.ManifestWork{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "work.open-cluster-management.io/v1",
+			Kind:       "ManifestWork",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca-mw",
+			Namespace: clusterName,
+		},
+		Spec: workv1.ManifestWorkSpec{
+			Workload: workv1.ManifestsTemplate{
+				Manifests: []workv1.Manifest{
+					{
+						RawExtension: runtime.RawExtension{
+							Object: secretManifest,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return manifestWork
 }
