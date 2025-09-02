@@ -236,6 +236,9 @@ issues:
     - ".*.helmrelease.*\\.go"
     - ".*.ansiblejob.*\\.go"
 
+  exclude-files:
+    - ".*_test\\.go$"
+
   # Independently from option `exclude` we use default exclude patterns,
   # it can be disabled by this option. To list all
   # excluded by default patterns execute `golangci-lint run --help`.

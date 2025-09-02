@@ -3,6 +3,8 @@
 set -o nounset
 set -o pipefail
 
+# kind delete clusters --all; kind create cluster --name hub; kind create cluster --name cluster1
+
 KUBECTL=${KUBECTL:-kubectl}
 
 

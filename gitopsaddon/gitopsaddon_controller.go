@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	yaml "gopkg.in/yaml.v3"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	corev1 "k8s.io/api/core/v1"
@@ -50,44 +50,60 @@ import (
 //go:embed charts/openshift-gitops-operator/**
 //go:embed charts/openshift-gitops-dependency/**
 //go:embed charts/dep-crds/**
+//go:embed charts/argocd-agent/**
 var ChartFS embed.FS
 
 // GitopsAddonReconciler reconciles a openshift gitops operator
 type GitopsAddonReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	Config              *rest.Config
-	Interval            int
-	GitopsOperatorImage string
-	GitopsOperatorNS    string
-	GitopsImage         string
-	GitopsNS            string
-	RedisImage          string
-	ReconcileScope      string
-	HTTP_PROXY          string
-	HTTPS_PROXY         string
-	NO_PROXY            string
-	ACTION              string
+	Scheme                   *runtime.Scheme
+	Config                   *rest.Config
+	Interval                 int
+	GitopsOperatorImage      string
+	GitopsOperatorNS         string
+	GitopsImage              string
+	GitopsNS                 string
+	RedisImage               string
+	ReconcileScope           string
+	HTTP_PROXY               string
+	HTTPS_PROXY              string
+	NO_PROXY                 string
+	ACTION                   string
+	ArgoCDAgentEnabled       string
+	ArgoCDAgentImage         string
+	ArgoCDAgentServerAddress string
+	ArgoCDAgentServerPort    string
+	ArgoCDAgentMode          string
 }
 
 func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
 	gitopsImage, gitopsNS, redisImage, reconcileScope,
-	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ACTION string) error {
+	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ACTION, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
 	dsRS := &GitopsAddonReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		Config:              mgr.GetConfig(),
-		Interval:            interval,
-		GitopsOperatorImage: gitopsOperatorImage,
-		GitopsOperatorNS:    gitopsOperatorNS,
-		GitopsImage:         gitopsImage,
-		GitopsNS:            gitopsNS,
-		RedisImage:          redisImage,
-		ReconcileScope:      reconcileScope,
-		HTTP_PROXY:          HTTP_PROXY,
-		HTTPS_PROXY:         HTTPS_PROXY,
-		NO_PROXY:            NO_PROXY,
-		ACTION:              ACTION,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		Config:                   mgr.GetConfig(),
+		Interval:                 interval,
+		GitopsOperatorImage:      gitopsOperatorImage,
+		GitopsOperatorNS:         gitopsOperatorNS,
+		GitopsImage:              gitopsImage,
+		GitopsNS:                 gitopsNS,
+		RedisImage:               redisImage,
+		ReconcileScope:           reconcileScope,
+		HTTP_PROXY:               HTTP_PROXY,
+		HTTPS_PROXY:              HTTPS_PROXY,
+		NO_PROXY:                 NO_PROXY,
+		ACTION:                   ACTION,
+		ArgoCDAgentEnabled:       argoCDAgentEnabled,
+		ArgoCDAgentImage:         argoCDAgentImage,
+		ArgoCDAgentServerAddress: argoCDAgentServerAddress,
+		ArgoCDAgentServerPort:    argoCDAgentServerPort,
+		ArgoCDAgentMode:          argoCDAgentMode,
+	}
+
+	// Setup the secret controller to watch and copy ArgoCD agent client cert secrets
+	if err := SetupSecretControllerWithManager(mgr); err != nil {
+		return err
 	}
 
 	return mgr.Add(dsRS)
@@ -134,6 +150,17 @@ func (r *GitopsAddonReconciler) deleteOpenshiftGitopsOperator(configFlags *gener
 
 func (r *GitopsAddonReconciler) deleteOpenshiftGitopsInstance(configFlags *genericclioptions.ConfigFlags) {
 	klog.Info("Start deleting openshift gitops instance...")
+
+	if r.ArgoCDAgentEnabled == "true" {
+		if err := r.deleteChart(configFlags, r.GitopsNS, "argocd-agent"); err != nil {
+			klog.Errorf("Failed to delete argocd-agent: %v", err)
+		}
+
+		// Also delete the argocd-redis secret we created
+		if err := r.deleteArgoCDRedisSecret(); err != nil {
+			klog.Errorf("Failed to delete argocd-redis secret: %v", err)
+		}
+	}
 
 	if err := r.deleteChart(configFlags, r.GitopsNS, "openshift-gitops-dependency"); err == nil {
 		gitopsNsKey := types.NamespacedName{
@@ -194,6 +221,39 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *gene
 				r.postUpdate(gitopsNsKey, "openshift-gitops")
 			}
 		}
+	}
+
+	// 3. install/update the argocd-agent if enabled
+	if r.ArgoCDAgentEnabled == "true" {
+		if !r.ShouldUpdateArgoCDAgent() {
+			klog.Info("Don't update argocd-agent")
+		} else {
+			klog.Info("Installing/updating argocd-agent...")
+
+			// Install argocd-agent in the same namespace as openshift-gitops
+			gitopsNsKey := types.NamespacedName{
+				Name: r.GitopsNS,
+			}
+
+			if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
+				// Ensure argocd-redis secret exists before installing argocd-agent
+				err := r.ensureArgoCDRedisSecret()
+				if err != nil {
+					klog.Errorf("Failed to ensure argocd-redis secret: %v", err)
+					return
+				}
+
+				err = r.installOrUpgradeChart(configFlags, "charts/argocd-agent", r.GitopsNS, "argocd-agent")
+				if err != nil {
+					klog.Errorf("Failed to process argocd-agent: %v", err)
+				} else {
+					r.postUpdate(gitopsNsKey, "argocd-agent")
+					klog.Info("Successfully installed/updated argocd-agent")
+				}
+			}
+		}
+	} else {
+		klog.Info("ArgoCD Agent not enabled, skipping installation")
 	}
 }
 
@@ -373,6 +433,11 @@ func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPat
 				if err != nil {
 					return err
 				}
+			} else if releaseName == "argocd-agent" {
+				err = r.updateArgoCDAgentValueYaml(fs, sourcePath, destFilePath)
+				if err != nil {
+					return err
+				}
 			}
 		} else {
 			// save other yaml files to the temp dir
@@ -549,30 +614,240 @@ func (r *GitopsAddonReconciler) updateDependencyValueYaml(fs embed.FS, sourcePat
 	return nil
 }
 
+func (r *GitopsAddonReconciler) updateArgoCDAgentValueYaml(fs embed.FS, sourcePath, destFilePath string) error {
+	file, err := fs.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Parse existing values into an unstructured map
+	var values map[string]interface{}
+
+	decoder := yaml.NewDecoder(file)
+	if err := decoder.Decode(&values); err != nil {
+		return fmt.Errorf("failed to decode YAML: %w", err)
+	}
+
+	// Navigate to the nested keys and update the values
+	global, ok := values["global"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("failed to find 'global' key in YAML")
+	}
+
+	// override the argocd-agent image and tag
+	argocdAgent, ok := global["argocdAgent"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("argocdAgent field not found or invalid type")
+	}
+
+	// Parse the argocd-agent image reference
+	agentImage, agentTag, err := ParseImageReference(r.ArgoCDAgentImage)
+	if err != nil {
+		return fmt.Errorf("failed to parse ArgoCDAgentImage: %w", err)
+	}
+
+	argocdAgent["image"] = agentImage
+	argocdAgent["tag"] = agentTag
+	argocdAgent["serverAddress"] = r.ArgoCDAgentServerAddress
+	argocdAgent["serverPort"] = r.ArgoCDAgentServerPort
+	argocdAgent["mode"] = r.ArgoCDAgentMode
+
+	// override http proxy configuration
+	proxyConfig, ok := global["proxyConfig"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("proxyConfig field not found or invalid type")
+	}
+
+	if r.HTTP_PROXY > "" {
+		proxyConfig["HTTP_PROXY"] = r.HTTP_PROXY
+	}
+
+	if r.HTTPS_PROXY > "" {
+		proxyConfig["HTTPS_PROXY"] = r.HTTPS_PROXY
+	}
+
+	if r.NO_PROXY > "" {
+		proxyConfig["NO_PROXY"] = r.NO_PROXY
+	}
+
+	// Write the updated data back to the file
+	outputFile, err := os.Create(filepath.Clean(destFilePath))
+	if err != nil {
+		return fmt.Errorf("failed to open file for writing: %w", err)
+	}
+	defer outputFile.Close()
+
+	encoder := yaml.NewEncoder(outputFile)
+	encoder.SetIndent(2)
+
+	if err := encoder.Encode(values); err != nil {
+		return fmt.Errorf("failed to encode YAML: %w", err)
+	}
+
+	return nil
+}
+
+func (r *GitopsAddonReconciler) ensureArgoCDRedisSecret() error {
+	// Check if argocd-redis secret already exists
+	argoCDRedisSecret := &corev1.Secret{}
+	argoCDRedisSecretKey := types.NamespacedName{
+		Name:      "argocd-redis",
+		Namespace: r.GitopsNS,
+	}
+
+	err := r.Get(context.TODO(), argoCDRedisSecretKey, argoCDRedisSecret)
+	if err == nil {
+		klog.Info("argocd-redis secret already exists, skipping creation")
+		return nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check argocd-redis secret: %w", err)
+	}
+
+	klog.Info("argocd-redis secret not found, creating it...")
+
+	// Get the openshift-gitops-redis-initial-password secret
+	initialPasswordSecret := &corev1.Secret{}
+	initialPasswordSecretKey := types.NamespacedName{
+		Name:      "openshift-gitops-redis-initial-password",
+		Namespace: r.GitopsNS,
+	}
+
+	err = r.Get(context.TODO(), initialPasswordSecretKey, initialPasswordSecret)
+	if err != nil {
+		return fmt.Errorf("failed to get openshift-gitops-redis-initial-password secret: %w", err)
+	}
+
+	// Extract the admin.password value
+	adminPasswordBytes, exists := initialPasswordSecret.Data["admin.password"]
+	if !exists {
+		return fmt.Errorf("admin.password not found in openshift-gitops-redis-initial-password secret")
+	}
+
+	// Create the argocd-redis secret
+	argoCDRedisSecretNew := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-redis",
+			Namespace: r.GitopsNS,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopsaddon": "true",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"auth": adminPasswordBytes,
+		},
+	}
+
+	err = r.Create(context.TODO(), argoCDRedisSecretNew)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			klog.Info("argocd-redis secret was created by another process, continuing...")
+			return nil
+		}
+
+		return fmt.Errorf("failed to create argocd-redis secret: %w", err)
+	}
+
+	klog.Info("Successfully created argocd-redis secret")
+
+	return nil
+}
+
+func (r *GitopsAddonReconciler) deleteArgoCDRedisSecret() error {
+	argoCDRedisSecret := &corev1.Secret{}
+	argoCDRedisSecretKey := types.NamespacedName{
+		Name:      "argocd-redis",
+		Namespace: r.GitopsNS,
+	}
+
+	err := r.Get(context.TODO(), argoCDRedisSecretKey, argoCDRedisSecret)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Info("argocd-redis secret not found, nothing to delete")
+			return nil
+		}
+
+		return fmt.Errorf("failed to get argocd-redis secret: %w", err)
+	}
+
+	// Only delete the secret if it was created by us (has our label)
+	if label, exists := argoCDRedisSecret.Labels["apps.open-cluster-management.io/gitopsaddon"]; !exists || label != "true" {
+		klog.Info("argocd-redis secret not managed by gitopsaddon, skipping deletion")
+		return nil
+	}
+
+	err = r.Delete(context.TODO(), argoCDRedisSecret)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Info("argocd-redis secret was already deleted")
+			return nil
+		}
+
+		return fmt.Errorf("failed to delete argocd-redis secret: %w", err)
+	}
+
+	klog.Info("Successfully deleted argocd-redis secret")
+
+	return nil
+}
+
 func ParseImageReference(imageRef string) (string, string, error) {
-	parts := strings.SplitN(imageRef, "@", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid image reference format, expected image@digest: %s", imageRef)
+	// First try to parse as image@digest format
+	if strings.Contains(imageRef, "@") {
+		parts := strings.SplitN(imageRef, "@", 2)
+		if len(parts) != 2 {
+			return "", "", fmt.Errorf("invalid image reference format with @: %s", imageRef)
+		}
+
+		image := parts[0]
+		digest := parts[1]
+
+		// Validate image and digest are not empty
+		if image == "" {
+			return "", "", fmt.Errorf("image part is empty")
+		}
+
+		if digest == "" {
+			return "", "", fmt.Errorf("tag/digest part is empty")
+		}
+
+		// If the digest doesn't start with "sha256:", add it
+		if !strings.HasPrefix(digest, "sha256:") {
+			digest = "sha256:" + digest
+		}
+
+		return image, digest, nil
 	}
 
-	image := parts[0]
-	tag := parts[1]
+	// Try to parse as image:tag format
+	if strings.Contains(imageRef, ":") {
+		// Find the last colon to handle registry URLs with ports (e.g., localhost:5000/image:tag)
+		lastColonIndex := strings.LastIndex(imageRef, ":")
+		if lastColonIndex == -1 {
+			return "", "", fmt.Errorf("invalid image reference format: %s", imageRef)
+		}
 
-	// Validate image and tag are not empty
-	if image == "" {
-		return "", "", fmt.Errorf("image part is empty")
+		image := imageRef[:lastColonIndex]
+		tag := imageRef[lastColonIndex+1:]
+
+		// Validate image and tag are not empty
+		if image == "" {
+			return "", "", fmt.Errorf("image part is empty")
+		}
+
+		if tag == "" {
+			return "", "", fmt.Errorf("tag/digest part is empty")
+		}
+
+		// For tag format, we return the tag as-is (it will be used as a tag, not a digest)
+		return image, tag, nil
 	}
 
-	if tag == "" {
-		return "", "", fmt.Errorf("tag/digest part is empty")
-	}
-
-	// If the digest doesn't start with "sha256:", add it
-	if !strings.HasPrefix(tag, "sha256:") {
-		tag = "sha256:" + tag
-	}
-
-	return image, tag, nil
+	// If neither @ nor : is found, it's an invalid format
+	return "", "", fmt.Errorf("invalid image reference format, expected image:tag or image@digest: %s", imageRef)
 }
 
 func (r *GitopsAddonReconciler) ShouldUpdateOpenshiftGiopsOperator() bool {
@@ -632,6 +907,39 @@ func (r *GitopsAddonReconciler) ShouldUpdateOpenshiftGiops() bool {
 			namespace.Annotations["apps.open-cluster-management.io/redis-image"] != r.RedisImage ||
 			namespace.Annotations["apps.open-cluster-management.io/reconcile-scope"] != r.ReconcileScope {
 			klog.Infof("new gitops manifest found")
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *GitopsAddonReconciler) ShouldUpdateArgoCDAgent() bool {
+	nameSpaceKey := types.NamespacedName{
+		Name: r.GitopsNS,
+	}
+	namespace := &corev1.Namespace{}
+	err := r.Get(context.TODO(), nameSpaceKey, namespace)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("no gitops namespace found for argocd-agent")
+			return true
+		} else {
+			klog.Errorf("Failed to get the %v namespace for argocd-agent, err: %v", r.GitopsNS, err)
+			return false
+		}
+	} else {
+		if _, ok := namespace.Labels["apps.open-cluster-management.io/gitopsaddon"]; !ok {
+			klog.Errorf("The %v namespace is not owned by gitops addon", r.GitopsNS)
+			return false
+		}
+
+		if namespace.Annotations["apps.open-cluster-management.io/argocd-agent-image"] != r.ArgoCDAgentImage ||
+			namespace.Annotations["apps.open-cluster-management.io/argocd-agent-server-address"] != r.ArgoCDAgentServerAddress ||
+			namespace.Annotations["apps.open-cluster-management.io/argocd-agent-server-port"] != r.ArgoCDAgentServerPort ||
+			namespace.Annotations["apps.open-cluster-management.io/argocd-agent-mode"] != r.ArgoCDAgentMode {
+			klog.Infof("new argocd-agent configuration found")
 			return true
 		}
 	}
@@ -817,6 +1125,11 @@ func (r *GitopsAddonReconciler) postUpdate(nameSpaceKey types.NamespacedName, ns
 	if nsType == "openshift-gitops-operator" {
 		namespacePatch.Annotations["apps.open-cluster-management.io/gitops-operator-image"] = r.GitopsOperatorImage
 		namespacePatch.Annotations["apps.open-cluster-management.io/gitops-operator-ns"] = r.GitopsOperatorNS
+	} else if nsType == "argocd-agent" {
+		namespacePatch.Annotations["apps.open-cluster-management.io/argocd-agent-image"] = r.ArgoCDAgentImage
+		namespacePatch.Annotations["apps.open-cluster-management.io/argocd-agent-server-address"] = r.ArgoCDAgentServerAddress
+		namespacePatch.Annotations["apps.open-cluster-management.io/argocd-agent-server-port"] = r.ArgoCDAgentServerPort
+		namespacePatch.Annotations["apps.open-cluster-management.io/argocd-agent-mode"] = r.ArgoCDAgentMode
 	} else {
 		namespacePatch.Annotations["apps.open-cluster-management.io/gitops-image"] = r.GitopsImage
 		namespacePatch.Annotations["apps.open-cluster-management.io/gitops-ns"] = r.GitopsNS
@@ -853,6 +1166,13 @@ func (r *GitopsAddonReconciler) unsetNamespace(nameSpaceKey types.NamespacedName
 		if namespacePatch.Annotations != nil {
 			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/gitops-operator-image")
 			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/gitops-operator-ns")
+		}
+	} else if nsType == "argocd-agent" {
+		if namespacePatch.Annotations != nil {
+			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/argocd-agent-image")
+			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/argocd-agent-server-address")
+			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/argocd-agent-server-port")
+			delete(namespacePatch.Annotations, "apps.open-cluster-management.io/argocd-agent-mode")
 		}
 	} else {
 		if namespacePatch.Annotations != nil {

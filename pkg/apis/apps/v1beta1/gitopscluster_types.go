@@ -53,6 +53,9 @@ type GitOpsClusterSpec struct {
 	// ManagedServiceAccountRef defines managed service account in the managed cluster namespace used to create the ArgoCD cluster secret.
 	ManagedServiceAccountRef string `json:"managedServiceAccountRef,omitempty"`
 
+	// ArgoCDAgent defines the configuration for the ArgoCD agent.
+	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
+
 	// Internally used.
 	CreateBlankClusterSecrets *bool `json:"createBlankClusterSecrets,omitempty"`
 
@@ -67,6 +70,13 @@ type ArgoServerSpec struct {
 
 	// ArgoNamespace is the namespace in which the Argo CD server is installed.
 	ArgoNamespace string `json:"argoNamespace"`
+}
+
+// ArgoCDAgentSpec defines the configuration for the ArgoCD agent.
+type ArgoCDAgentSpec struct {
+	// Enabled indicates whether the ArgoCD agent is enabled. Default is false.
+	// +kubebuilder:default=false
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // +kubebuilder:object:root=true

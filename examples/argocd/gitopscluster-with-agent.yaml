@@ -1,0 +1,28 @@
+# Creates a gitopscluster resource with ArgoCD Agent enabled
+#
+# Requires:
+#  Argo CD be installed in the project "argocd"
+#  Placement resource "all-openshift-clusters" exists
+#  A clusterSet is bound to the openshift-gitops namespace 
+#  ArgoCD Agent CA secret "argocd-agent-ca" exists in the target namespace
+---
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: argo-ocm-importer-with-agent
+  namespace: argocd
+spec:
+  createBlankClusterSecrets: true
+  createPolicyTemplate: true
+  managedServiceAccountRef: "msa"
+  # Enable ArgoCD Agent for secure communication
+  argoCDAgent:
+    enabled: true
+  argoServer:
+    cluster: notused
+    argoNamespace: argocd
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: global
+    namespace: argocd

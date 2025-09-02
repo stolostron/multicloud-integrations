@@ -8,8 +8,22 @@ set -o pipefail
 
 echo "SETUP install multicloud-integrations"
 kubectl config use-context kind-hub
+kubectl create namespace argocd
 kubectl apply -f deploy/crds/
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
+
+# Create dummy source secret before deploying controller
+echo "Creating dummy source secret for CA secret testing..."
+kubectl apply -f e2e/hub/dummy-application-svc-ca-secret.yaml
+
+# Create dummy agent principal service for certificate testing
+echo "Creating dummy agent principal service for certificate testing..."
+kubectl apply -f e2e/hub/agent-principal.yaml
+
+# Manually add the status to the service since kubectl apply doesn't preserve it
+echo "Adding LoadBalancer status to agent principal service..."
+kubectl patch service openshift-gitops-agent-principal -n argocd --subresource=status --patch '{"status":{"loadBalancer":{"ingress":[{"hostname":"foobar.us-west-1.elb.amazonaws.com"}]}}}'
+
 kubectl apply -f deploy/controller/
 
 kubectl -n open-cluster-management rollout status deployment multicloud-integrations-gitops --timeout=120s
@@ -37,7 +51,6 @@ kubectl -n argocd scale deployment/argocd-notifications-controller --replicas 0
 
 echo "SETUP install Argo CD to Hub cluster"
 kubectl config use-context kind-hub
-kubectl create namespace argocd
 kubectl apply -n argocd --force -f hack/test/e2e/argo-cd-install.yaml 
 kubectl -n argocd scale deployment/argocd-dex-server --replicas 0
 kubectl -n argocd scale deployment/argocd-repo-server --replicas 0
@@ -70,9 +83,102 @@ kubectl -n argocd get deploy
 kubectl -n argocd get statefulset
 kubectl -n open-cluster-management get deploy
 
+### GitOpsCluster Auto-Provisioning Tests
+echo "TEST Namespace and RBAC Auto-Provisioning"
+kubectl config use-context kind-hub
+
+# Test 1: Verify openshift-gitops namespace is created
+if kubectl get namespace openshift-gitops; then
+    echo "Namespace Auto-Provisioning: openshift-gitops namespace exists"
+else
+    echo "Namespace Auto-Provisioning FAILED: openshift-gitops namespace not created"
+    exit 1
+fi
+
+# Test 2: Verify addon-manager-controller-role is created
+if kubectl -n openshift-gitops get role addon-manager-controller-role; then
+    echo "RBAC Auto-Provisioning: addon-manager-controller-role exists"
+else
+    echo "RBAC Auto-Provisioning FAILED: addon-manager-controller-role not created"
+    exit 1
+fi
+
+# Test 3: Verify addon-manager-controller-rolebinding is created
+if kubectl -n openshift-gitops get rolebinding addon-manager-controller-rolebinding; then
+    echo "RBAC Auto-Provisioning: addon-manager-controller-rolebinding exists"
+else
+    echo "RBAC Auto-Provisioning FAILED: addon-manager-controller-rolebinding not created"
+    exit 1
+fi
+
+# Test 4: Verify role has correct permissions for secrets
+if kubectl -n openshift-gitops get role addon-manager-controller-role -o yaml | grep -A3 "resources:" | grep "secrets"; then
+    echo "RBAC Permissions: role has secrets permissions"
+else
+    echo "RBAC Permissions FAILED: role missing secrets permissions"
+    exit 1
+fi
+
+# Test 5: Verify role has correct verbs (get, list, watch)
+if kubectl -n openshift-gitops get role addon-manager-controller-role -o yaml | grep -A5 "verbs:" | grep -E "(get|list|watch)"; then
+    echo "RBAC Permissions: role has correct verbs"
+else
+    echo "RBAC Permissions FAILED: role missing required verbs"
+    exit 1
+fi
+
+# Test 6: Verify RBAC resources have correct labels
+if kubectl -n openshift-gitops get role addon-manager-controller-role -o yaml | grep "apps.open-cluster-management.io/gitopsaddon.*true"; then
+    echo "RBAC Labels: role has correct gitopsaddon label"
+else
+    echo "RBAC Labels FAILED: role missing gitopsaddon label"
+    exit 1
+fi
+
+if kubectl -n openshift-gitops get rolebinding addon-manager-controller-rolebinding -o yaml | grep "apps.open-cluster-management.io/gitopsaddon.*true"; then
+    echo "RBAC Labels: rolebinding has correct gitopsaddon label"
+else
+    echo "RBAC Labels FAILED: rolebinding missing gitopsaddon label"
+    exit 1
+fi
+
+# Test 7: Verify rolebinding has correct subject (addon-manager-controller-sa in open-cluster-management-hub)
+if kubectl -n openshift-gitops get rolebinding addon-manager-controller-rolebinding -o yaml | grep -A3 "subjects:" | grep "addon-manager-controller-sa"; then
+    echo "RBAC Subject: rolebinding has correct service account subject"
+else
+    echo "RBAC Subject FAILED: rolebinding missing correct service account subject"
+    exit 1
+fi
+
+if kubectl -n openshift-gitops get rolebinding addon-manager-controller-rolebinding -o yaml | grep -A5 "subjects:" | grep "open-cluster-management-hub"; then
+    echo "RBAC Subject: rolebinding has correct namespace for subject"
+else
+    echo "RBAC Subject FAILED: rolebinding missing correct namespace for subject"
+    exit 1
+fi
+
+# Test 8: Verify rolebinding references the correct role
+if kubectl -n openshift-gitops get rolebinding addon-manager-controller-rolebinding -o yaml | grep -A3 "roleRef:" | grep "addon-manager-controller-role"; then
+    echo "RBAC RoleRef: rolebinding references correct role"
+else
+    echo "RBAC RoleRef FAILED: rolebinding does not reference correct role"
+    exit 1
+fi
+
+### CA Secret Auto-Provisioning Tests
+echo "TEST CA Secret Auto-Provisioning"
+
+# Verify argocd-agent-ca secret is created in openshift-gitops namespace
+if kubectl -n openshift-gitops get secret argocd-agent-ca; then
+    echo "CA Secret Copy: argocd-agent-ca secret created in openshift-gitops namespace"
+else
+    echo "CA Secret Copy FAILED: argocd-agent-ca secret not created"
+    kubectl -n open-cluster-management logs deployment/multicloud-integrations-gitops
+    exit 1
+fi
+
 ### GitOpsCluster
 echo "TEST GitOpsCluster"
-kubectl config use-context kind-hub
 # Add test label to cluster1 to test that labels are propagated
 kubectl label managedcluster cluster1 test-label=test-value
 kubectl apply -f examples/argocd/
@@ -222,3 +328,146 @@ if kubectl -n argocd get app cluster1-guestbook-app-only -o yaml | grep "argocd.
 else
     echo "Refresh Annotation: annotation deleted successfully after 60 seconds"
 fi
+
+### ArgoCD Agent Certificate Tests
+echo "TEST ArgoCD Agent Certificates"
+kubectl config use-context kind-hub
+
+# Test 1: Verify certificates are NOT created when ArgoCD agent is disabled (default state)
+if kubectl -n argocd get secret argocd-agent-principal-tls 2>/dev/null; then
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls should not exist when agent disabled"
+    exit 1
+else
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls correctly does not exist when agent disabled"
+fi
+
+if kubectl -n argocd get secret argocd-agent-resource-proxy-tls 2>/dev/null; then
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls should not exist when agent disabled"
+    exit 1
+else
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls correctly does not exist when agent disabled"
+fi
+
+# Setup: Copy argocd-agent-ca secret to argocd namespace (required for agent)
+# The secret was verified to exist in openshift-gitops namespace in the CA Secret Auto-Provisioning test above
+echo "Copying argocd-agent-ca secret from openshift-gitops to argocd namespace..."
+if kubectl -n openshift-gitops get secret argocd-agent-ca; then
+    kubectl -n openshift-gitops get secret argocd-agent-ca -o yaml | \
+    sed 's/namespace: openshift-gitops/namespace: argocd/' | \
+    kubectl apply -f -
+    echo "ArgoCD Agent Certificates: argocd-agent-ca secret copied to argocd namespace"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-ca secret not found in openshift-gitops namespace"
+    exit 1
+fi
+
+# Test 2: Enable ArgoCD agent and verify certificates are created
+echo "Enabling ArgoCD agent in GitOpsCluster..."
+kubectl -n argocd patch gitopscluster argo-ocm-importer --type merge -p '{"spec":{"argoCDAgent":{"enabled":true}}}'
+sleep 30s
+
+# Verify GitOpsCluster status is still successful after enabling agent
+if kubectl -n argocd get gitopsclusters argo-ocm-importer -o yaml | grep successful; then
+    echo "ArgoCD Agent Certificates: GitOpsCluster status successful with agent enabled"
+else
+    echo "ArgoCD Agent Certificates FAILED: GitOpsCluster status not successful with agent enabled"
+    kubectl -n argocd get gitopsclusters argo-ocm-importer -o yaml
+    kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops
+    exit 1
+fi
+
+# Test 3: Verify principal TLS certificate is created
+if kubectl -n argocd get secret argocd-agent-principal-tls; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls created when agent enabled"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls not created when agent enabled"
+    kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops
+    exit 1
+fi
+
+# Test 4: Verify resource proxy TLS certificate is created  
+if kubectl -n argocd get secret argocd-agent-resource-proxy-tls; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls created when agent enabled"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls not created when agent enabled"
+    kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops
+    exit 1
+fi
+
+# Test 5: Verify principal TLS secret has correct type and keys
+if kubectl -n argocd get secret argocd-agent-principal-tls -o yaml | grep "type: kubernetes.io/tls"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls has correct TLS type"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls missing TLS type"
+    exit 1
+fi
+
+if kubectl -n argocd get secret argocd-agent-principal-tls -o yaml | grep "tls.crt:"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls contains tls.crt"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls missing tls.crt"
+    exit 1
+fi
+
+if kubectl -n argocd get secret argocd-agent-principal-tls -o yaml | grep "tls.key:"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls contains tls.key"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls missing tls.key"
+    exit 1
+fi
+
+# Check that tls.crt is not empty
+if [[ -n $(kubectl -n argocd get secret argocd-agent-principal-tls -o jsonpath='{.data.tls\.crt}') ]]; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls tls.crt is not empty"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls tls.crt is empty"
+    exit 1
+fi
+
+# Check that tls.key is not empty
+if [[ -n $(kubectl -n argocd get secret argocd-agent-principal-tls -o jsonpath='{.data.tls\.key}') ]]; then
+    echo "ArgoCD Agent Certificates: argocd-agent-principal-tls tls.key is not empty"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-principal-tls tls.key is empty"
+    exit 1
+fi
+
+# Test 6: Verify resource proxy TLS secret has correct type and keys
+if kubectl -n argocd get secret argocd-agent-resource-proxy-tls -o yaml | grep "type: kubernetes.io/tls"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls has correct TLS type"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls missing TLS type"
+    exit 1
+fi
+
+if kubectl -n argocd get secret argocd-agent-resource-proxy-tls -o yaml | grep "tls.crt:"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls contains tls.crt"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls missing tls.crt"
+    exit 1
+fi
+
+if kubectl -n argocd get secret argocd-agent-resource-proxy-tls -o yaml | grep "tls.key:"; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls contains tls.key"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls missing tls.key"
+    exit 1
+fi
+
+# Check that tls.crt is not empty
+if [[ -n $(kubectl -n argocd get secret argocd-agent-resource-proxy-tls -o jsonpath='{.data.tls\.crt}') ]]; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls tls.crt is not empty"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls tls.crt is empty"
+    exit 1
+fi
+
+# Check that tls.key is not empty
+if [[ -n $(kubectl -n argocd get secret argocd-agent-resource-proxy-tls -o jsonpath='{.data.tls\.key}') ]]; then
+    echo "ArgoCD Agent Certificates: argocd-agent-resource-proxy-tls tls.key is not empty"
+else
+    echo "ArgoCD Agent Certificates FAILED: argocd-agent-resource-proxy-tls tls.key is empty"
+    exit 1
+fi
+
+echo "All ArgoCD Agent Certificate tests passed successfully!"

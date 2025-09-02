@@ -62,16 +62,21 @@ var (
 	metricsPort = 8387
 
 	// The default values for the latest openshift gitops operator. It requires to refresh in each ACM major release GA
-	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a932c0397dcd29a75216a7d0467a640decf8651d41afe74379860035a93a6bd"
-	GitopsOperatorNS    = "openshift-gitops-operator"
-	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:94e19aca2c330ec15a7de3c2d9309bb2e956320ef29dae2df3dfe6b9cad4ed39"
-	GitopsNS            = "openshift-gitops"
-	RedisImage          = "registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371"
-	ReconcileScope      = "Single-Namespace"
-	HTTP_PROXY          = ""
-	HTTPS_PROXY         = ""
-	NO_PROXY            = ""
-	ACTION              = "Install" // Other options: "Delete-Operator", "Delete-Instance"
+	GitopsOperatorImage         = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a932c0397dcd29a75216a7d0467a640decf8651d41afe74379860035a93a6bd"
+	GitopsOperatorNS            = "openshift-gitops-operator"
+	GitopsImage                 = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:94e19aca2c330ec15a7de3c2d9309bb2e956320ef29dae2df3dfe6b9cad4ed39"
+	GitopsNS                    = "openshift-gitops"
+	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371"
+	ReconcileScope              = "Single-Namespace"
+	HTTP_PROXY                  = ""
+	HTTPS_PROXY                 = ""
+	NO_PROXY                    = ""
+	ACTION                      = "Install" // Other options: "Delete-Operator", "Delete-Instance"
+	ARGOCD_AGENT_ENABLED        = "false"
+	ARGOCD_AGENT_IMAGE          = "ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest"
+	ARGOCD_AGENT_SERVER_ADDRESS = ""
+	ARGOCD_AGENT_SERVER_PORT    = "443"
+	ARGOCD_AGENT_MODE           = "managed"
 )
 
 func init() {
@@ -162,6 +167,31 @@ func main() {
 		ACTION = newACTION
 	}
 
+	newArgoCDAgentEnabled, found := os.LookupEnv("ARGOCD_AGENT_ENABLED")
+	if found && newArgoCDAgentEnabled > "" {
+		ARGOCD_AGENT_ENABLED = newArgoCDAgentEnabled
+	}
+
+	newArgoCDAgentImage, found := os.LookupEnv("ARGOCD_AGENT_IMAGE")
+	if found && newArgoCDAgentImage > "" {
+		ARGOCD_AGENT_IMAGE = newArgoCDAgentImage
+	}
+
+	newArgoCDAgentServerAddress, found := os.LookupEnv("ARGOCD_AGENT_SERVER_ADDRESS")
+	if found && newArgoCDAgentServerAddress > "" {
+		ARGOCD_AGENT_SERVER_ADDRESS = newArgoCDAgentServerAddress
+	}
+
+	newArgoCDAgentServerPort, found := os.LookupEnv("ARGOCD_AGENT_SERVER_PORT")
+	if found && newArgoCDAgentServerPort > "" {
+		ARGOCD_AGENT_SERVER_PORT = newArgoCDAgentServerPort
+	}
+
+	newArgoCDAgentMode, found := os.LookupEnv("ARGOCD_AGENT_MODE")
+	if found && newArgoCDAgentMode > "" {
+		ARGOCD_AGENT_MODE = newArgoCDAgentMode
+	}
+
 	setupLog.Info("Leader election settings",
 		"leaseDuration", options.LeaderElectionLeaseDuration,
 		"renewDeadline", options.LeaderElectionRenewDeadline,
@@ -177,6 +207,11 @@ func main() {
 		"HTTPS_PROXY", HTTPS_PROXY,
 		"NO_PROXY", NO_PROXY,
 		"ACTION", ACTION,
+		"ARGOCD_AGENT_ENABLED", ARGOCD_AGENT_ENABLED,
+		"ARGOCD_AGENT_IMAGE", ARGOCD_AGENT_IMAGE,
+		"ARGOCD_AGENT_SERVER_ADDRESS", ARGOCD_AGENT_SERVER_ADDRESS,
+		"ARGOCD_AGENT_SERVER_PORT", ARGOCD_AGENT_SERVER_PORT,
+		"ARGOCD_AGENT_MODE", ARGOCD_AGENT_MODE,
 	)
 
 	// Create a new Cmd to provide shared dependencies and start components
@@ -197,7 +232,7 @@ func main() {
 	}
 
 	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ACTION); err != nil {
+		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ACTION, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}

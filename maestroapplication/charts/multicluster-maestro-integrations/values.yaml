@@ -6,7 +6,7 @@ fullnameOverride: maestro-argocd-pullmodel
 global: 
   pullPolicy: IfNotPresent
   imageOverrides:
-    multicloud_integrations: quay.io/xiangjingli/multicloud-integrations:maestro-integration-4
+    multicloud_integrations: quay.io/stolostron/multicloud-integrations:latest
     pullSecret: multiclusterhub-operator-pull-secret
 hubconfig:
   proxyConfigs:

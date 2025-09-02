@@ -1,0 +1,16 @@
+org: open-cluster-management
+
+nameOverride: argocd-agent
+fullnameOverride: argocd-agent
+
+global: 
+  argocdAgent: 
+    image: ""
+    tag: ""
+    serverAddress: ""
+    serverPort: ""
+    mode: ""
+  proxyConfig:
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    NO_PROXY: ""

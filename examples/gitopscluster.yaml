@@ -12,6 +12,8 @@ metadata:
   namespace: openshift-gitops
 spec:
   # createBlankClusterSecrets: true
+  # argoCDAgent:
+  #   enabled: true
   argoServer:
     cluster: notused
     argoNamespace: openshift-gitops

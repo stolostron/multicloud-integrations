@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshift-gitops-agent-principal
+  namespace: argocd
+spec:
+  type: LoadBalancer
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP
+    nodePort: 30179
+  selector:
+    app.kubernetes.io/name: openshift-gitops-agent-principal
