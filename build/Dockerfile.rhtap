@@ -16,6 +16,18 @@ ENV OPERATOR=/usr/local/bin/multicloud-integrations \
     USER_UID=1001 \
     USER_NAME=multicloud-integrations
 
+LABEL \
+    name="multicloud-integrations" \
+    com.redhat.component="multicloud-integrations" \
+    description="Multicloud integrations" \
+    maintainer="acm-contact@redhat.com" \
+    io.k8s.description="Multicloud integrations" \
+    org.label-schema.license="Red Hat Advanced Cluster Management for Kubernetes EULA" \
+    org.label-schema.schema-version="1.0" \
+    summary="Multicloud integrations" \
+    io.k8s.display-name="Multicloud integrations" \
+    io.openshift.tags="mce acm multicloud-integrations"
+
 # install operator binary
 COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopscluster /usr/local/bin/gitopscluster
 COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopssyncresc /usr/local/bin/gitopssyncresc
