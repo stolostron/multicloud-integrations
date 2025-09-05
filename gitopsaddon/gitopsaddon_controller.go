@@ -1037,7 +1037,7 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.NamespacedName) error {
 	secretName := "open-cluster-management-image-pull-credentials"
 	secret := &corev1.Secret{}
-	gitopsAddonNs := utils.GetComponentNamespace()
+	gitopsAddonNs := utils.GetComponentNamespace("open-cluster-management-agent-addon")
 
 	// Get the original gitops addon image pull secret
 	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: gitopsAddonNs}, secret)
