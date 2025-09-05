@@ -112,14 +112,14 @@ func CheckAndInstallCRD(crdconfig *rest.Config, pathname string) error {
 	return err
 }
 
-func GetComponentNamespace() string {
+func GetComponentNamespace(defaultNs string) string {
 	addonNameSpace := ""
 	nsBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
 	if err != nil || len(nsBytes) == 0 {
 		klog.Errorf("failed to get gitops addon pod namespace. error: %v", err)
 
-		addonNameSpace = "open-cluster-management-agent-addon"
+		addonNameSpace = defaultNs
 	} else {
 		addonNameSpace = string(nsBytes)
 	}

@@ -368,7 +368,7 @@ func ensureArgoCDAgentCASecret(kubeClient client.Client) error {
 	sourceSecret := &v1.Secret{}
 	sourceSecretName := types.NamespacedName{
 		Name:      "multicluster-operators-application-svc-ca",
-		Namespace: "open-cluster-management",
+		Namespace: utils.GetComponentNamespace("open-cluster-management"),
 	}
 
 	err = kubeClient.Get(context.TODO(), sourceSecretName, sourceSecret)
