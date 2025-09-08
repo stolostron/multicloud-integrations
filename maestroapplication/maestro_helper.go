@@ -111,7 +111,7 @@ func BuildWorkClient(ctx context.Context, maestroServerAddr, grpcServerAddr stri
 		UserAgent:     "OpenAPI-Generator/1.0.0/go",
 		Debug:         false,
 		Servers: openapi.ServerConfigurations{
-			{
+			openapi.ServerConfiguration{
 				URL:         maestroServerAddr,
 				Description: "current domain",
 			},
@@ -318,6 +318,15 @@ func generateManifestWork(name, namespace string, app *unstructured.Unstructured
 					},
 					UpdateStrategy: &workv1.UpdateStrategy{
 						Type: workv1.UpdateStrategyTypeServerSideApply,
+						ServerSideApply: &workv1.ServerSideApplyConfig{
+							IgnoreFields: []workv1.IgnoreField{
+								{
+									Condition: workv1.IgnoreFieldsConditionOnSpokeChange,
+									// Ignore changes to operation field and refresh annotation (handles all values: normal, hard, etc.)
+									JSONPaths: []string{".operation", ".metadata.annotations[\"argocd.argoproj.io/refresh\"]"},
+								},
+							},
+						},
 					},
 				},
 			},
