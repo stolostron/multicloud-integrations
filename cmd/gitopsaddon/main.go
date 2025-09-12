@@ -49,7 +49,7 @@ type GitopsAddonAgentOptions struct {
 
 var options = GitopsAddonAgentOptions{
 	MetricsAddr:                 "",
-	LeaderElectionLeaseDuration: 60 * time.Second,
+	LeaderElectionLeaseDuration: 15 * time.Second,
 	LeaderElectionRenewDeadline: 10 * time.Second,
 	LeaderElectionRetryPeriod:   2 * time.Second,
 	SyncInterval:                60,
@@ -62,11 +62,11 @@ var (
 	metricsPort = 8387
 
 	// The default values for the latest openshift gitops operator. It requires to refresh in each ACM major release GA
-	GitopsOperatorImage         = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:2a932c0397dcd29a75216a7d0467a640decf8651d41afe74379860035a93a6bd"
+	GitopsOperatorImage         = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:1b86eb4e071b1c526931b6d18c3d8f51522293699059c514488602c320271049"
 	GitopsOperatorNS            = "openshift-gitops-operator"
-	GitopsImage                 = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:94e19aca2c330ec15a7de3c2d9309bb2e956320ef29dae2df3dfe6b9cad4ed39"
+	GitopsImage                 = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
 	GitopsNS                    = "openshift-gitops"
-	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371"
+	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
 	ReconcileScope              = "Single-Namespace"
 	HTTP_PROXY                  = ""
 	HTTPS_PROXY                 = ""
@@ -100,6 +100,34 @@ func main() {
 		"metrics-addr",
 		options.MetricsAddr,
 		"The address the metric endpoint binds to.",
+	)
+
+	flag.DurationVar(
+		&options.LeaderElectionLeaseDuration,
+		"leader-election-lease-duration",
+		options.LeaderElectionLeaseDuration,
+		"The duration that non-leader candidates will wait after observing a leadership "+
+			"renewal until attempting to acquire leadership of a led but unrenewed leader "+
+			"slot. This is effectively the maximum duration that a leader can be stopped "+
+			"before it is replaced by another candidate. This is only applicable if leader "+
+			"election is enabled.",
+	)
+
+	flag.DurationVar(
+		&options.LeaderElectionRenewDeadline,
+		"leader-election-renew-deadline",
+		options.LeaderElectionRenewDeadline,
+		"The interval between attempts by the acting master to renew a leadership slot "+
+			"before it stops leading. This must be less than or equal to the lease duration. "+
+			"This is only applicable if leader election is enabled.",
+	)
+
+	flag.DurationVar(
+		&options.LeaderElectionRetryPeriod,
+		"leader-election-retry-period",
+		options.LeaderElectionRetryPeriod,
+		"The duration the clients should wait between attempting acquisition and renewal "+
+			"of a leadership. This is only applicable if leader election is enabled.",
 	)
 
 	flag.IntVar(

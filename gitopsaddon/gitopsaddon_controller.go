@@ -866,11 +866,6 @@ func (r *GitopsAddonReconciler) ShouldUpdateOpenshiftGiopsOperator() bool {
 			return false
 		}
 	} else {
-		if _, ok := namespace.Labels["apps.open-cluster-management.io/gitopsaddon"]; !ok {
-			klog.Errorf("The %v namespace is not owned by gitops addon", r.GitopsOperatorNS)
-			return false
-		}
-
 		if namespace.Annotations["apps.open-cluster-management.io/gitops-operator-image"] != r.GitopsOperatorImage ||
 			namespace.Annotations["apps.open-cluster-management.io/gitops-operator-ns"] != r.GitopsOperatorNS {
 			klog.Infof("new gitops operator manifest found")
@@ -897,11 +892,6 @@ func (r *GitopsAddonReconciler) ShouldUpdateOpenshiftGiops() bool {
 			return false
 		}
 	} else {
-		if _, ok := namespace.Labels["apps.open-cluster-management.io/gitopsaddon"]; !ok {
-			klog.Errorf("The %v namespace is not owned by gitops addon", r.GitopsNS)
-			return false
-		}
-
 		if namespace.Annotations["apps.open-cluster-management.io/gitops-image"] != r.GitopsImage ||
 			namespace.Annotations["apps.open-cluster-management.io/gitops-ns"] != r.GitopsNS ||
 			namespace.Annotations["apps.open-cluster-management.io/redis-image"] != r.RedisImage ||
