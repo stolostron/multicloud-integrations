@@ -8,22 +8,14 @@ rules:
   resources:
   - configmaps
   verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
+  - '*'
 - apiGroups:
   - ""
   resources:
-  - configmaps
   - endpoints
   - events
   - namespaces
   - persistentvolumeclaims
-  - pods
   - resourcequotas
   - secrets
   - serviceaccounts
@@ -35,6 +27,11 @@ rules:
   - ""
   resources:
   - pods
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
   - pods/log
   verbs:
   - get
@@ -73,27 +70,15 @@ rules:
   resources:
   - applications
   - appprojects
-  verbs:
-  - '*'
-- apiGroups:
-  - argoproj.io
-  resources:
   - argocdexports
   - argocdexports/finalizers
   - argocdexports/status
-  verbs:
-  - '*'
-- apiGroups:
-  - argoproj.io
-  resources:
   - argocds
   - argocds/finalizers
   - argocds/status
-  verbs:
-  - '*'
-- apiGroups:
-  - argoproj.io
-  resources:
+  - namespacemanagements
+  - namespacemanagements/finalizers
+  - namespacemanagements/status
   - notificationsconfigurations
   - notificationsconfigurations/finalizers
   - rolloutmanagers
@@ -176,11 +161,6 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - '*'
-  verbs:
-  - '*'
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
   - clusterrolebindings
   - clusterroles
   verbs:
@@ -198,5 +178,11 @@ rules:
   - templateconfigs
   - templateinstances
   - templates
+  verbs:
+  - '*'
+- apiGroups:
+  - console.openshift.io
+  resources:
+  - '*'
   verbs:
   - '*'

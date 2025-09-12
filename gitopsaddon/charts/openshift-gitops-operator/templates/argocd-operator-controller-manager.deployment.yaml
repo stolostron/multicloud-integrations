@@ -27,6 +27,8 @@ spec:
           value: ""
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: '*'
+        - name: DISABLE_DEFAULT_ARGOCD_INSTANCE
+          value: "true"
         {{- if .Values.global.proxyConfig.HTTP_PROXY }}
         - name: HTTP_PROXY
           value: {{ .Values.global.proxyConfig.HTTP_PROXY }}

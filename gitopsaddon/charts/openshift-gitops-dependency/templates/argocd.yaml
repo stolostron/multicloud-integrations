@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD
 metadata:
-  name: openshift-gitops
+  name: acm-openshift-gitops
   namespace: {{ .Release.Namespace }}
 spec:
   image: {{ .Values.global.application_controller.image }}
