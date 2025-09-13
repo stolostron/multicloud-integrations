@@ -17,7 +17,8 @@ ENV OPERATOR=/usr/local/bin/multicloud-integrations \
     USER_NAME=multicloud-integrations
 
 LABEL \
-    name="multicloud-integrations" \
+    name="rhacm2/multicloud-integrations-rhel9" \
+    cpe="cpe:/a:redhat:acm:2.14::el9" \
     com.redhat.component="multicloud-integrations" \
     description="Multicloud integrations" \
     maintainer="acm-contact@redhat.com" \
