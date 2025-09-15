@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build integration
+
 package gitopscluster
 
 import (
@@ -942,12 +944,24 @@ func TestReconcileCreateSecretInArgo(t *testing.T) {
 		updated := &gitopsclusterV1beta1.GitOpsCluster{}
 		err := c.Get(context.TODO(), client.ObjectKeyFromObject(gc3), updated)
 		g2.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// Test legacy fields (backward compatibility)
 		g2.Expect(updated.Status.Phase).To(gomega.Equal("failed"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster20"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster30"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("cluster40"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("Secret"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("not found"))
+
+		// Test new conditions (should also be set)
+		g2.Expect(len(updated.Status.Conditions)).To(gomega.BeNumerically(">", 0))
+		g2.Expect(updated.IsConditionFalse(gitopsclusterV1beta1.GitOpsClusterClustersRegistered)).To(gomega.BeTrue())
+
+		// Overall Ready condition should be False when cluster registration fails
+		readyCondition := updated.GetCondition(gitopsclusterV1beta1.GitOpsClusterReady)
+		if readyCondition != nil {
+			g2.Expect(readyCondition.Status).To(gomega.Equal(metav1.ConditionFalse))
+		}
 	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
 }
 
@@ -1464,7 +1478,18 @@ func TestReconcileNonOCPCreateSecretInOpenshiftGitops(t *testing.T) {
 
 	g.Expect(c.Get(context.TODO(), client.ObjectKeyFromObject(goc), goc)).NotTo(gomega.HaveOccurred())
 
+	// Test legacy phase field (backward compatibility)
 	g.Expect(goc.Status.Phase).To(gomega.Equal("failed"))
+
+	// Test new conditions are also set correctly
+	g.Expect(len(goc.Status.Conditions)).To(gomega.BeNumerically(">", 0))
+
+	// Verify that ArgoCD server failure condition is set
+	agentCondition := goc.GetCondition(gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady)
+	if agentCondition != nil {
+		g.Expect(agentCondition.Status).To(gomega.Equal(metav1.ConditionFalse))
+		g.Expect(agentCondition.Reason).To(gomega.Equal(gitopsclusterV1beta1.ReasonArgoServerNotFound))
+	}
 
 	// append the api server url to the managed cluster, expect the managed cluster's secret is created in the Argo namespace
 	mc1.Spec.ManagedClusterClientConfigs = []clusterv1.ClientConfig{{URL: "https://local-cluster-5:6443", CABundle: []byte("abc")}}
@@ -2938,8 +2963,19 @@ func TestEnsureArgoCDAgentCertificatesFailure(t *testing.T) {
 		g2.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Verify that the reconcile loop detected the certificate failure and set status to failed
+		// Test legacy fields (backward compatibility)
 		g2.Expect(updated.Status.Phase).To(gomega.Equal("failed"))
 		g2.Expect(updated.Status.Message).To(gomega.ContainSubstring("failed to get argocd-agent-ca secret"))
 		g2.Expect(updated.Status.LastUpdateTime).NotTo(gomega.BeNil())
+
+		// Test new conditions are also set correctly
+		g2.Expect(len(updated.Status.Conditions)).To(gomega.BeNumerically(">", 0))
+
+		// Verify that certificates condition is set to False
+		certCondition := updated.GetCondition(gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
+		if certCondition != nil {
+			g2.Expect(certCondition.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g2.Expect(certCondition.Reason).To(gomega.Equal(gitopsclusterV1beta1.ReasonCertificateSigningFailed))
+		}
 	}, 60*time.Second, 2*time.Second).Should(gomega.Succeed())
 }

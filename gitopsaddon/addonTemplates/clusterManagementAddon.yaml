@@ -1,3 +1,4 @@
+# should sync with the subscription/installer repo
 apiVersion: addon.open-cluster-management.io/v1alpha1
 kind: ClusterManagementAddOn
 metadata:
@@ -9,9 +10,6 @@ spec:
   supportedConfigs:
   - group: addon.open-cluster-management.io
     resource: addondeploymentconfigs
-    defaultConfig:
-      name: gitops-addon-config
-      namespace: open-cluster-management
   - group: addon.open-cluster-management.io
     resource: addontemplates
     defaultConfig:

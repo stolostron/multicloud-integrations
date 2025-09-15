@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build integration
+
 package gitopsaddon
 
 import (
@@ -99,7 +101,7 @@ func TestGitopsAddon(t *testing.T) {
 		ArgoCDAgentEnabled:       "false",
 		ArgoCDAgentImage:         "ghcr.io/argoproj-labs/argocd-agent/argocd-agent@sha256:test123",
 		ArgoCDAgentServerAddress: "",
-		ArgoCDAgentServerPort:    "443",
+		ArgoCDAgentServerPort:    "",
 		ArgoCDAgentMode:          "managed",
 	}
 
@@ -280,7 +282,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 			GitopsNS:                 "non-existent-namespace",
 			ArgoCDAgentImage:         "test-image@sha256:abc123",
 			ArgoCDAgentServerAddress: "test.example.com",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 
@@ -305,7 +307,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 			GitopsNS:                 "test-namespace-not-owned",
 			ArgoCDAgentImage:         "test-image@sha256:abc123",
 			ArgoCDAgentServerAddress: "test.example.com",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 
@@ -333,7 +335,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 			GitopsNS:                 "test-namespace-no-annotations",
 			ArgoCDAgentImage:         "test-image@sha256:abc123",
 			ArgoCDAgentServerAddress: "test.example.com",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 
@@ -355,7 +357,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 				Annotations: map[string]string{
 					"apps.open-cluster-management.io/argocd-agent-image":          "test-image@sha256:abc123",
 					"apps.open-cluster-management.io/argocd-agent-server-address": "test.example.com",
-					"apps.open-cluster-management.io/argocd-agent-server-port":    "443",
+					"apps.open-cluster-management.io/argocd-agent-server-port":    "",
 					"apps.open-cluster-management.io/argocd-agent-mode":           "managed",
 				},
 			},
@@ -367,7 +369,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 			GitopsNS:                 "test-namespace-matching",
 			ArgoCDAgentImage:         "test-image@sha256:abc123",
 			ArgoCDAgentServerAddress: "test.example.com",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 
@@ -401,7 +403,7 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 			GitopsNS:                 "test-namespace-different",
 			ArgoCDAgentImage:         "new-image@sha256:new123",
 			ArgoCDAgentServerAddress: "new.example.com",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 

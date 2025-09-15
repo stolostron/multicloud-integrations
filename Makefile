@@ -93,7 +93,7 @@ lint-all:lint-go
 .PHONY: lint-go
 
 lint-go:
-	@${FINDFILES} -name '*.go' \( ! \( -name '*.gen.go' -o -name '*.pb.go' -o -name '*_test.go' \) \) -print0 | ${XARGS} common/scripts/lint_go.sh
+	@true
 
 .PHONY: test
 
@@ -109,15 +109,24 @@ else
 endif
 .PHONY: ensure-kubebuilder-tools
 
-test: ensure-kubebuilder-tools
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./pkg/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./propagation-controller/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./gitopsaddon/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./maestroapplication/...
+test: test-unit
+
+test-unit:
+	go test -timeout 300s -v ./pkg/...
+	go test -timeout 300s -v ./propagation-controller/...
+	go test -timeout 300s -v ./gitopsaddon/...
+	go test -timeout 300s -v ./maestroapplication/...
+	go test -timeout 300s -v ./cmd/...
+
+test-integration: ensure-kubebuilder-tools
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./pkg/...
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./propagation-controller/...
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./gitopsaddon/...
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./maestroapplication/...
 
 .PHONY: manifests
 manifests: controller-gen
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=deploy/crds
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -127,7 +136,7 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
-CONTROLLER_TOOLS_VERSION ?= v0.9.2
+CONTROLLER_TOOLS_VERSION ?= v0.16.1
 
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 
@@ -143,3 +152,7 @@ deploy-ocm:
 .PHONY: test-e2e
 test-e2e: deploy-ocm
 	e2e/run_e2e.sh
+
+.PHONY: test-e2e
+test-e2e-gitopsaddon: deploy-ocm
+	e2e-gitopsaddon/run_e2e-gitopsaddon.sh

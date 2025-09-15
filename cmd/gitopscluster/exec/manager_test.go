@@ -24,6 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -130,11 +132,12 @@ func TestEnsureAddonManagerRoleBinding(t *testing.T) {
 		g.Expect(roleBinding.Namespace).To(gomega.Equal(GitopsNS))
 		g.Expect(roleBinding.Labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 
-		// Verify subjects
+		// Verify subjects - namespace should be computed dynamically
 		g.Expect(len(roleBinding.Subjects)).To(gomega.Equal(1))
 		g.Expect(roleBinding.Subjects[0].Kind).To(gomega.Equal("ServiceAccount"))
 		g.Expect(roleBinding.Subjects[0].Name).To(gomega.Equal("addon-manager-controller-sa"))
-		g.Expect(roleBinding.Subjects[0].Namespace).To(gomega.Equal("open-cluster-management-hub"))
+		expectedNamespace := utils.GetComponentNamespace("open-cluster-management") + "-hub"
+		g.Expect(roleBinding.Subjects[0].Namespace).To(gomega.Equal(expectedNamespace))
 
 		// Verify role ref
 		g.Expect(roleBinding.RoleRef.Kind).To(gomega.Equal("Role"))
@@ -277,11 +280,12 @@ func TestRBACResourceSubjectsAndRoleRef(t *testing.T) {
 		}, roleBinding)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 
-		// Verify subjects
+		// Verify subjects with dynamic namespace computation
 		g.Expect(len(roleBinding.Subjects)).To(gomega.Equal(1))
 		g.Expect(roleBinding.Subjects[0].Kind).To(gomega.Equal("ServiceAccount"))
 		g.Expect(roleBinding.Subjects[0].Name).To(gomega.Equal("addon-manager-controller-sa"))
-		g.Expect(roleBinding.Subjects[0].Namespace).To(gomega.Equal("open-cluster-management-hub"))
+		expectedNamespace := utils.GetComponentNamespace("open-cluster-management") + "-hub"
+		g.Expect(roleBinding.Subjects[0].Namespace).To(gomega.Equal(expectedNamespace))
 
 		// Verify role reference
 		g.Expect(roleBinding.RoleRef.Kind).To(gomega.Equal("Role"))
@@ -354,10 +358,11 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 	t.Run("SuccessfulCopy", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
 
-		// Create source namespace
+		// Create source namespace with dynamic namespace computation
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
 		sourceNamespace := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "open-cluster-management",
+				Name: sourceNamespaceName,
 			},
 		}
 		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
@@ -374,7 +379,7 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "multicluster-operators-application-svc-ca",
-				Namespace: "open-cluster-management",
+				Namespace: sourceNamespaceName,
 				Labels: map[string]string{
 					"test-label": "test-value",
 				},
@@ -422,10 +427,11 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 	t.Run("ConcurrentCreation", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
 
-		// Create source namespace
+		// Create source namespace with dynamic namespace computation
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
 		sourceNamespace := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "open-cluster-management",
+				Name: sourceNamespaceName,
 			},
 		}
 		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
@@ -442,7 +448,7 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "multicluster-operators-application-svc-ca",
-				Namespace: "open-cluster-management",
+				Namespace: sourceNamespaceName,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -482,10 +488,11 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 	t.Run("SourceSecretWithNilLabelsAndAnnotations", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
 
-		// Create source namespace
+		// Create source namespace with dynamic namespace computation
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
 		sourceNamespace := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "open-cluster-management",
+				Name: sourceNamespaceName,
 			},
 		}
 		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
@@ -502,7 +509,7 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "multicluster-operators-application-svc-ca",
-				Namespace: "open-cluster-management",
+				Namespace: sourceNamespaceName,
 				// Labels and Annotations are nil
 			},
 			Type: corev1.SecretTypeOpaque,
@@ -536,5 +543,294 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 
 		// Verify data was copied correctly
 		g.Expect(targetSecret.Data["ca.crt"]).To(gomega.Equal([]byte("test-ca-certificate-data")))
+	})
+}
+
+func TestNewNonCachingClient(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("NewNonCachingClientFunction", func(t *testing.T) {
+		// Test with nil config should not panic but may return error
+		client, err := NewNonCachingClient(nil, client.Options{})
+
+		// We expect an error with nil config
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(client).To(gomega.BeNil())
+	})
+}
+
+func TestGlobalVariables(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("GlobalVariableDefaults", func(t *testing.T) {
+		g.Expect(metricsHost).To(gomega.Equal("0.0.0.0"))
+		g.Expect(metricsPort).To(gomega.Equal(8388))
+		g.Expect(GitopsNS).To(gomega.Equal("openshift-gitops"))
+	})
+}
+
+func TestEnsureRBACErrorHandling(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("EnsureRBACWithoutNamespace", func(t *testing.T) {
+		// Test RBAC creation without the namespace existing first
+		rbacv1.AddToScheme(k8sscheme.Scheme)
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Try to create RBAC without creating namespace first
+		err := ensureAddonManagerRBAC(fakeClient)
+		// Should still work as Kubernetes will create the resources
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+}
+
+func TestSecretOperationsEdgeCases(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("SecretWithEmptyData", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create source namespace
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
+		sourceNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: sourceNamespaceName,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create target namespace
+		targetNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), targetNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create source secret with empty data
+		sourceSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "multicluster-operators-application-svc-ca",
+				Namespace: sourceNamespaceName,
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{}, // Empty data
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceSecret)).NotTo(gomega.HaveOccurred())
+
+		// Run the function
+		err := ensureArgoCDAgentCASecret(fakeClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify target secret was created with empty data
+		targetSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-agent-ca",
+			Namespace: GitopsNS,
+		}, targetSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(len(targetSecret.Data)).To(gomega.Equal(0))
+	})
+
+	t.Run("SecretWithDifferentType", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create source namespace
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
+		sourceNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: sourceNamespaceName,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create target namespace
+		targetNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), targetNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create source secret with TLS type
+		sourceSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "multicluster-operators-application-svc-ca",
+				Namespace: sourceNamespaceName,
+			},
+			Type: corev1.SecretTypeTLS, // Different type
+			Data: map[string][]byte{
+				"tls.crt": []byte("test-certificate"),
+				"tls.key": []byte("test-private-key"),
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceSecret)).NotTo(gomega.HaveOccurred())
+
+		// Run the function
+		err := ensureArgoCDAgentCASecret(fakeClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify target secret was created with correct type
+		targetSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-agent-ca",
+			Namespace: GitopsNS,
+		}, targetSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(targetSecret.Type).To(gomega.Equal(corev1.SecretTypeTLS))
+		g.Expect(targetSecret.Data["tls.crt"]).To(gomega.Equal([]byte("test-certificate")))
+		g.Expect(targetSecret.Data["tls.key"]).To(gomega.Equal([]byte("test-private-key")))
+	})
+}
+
+func TestNamespaceOperationsEdgeCases(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("NamespaceWithExistingLabels", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create namespace with existing labels
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+				Labels: map[string]string{
+					"existing-label": "existing-value",
+				},
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), namespace)).NotTo(gomega.HaveOccurred())
+
+		// Run the function
+		err := ensureOpenShiftGitOpsNamespace(fakeClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify namespace still exists with original labels
+		retrievedNamespace := &corev1.Namespace{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{Name: GitopsNS}, retrievedNamespace)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(retrievedNamespace.Labels["existing-label"]).To(gomega.Equal("existing-value"))
+	})
+}
+
+func TestRBACResourceCreationErrors(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("RoleCreationIdempotency", func(t *testing.T) {
+		rbacv1.AddToScheme(k8sscheme.Scheme)
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create namespace
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), namespace)).NotTo(gomega.HaveOccurred())
+
+		// Create role multiple times - should be idempotent
+		err1 := ensureAddonManagerRole(fakeClient)
+		g.Expect(err1).NotTo(gomega.HaveOccurred())
+
+		err2 := ensureAddonManagerRole(fakeClient)
+		g.Expect(err2).NotTo(gomega.HaveOccurred())
+
+		err3 := ensureAddonManagerRole(fakeClient)
+		g.Expect(err3).NotTo(gomega.HaveOccurred())
+
+		// Verify only one role exists
+		role := &rbacv1.Role{}
+		err := fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "addon-manager-controller-role",
+			Namespace: GitopsNS,
+		}, role)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+
+	t.Run("RoleBindingCreationIdempotency", func(t *testing.T) {
+		rbacv1.AddToScheme(k8sscheme.Scheme)
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create namespace
+		namespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), namespace)).NotTo(gomega.HaveOccurred())
+
+		// Create rolebinding multiple times - should be idempotent
+		err1 := ensureAddonManagerRoleBinding(fakeClient)
+		g.Expect(err1).NotTo(gomega.HaveOccurred())
+
+		err2 := ensureAddonManagerRoleBinding(fakeClient)
+		g.Expect(err2).NotTo(gomega.HaveOccurred())
+
+		err3 := ensureAddonManagerRoleBinding(fakeClient)
+		g.Expect(err3).NotTo(gomega.HaveOccurred())
+
+		// Verify only one rolebinding exists
+		roleBinding := &rbacv1.RoleBinding{}
+		err := fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "addon-manager-controller-rolebinding",
+			Namespace: GitopsNS,
+		}, roleBinding)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+}
+
+func TestResourceCleanupBehavior(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	t.Run("MultipleSecretCopiesIdempotency", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(k8sscheme.Scheme).Build()
+
+		// Create source namespace
+		sourceNamespaceName := utils.GetComponentNamespace("open-cluster-management")
+		sourceNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: sourceNamespaceName,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create target namespace
+		targetNamespace := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: GitopsNS,
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), targetNamespace)).NotTo(gomega.HaveOccurred())
+
+		// Create source secret
+		sourceSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "multicluster-operators-application-svc-ca",
+				Namespace: sourceNamespaceName,
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"ca.crt": []byte("original-data"),
+			},
+		}
+		g.Expect(fakeClient.Create(context.TODO(), sourceSecret)).NotTo(gomega.HaveOccurred())
+
+		// Run the function multiple times
+		err1 := ensureArgoCDAgentCASecret(fakeClient)
+		g.Expect(err1).NotTo(gomega.HaveOccurred())
+
+		err2 := ensureArgoCDAgentCASecret(fakeClient)
+		g.Expect(err2).NotTo(gomega.HaveOccurred())
+
+		err3 := ensureArgoCDAgentCASecret(fakeClient)
+		g.Expect(err3).NotTo(gomega.HaveOccurred())
+
+		// Verify target secret exists and has expected data
+		targetSecret := &corev1.Secret{}
+		err := fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-agent-ca",
+			Namespace: GitopsNS,
+		}, targetSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(targetSecret.Data["ca.crt"]).To(gomega.Equal([]byte("original-data")))
 	})
 }

@@ -56,6 +56,7 @@ company-statistics-cache.el
 anaconda-mode/
 ### Go ###
 # Binaries for programs and plugins
+bin/
 *.exe
 *.exe~
 *.dll

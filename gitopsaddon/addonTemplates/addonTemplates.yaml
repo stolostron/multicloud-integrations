@@ -1,3 +1,4 @@
+# should sync with the subscription/installer repo
 apiVersion: addon.open-cluster-management.io/v1alpha1
 kind: AddOnTemplate
 metadata:

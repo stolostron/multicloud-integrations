@@ -2,6 +2,11 @@ apiVersion: addon.open-cluster-management.io/v1alpha1
 kind: ManagedClusterAddOn
 metadata:
   name: gitops-addon
-  namespace: <managed cluster namespace>
+  namespace: cluster1
 spec:
   installNamespace: open-cluster-management-agent-addon
+  configs:
+  - group: addon.open-cluster-management.io
+    resource: addondeploymentconfigs
+    name: gitops-addon-config
+    namespace: cluster1

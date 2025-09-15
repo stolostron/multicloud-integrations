@@ -73,9 +73,9 @@ var (
 	NO_PROXY                    = ""
 	ACTION                      = "Install" // Other options: "Delete-Operator", "Delete-Instance"
 	ARGOCD_AGENT_ENABLED        = "false"
-	ARGOCD_AGENT_IMAGE          = "ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest"
+	ARGOCD_AGENT_IMAGE          = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a"
 	ARGOCD_AGENT_SERVER_ADDRESS = ""
-	ARGOCD_AGENT_SERVER_PORT    = "443"
+	ARGOCD_AGENT_SERVER_PORT    = ""
 	ARGOCD_AGENT_MODE           = "managed"
 )
 

@@ -3,7 +3,7 @@
 set -o nounset
 set -o pipefail
 
-# kind delete clusters --all; kind create cluster --name hub; kind create cluster --name cluster1
+# kind delete clusters --all; kind create cluster --name hub; kind create cluster --name cluster1; kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest; kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
 
 KUBECTL=${KUBECTL:-kubectl}
 
