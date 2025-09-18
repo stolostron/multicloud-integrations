@@ -1,240 +1,159 @@
 # Multicloud Integrations
 
-A comprehensive suite of controllers for integrating ACM with Argo CD GitOps workflows, providing enhanced multi-cluster application deployment and management capabilities.
+A comprehensive suite of controllers that bridge Red Hat Advanced Cluster Management (RHACM) with Argo CD, enabling GitOps-driven multi-cluster application delivery at scale.
 
 ## Overview
 
-The **Multicloud Integrations** project provides several controllers that enable seamless integration between ACM and Argo CD GitOps workflows. It supports both traditional ManifestWork-based deployments and enhanced Maestro-based integrations for large-scale multi-cluster environments.
+This project provides the foundational components for implementing GitOps workflows across large multi-cluster environments. It offers both traditional manifest-based deployments and performance-optimized solutions for enterprise-scale operations.
 
-## Components
+## Architecture Models
 
-### Core Controllers
+### Traditional Model
+Perfect for standard multi-cluster deployments, leveraging ACM's native capabilities:
+- **Cluster Management**: Automatically imports managed clusters into Argo CD based on placement policies
+- **Application Propagation**: Distributes applications using ManifestWork resources
+- **Status Collection**: Aggregates application health and sync status across clusters
 
-| Controller | Binary | Purpose |
-|------------|--------|---------|
-| **GitOps Cluster** | `gitopscluster` | Imports ACM ManagedClusters into Argo CD based on Placement resources |
-| **GitOps Sync Resource** | `gitopssyncresc` | Synchronizes ApplicationSet resources and manages resource propagation |
-| **Status Aggregation** | `multiclusterstatusaggregation` | Aggregates application status across multiple clusters |
-| **Propagation** | `propagation` | Manages application propagation using ManifestWork resources |
-| **GitOps Addon** | `gitopsaddon` | Manages OpenShift GitOps operator installation and Argo CD agent deployment |
-| **Maestro Propagation** | `maestropropagation` | Enhanced propagation using Maestro for large-scale environments |
-| **Maestro Aggregation** | `maestroaggregation` | Status aggregation with Maestro integration for improved performance |
+### Maestro-Enhanced Model  
+Designed for large-scale environments (100+ ApplicationSets across 1000+ clusters):
+- **Performance Optimization**: Reduces resource overhead and API pressure
+- **Enhanced Visibility**: Provides detailed application status in both ACM and Argo CD consoles
+- **Scalable Architecture**: Addresses performance bottlenecks in massive deployments
 
-### Key Features
+## Key Capabilities
 
-- **Multi-cluster GitOps**: Import and manage clusters in Argo CD using ACM Placement resources
-- **Maestro Integration**: Enhanced pull model addressing performance challenges in large-scale environments (100+ ApplicationSets on 3k+ clusters)
-- **GitOps Addon Management**: Automated installation and configuration of OpenShift GitOps operator and instances
-- **Argo CD Agent Support**: Deploy and manage Argo CD agents on managed clusters
-- **Status Aggregation**: Collect and aggregate application status from distributed clusters
-- **Application Propagation**: Deploy applications across multiple clusters using ManifestWork or Maestro
+- **Declarative Cluster Import**: Use Placement resources to control which clusters appear in Argo CD
+- **GitOps Operator Management**: Automate OpenShift GitOps installation across managed clusters  
+- **Pull-Based Application Delivery**: Deploy applications to managed clusters using GitOps principles
+- **Unified Status Aggregation**: Centralized view of application health across all clusters
+- **Agent-Based Architecture**: Optional Argo CD agents for enhanced cluster connectivity
 
-## Quick Start
+## Getting Started
 
 ### Prerequisites
 
 - Red Hat Advanced Cluster Management (RHACM) hub cluster
-- Kubernetes clusters registered as ACMM ManagedClusters
+- Kubernetes clusters registered as ACM ManagedClusters  
 - OpenShift GitOps operator (for Argo CD functionality)
 
-### Standard Installation
+### Installation Options
 
-1. **Deploy the controllers:**
-   ```bash
-   kubectl apply -f deploy/crds
-   kubectl apply -f deploy/controller
-   ```
+#### Standard Deployment
+Deploy the core controllers for typical multi-cluster GitOps workflows:
+- Install CustomResourceDefinitions (CRDs)
+- Deploy controller managers
+- Configure cluster placement and import policies
 
-2. **Configure cluster import:**
-   ```bash
-   # Create ManagedClusterSet and ManagedClusterSetBinding
-   # Create Placement resource targeting desired clusters
-   # Create GitOpsCluster resource pointing to Placement and Argo CD namespace
-   ```
+#### Maestro-Enhanced Deployment  
+For large-scale environments requiring enhanced performance:
+- Install Maestro addon components
+- Deploy performance-optimized controllers
+- Configure enhanced status aggregation
 
-3. **Verify cluster import:**
-   Check Argo CD → Configuration → Clusters to see imported ManagedClusters
+### Configuration Workflow
 
-### Maestro-Enhanced Installation
+1. **Cluster Selection**: Define placement policies to control which managed clusters are imported into Argo CD
+2. **GitOps Integration**: Configure GitOpsCluster resources to establish the connection between ACM and Argo CD
+3. **Application Deployment**: Use Argo CD ApplicationSets with pull-model annotations for multi-cluster deployment
+4. **Status Monitoring**: Monitor application health and sync status across all managed clusters
 
-For large-scale environments, use the Maestro-enhanced deployment:
+See the [`examples/`](examples/) directory for specific resource configurations and deployment templates.
 
-1. **Install Maestro addon server on hub:**
-   ```bash
-   git clone https://github.com/stolostron/maestro-addon
-   cd maestro-addon
-   helm install maestro-addon ./charts/maestro-addon
-   ```
+## Common Use Cases
 
-2. **Install Maestro addon agent on managed clusters:**
-   ```bash
-   oc -n <cluster-namespace> apply -f - <<EOF
-   apiVersion: addon.open-cluster-management.io/v1alpha1
-   kind: ManagedClusterAddOn
-   metadata:
-     name: maestro-addon
-   spec:
-     installNamespace: open-cluster-management-agent
-   EOF
-   ```
+### Cluster Import and Management
+- **Selective Import**: Use Placement resources to control which managed clusters appear in Argo CD based on labels, cluster properties, or custom criteria
+- **Dynamic Updates**: Automatically add or remove clusters from Argo CD as managed clusters join or leave placements
+- **Namespace Organization**: Configure target Argo CD namespaces and organize cluster access
 
-3. **Deploy enhanced controllers:**
-   ```bash
-   helm install multicluster-maestro-integrations \
-     ./maestroapplication/charts/multicluster-maestro-integrations \
-     --namespace open-cluster-management
-   ```
+### GitOps Operator Deployment
+- **Automated Installation**: Deploy OpenShift GitOps operator across selected managed clusters using addon mechanisms
+- **Configuration Management**: Standardize Argo CD instance configuration across your fleet
+- **Proxy Support**: Configure proxy settings and network policies for managed cluster connectivity
 
-## Usage Examples
+### Multi-Cluster Application Delivery
+- **Pull-Based Deployment**: Use Argo CD ApplicationSets with ACM annotations to deploy applications across multiple clusters
+- **Status Aggregation**: Monitor application health, sync status, and deployment progress from a central hub
+- **Targeted Deployment**: Control application placement using the same placement policies used for cluster import
 
-### Basic GitOps Cluster Configuration
+## Architecture Overview
 
-```yaml
-apiVersion: cluster.open-cluster-management.io/v1beta1
-kind: Placement
-metadata:
-  name: openshift-clusters
-  namespace: default
-spec:
-  predicates:
-  - requiredClusterSelector:
-      labelSelector:
-        matchLabels:
-          vendor: OpenShift
----
-apiVersion: apps.open-cluster-management.io/v1beta1
-kind: GitOpsCluster
-metadata:
-  name: gitops-cluster-sample
-  namespace: default
-spec:
-  Argo CDNamespace: openshift-gitops
-  placementRef:
-    name: openshift-clusters
-```
+### Component Relationships
+The system consists of several cooperating controllers that work together to provide seamless multi-cluster GitOps:
 
-### GitOps Addon Installation
+- **Cluster Management Layer**: Handles the import and lifecycle of managed clusters within Argo CD
+- **Application Propagation Layer**: Manages the distribution and synchronization of applications across clusters  
+- **Status Aggregation Layer**: Collects and consolidates application state information from distributed clusters
+- **Addon Management Layer**: Automates the deployment and configuration of GitOps components on managed clusters
 
-Deploy OpenShift GitOps on managed clusters:
+### Data Flow
+1. **Placement Evaluation**: ACM placement policies determine target clusters
+2. **Cluster Registration**: Selected clusters are registered in Argo CD with appropriate access configurations
+3. **Application Distribution**: Argo CD ApplicationSets deploy applications to registered clusters using pull-based mechanisms
+4. **Status Synchronization**: Application status flows back to the hub for centralized monitoring and reporting
 
-```bash
-oc -n <cluster-namespace> apply -f - <<EOF
-apiVersion: addon.open-cluster-management.io/v1alpha1
-kind: ManagedClusterAddOn
-metadata:
-  name: gitops-addon
-spec:
-  installNamespace: open-cluster-management-agent-addon
-EOF
-```
+## Configuration Patterns
 
-### Application Propagation
+The controllers support various configuration approaches to meet different organizational needs:
 
-Deploy applications with pull model annotations:
+- **Image Management**: Configurable container images for GitOps components across the fleet
+- **Network Configuration**: Proxy settings and connectivity options for managed cluster access
+- **RBAC Integration**: Role-based access control alignment between ACM and Argo CD
+- **Resource Optimization**: Tunable parameters for large-scale deployments and performance optimization
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: sample-app
-  namespace: openshift-gitops
-  annotations:
-    apps.open-cluster-management.io/ocm-managed-cluster: "managed-cluster-1"
-  labels:
-    apps.open-cluster-management.io/pull-to-ocm-managed-cluster: "true"
-spec:
-  # Application specification
-```
+## Development and Build
 
-## Architecture
+This project follows standard Go development practices and includes comprehensive testing:
 
-### Traditional Model
-- **GitOps Cluster Controller**: Imports clusters into Argo CD
-- **Propagation Controller**: Creates ManifestWork resources for app deployment
-- **Status Aggregation**: Collects status via Search API
+- **Local Development**: Standard Go toolchain and Make-based build system
+- **Container Builds**: Multi-stage Docker builds for optimized production images  
+- **Testing Suite**: Unit tests, integration tests, and end-to-end validation
+- **CI/CD Integration**: Automated testing and release pipelines
 
-### Maestro-Enhanced Model
-- **Maestro Integration**: Reduces ManifestWork overhead (300k → optimized)
-- **Performance Optimization**: Addresses Search API performance bottlenecks
-- **Native Argo CD Support**: Enhanced visibility in Argo CD console
-- **Detailed Status Storage**: Comprehensive status information on hub cluster
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GITOPS_OPERATOR_IMAGE` | OpenShift GitOps operator image | - |
-| `GITOPS_IMAGE` | Argo CD instance image | - |
-| `REDIS_IMAGE` | Redis image for Argo CD | - |
-| `Argo CD_AGENT_ENABLED` | Enable Argo CD agent | `false` |
-| `Argo CD_AGENT_IMAGE` | Argo CD agent image | - |
-| `HTTP_PROXY` | HTTP proxy configuration | - |
-| `HTTPS_PROXY` | HTTPS proxy configuration | - |
-| `NO_PROXY` | No proxy configuration | - |
-
-### Build and Development
-
-**Build all controllers:**
-```bash
-make build
-```
-
-**Build container images:**
-```bash
-make build-images
-```
-
-**Run tests:**
-```bash
-make test-unit
-make test-integration
-```
-
-**Run E2E tests:**
-```bash
-make test-e2e
-```
+Refer to `Makefile` for available build targets and development workflows.
 
 ## Troubleshooting
 
-### Common Issues
+### Diagnostic Approach
 
-1. **Clusters not appearing in Argo CD**
-   - Check GitOpsCluster resource status
-   - Verify Placement has generated PlacementDecision resources
-   - Check controller logs: `kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops`
+When issues occur, follow this systematic troubleshooting approach:
 
-2. **Application deployment failures**
-   - Verify ManifestWork resources created in cluster namespaces
-   - Check propagation controller logs
-   - Ensure proper RBAC permissions
+1. **Resource Status**: Check the status of GitOpsCluster and related custom resources
+2. **Placement Evaluation**: Verify that Placement resources are generating appropriate PlacementDecision resources  
+3. **Controller Health**: Review controller pod status and resource utilization
+4. **Network Connectivity**: Ensure managed clusters can communicate with the hub and Argo CD
 
-3. **Maestro integration issues**
-   - Verify Maestro addon server and agents are running
-   - Check Maestro resource synchronization
-   - Review maestro controller logs
+### Common Resolution Patterns
 
-### Log Analysis
+- **Cluster Import Issues**: Often related to placement configuration, network connectivity, or RBAC permissions
+- **Application Deployment Problems**: Typically involve ManifestWork creation, pull model annotations, or target cluster GitOps operator status
+- **Status Aggregation Delays**: May indicate performance issues, search API problems, or network latency in large-scale deployments
+- **Maestro Integration Problems**: Usually involve addon installation status, resource synchronization, or component compatibility
 
-```bash
-# GitOps controllers
-kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops
-kubectl logs -n open-cluster-management deployment/multicloud-integrations
+### Observability
 
-# Maestro controllers  
-kubectl logs -n open-cluster-management deployment/multicluster-maestro-integrations
-```
+The controllers provide detailed logging and metrics for operational visibility. Use standard Kubernetes tooling to access logs and monitor resource status. For large-scale deployments, consider implementing centralized logging and monitoring solutions.
 
-## Examples
+## Examples and Reference
 
-Detailed examples are available in the [`examples/`](examples/) directory:
+### Example Configurations
 
-- Basic GitOpsCluster configuration
-- ManagedClusterSetBinding setup
-- Placement resource examples
-- Application deployment templates
+The [`examples/`](examples/) directory contains practical, ready-to-use resource configurations:
+
+- **GitOpsCluster Setup**: Basic and advanced cluster import configurations
+- **Placement Policies**: Cluster selection and targeting examples  
+- **ManagedClusterSetBinding**: Cluster organization and access control
+- **Agent Deployment**: Argo CD agent configuration templates
+
+### Additional Resources
+
+- **API Documentation**: Detailed API specifications are available in the CRD definitions under `deploy/crds/`
+- **Maestro Integration**: See [`maestroapplication/`](maestroapplication/) for Maestro-specific implementation details
+- **End-to-End Examples**: Complete scenarios are available in the `e2e/` directory for testing and validation
+
+## Contributing
+
+This project welcomes contributions and follows standard open-source practices. Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on code style, testing requirements, and submission processes.
 
 ## License
 

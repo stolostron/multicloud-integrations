@@ -1,0 +1,27 @@
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: gitops-production
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: production-clusters
+    namespace: openshift-gitops
+  gitopsAddon:
+    enabled: true
+    gitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-operator@sha256:..."
+    gitOpsImage: "registry.redhat.io/openshift-gitops-1/argocd@sha256:..."
+    redisImage: "registry.redhat.io/rhel8/redis-6@sha256:..."
+    gitOpsOperatorNamespace: openshift-gitops-operator
+    gitOpsNamespace: openshift-gitops
+    reconcileScope: Single-Namespace
+    action: Install
+    argoCDAgent:
+      enabled: true
+      mode: managed
+      propagateHubCA: true
+      image: "registry.redhat.io/openshift-gitops-1/argocd-agent@sha256:..."

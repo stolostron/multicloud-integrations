@@ -15,9 +15,11 @@ spec:
   createBlankClusterSecrets: true
   createPolicyTemplate: true
   managedServiceAccountRef: "msa"
-  # Enable ArgoCD Agent for secure communication
-  argoCDAgent:
+  # Enable GitOps addon with ArgoCD Agent for secure communication
+  gitopsAddon:
     enabled: true
+    argoCDAgent:
+      enabled: true
   argoServer:
     cluster: notused
     argoNamespace: argocd

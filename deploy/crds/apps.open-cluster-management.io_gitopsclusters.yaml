@@ -40,66 +40,6 @@ spec:
           spec:
             description: GitOpsClusterSpec defines the desired state of GitOpsCluster.
             properties:
-              argoCDAgent:
-                description: ArgoCDAgent defines the configuration for the ArgoCD
-                  agent.
-                properties:
-                  action:
-                    description: Action specifies the action to be performed by the
-                      GitOps operator. Default is empty.
-                    type: string
-                  enabled:
-                    default: false
-                    description: Enabled indicates whether the ArgoCD agent is enabled.
-                      Default is false.
-                    type: boolean
-                  gitOpsImage:
-                    description: GitOpsImage specifies the GitOps (ArgoCD) container
-                      image. Default is empty.
-                    type: string
-                  gitOpsNamespace:
-                    description: GitOpsNamespace specifies the GitOps namespace. Default
-                      is empty.
-                    type: string
-                  gitOpsOperatorImage:
-                    description: GitOpsOperatorImage specifies the GitOps operator
-                      container image. Default is empty.
-                    type: string
-                  gitOpsOperatorNamespace:
-                    description: GitOpsOperatorNamespace specifies the GitOps operator
-                      namespace. Default is empty.
-                    type: string
-                  image:
-                    description: Image specifies the ArgoCD agent container image.
-                      Default is empty.
-                    type: string
-                  mode:
-                    description: Mode specifies the ArgoCD agent mode. Default is
-                      empty.
-                    type: string
-                  propagateHubCA:
-                    default: true
-                    description: PropagateHubCA indicates whether to propagate the
-                      hub CA certificate to managed clusters via ManifestWork. Default
-                      is true.
-                    type: boolean
-                  reconcileScope:
-                    description: ReconcileScope specifies the reconcile scope for
-                      the GitOps operator. Default is empty.
-                    type: string
-                  redisImage:
-                    description: RedisImage specifies the Redis container image. Default
-                      is empty.
-                    type: string
-                  serverAddress:
-                    description: ServerAddress specifies the ArgoCD server address
-                      for the agent. Default is empty.
-                    type: string
-                  serverPort:
-                    description: ServerPort specifies the ArgoCD server port for the
-                      agent. Default is empty.
-                    type: string
-                type: object
               argoServer:
                 description: ArgoServerSpec specifies the location of the Argo CD
                   server.
@@ -121,6 +61,77 @@ spec:
               createPolicyTemplate:
                 description: Create default policy template if it is true.
                 type: boolean
+              gitopsAddon:
+                description: GitOpsAddon defines the configuration for the GitOps
+                  addon.
+                properties:
+                  action:
+                    description: Action specifies the action to be performed by the
+                      GitOps operator. Default is empty.
+                    type: string
+                  argoCDAgent:
+                    description: ArgoCDAgent defines the configuration for the ArgoCD
+                      agent.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled indicates whether the ArgoCD agent is
+                          enabled. Default is false.
+                        type: boolean
+                      image:
+                        description: Image specifies the ArgoCD agent container image.
+                          Default is empty.
+                        type: string
+                      mode:
+                        description: Mode specifies the ArgoCD agent mode. Default
+                          is empty.
+                        type: string
+                      propagateHubCA:
+                        default: true
+                        description: PropagateHubCA indicates whether to propagate
+                          the hub CA certificate to managed clusters via ManifestWork.
+                          Default is true.
+                        type: boolean
+                      serverAddress:
+                        description: ServerAddress specifies the ArgoCD server address
+                          for the agent. Default is empty.
+                        type: string
+                      serverPort:
+                        description: ServerPort specifies the ArgoCD server port for
+                          the agent. Default is empty.
+                        type: string
+                    type: object
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled indicates whether the GitOps addon is enabled. Default is false.
+                      When enabled, creates AddonDeploymentConfigs/ManagedClusterAddon resources.
+                    type: boolean
+                  gitOpsImage:
+                    description: GitOpsImage specifies the GitOps (ArgoCD) container
+                      image. Default is empty.
+                    type: string
+                  gitOpsNamespace:
+                    description: GitOpsNamespace specifies the GitOps namespace. Default
+                      is empty.
+                    type: string
+                  gitOpsOperatorImage:
+                    description: GitOpsOperatorImage specifies the GitOps operator
+                      container image. Default is empty.
+                    type: string
+                  gitOpsOperatorNamespace:
+                    description: GitOpsOperatorNamespace specifies the GitOps operator
+                      namespace. Default is empty.
+                    type: string
+                  reconcileScope:
+                    description: ReconcileScope specifies the reconcile scope for
+                      the GitOps operator. Default is empty.
+                    type: string
+                  redisImage:
+                    description: RedisImage specifies the Redis container image. Default
+                      is empty.
+                    type: string
+                type: object
               managedServiceAccountRef:
                 description: ManagedServiceAccountRef defines managed service account
                   in the managed cluster namespace used to create the ArgoCD cluster
