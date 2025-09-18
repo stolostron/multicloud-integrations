@@ -708,22 +708,29 @@ func (r *GitopsAddonReconciler) ensureArgoCDRedisSecret() error {
 
 	klog.Info("argocd-redis secret not found, creating it...")
 
-	// Get the openshift-gitops-redis-initial-password secret
-	initialPasswordSecret := &corev1.Secret{}
-	initialPasswordSecretKey := types.NamespacedName{
-		Name:      "openshift-gitops-redis-initial-password",
-		Namespace: r.GitopsNS,
+	// Find the secret ending with "redis-initial-password"
+	secretList := &corev1.SecretList{}
+	err = r.List(context.TODO(), secretList, client.InNamespace(r.GitopsNS))
+	if err != nil {
+		return fmt.Errorf("failed to list secrets in namespace %s: %w", r.GitopsNS, err)
 	}
 
-	err = r.Get(context.TODO(), initialPasswordSecretKey, initialPasswordSecret)
-	if err != nil {
-		return fmt.Errorf("failed to get openshift-gitops-redis-initial-password secret: %w", err)
+	var initialPasswordSecret *corev1.Secret
+	for i := range secretList.Items {
+		if strings.HasSuffix(secretList.Items[i].Name, "redis-initial-password") {
+			initialPasswordSecret = &secretList.Items[i]
+			break
+		}
+	}
+
+	if initialPasswordSecret == nil {
+		return fmt.Errorf("no secret found ending with 'redis-initial-password' in namespace %s", r.GitopsNS)
 	}
 
 	// Extract the admin.password value
 	adminPasswordBytes, exists := initialPasswordSecret.Data["admin.password"]
 	if !exists {
-		return fmt.Errorf("admin.password not found in openshift-gitops-redis-initial-password secret")
+		return fmt.Errorf("admin.password not found in secret %s", initialPasswordSecret.Name)
 	}
 
 	// Create the argocd-redis secret
@@ -962,6 +969,9 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 			return err
 		}
 	} else {
+		if namespace.Labels == nil {
+			namespace.Labels = make(map[string]string)
+		}
 		namespace.Labels["addon.open-cluster-management.io/namespace"] = "true"
 		namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 

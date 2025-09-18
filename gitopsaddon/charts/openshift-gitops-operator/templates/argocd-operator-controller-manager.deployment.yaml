@@ -20,8 +20,13 @@ spec:
       containers:
       - args:
         - --leader-elect
+        {{- if contains "argoprojlabs" .Values.global.openshift_gitops_operator.image }}
+        command:
+        - /manager
+        {{- else }}
         command:
         - /usr/local/bin/manager
+        {{- end }}
         env:
         - name: WATCH_NAMESPACE
           value: ""

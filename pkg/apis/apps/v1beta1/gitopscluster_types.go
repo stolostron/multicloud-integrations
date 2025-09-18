@@ -29,6 +29,50 @@ const (
 	TLSMinVersionInt = tls.VersionTLS12
 )
 
+// GitOpsCluster condition types
+const (
+	// GitOpsClusterReady indicates whether the GitOpsCluster is ready and functioning correctly.
+	GitOpsClusterReady = "Ready"
+
+	// GitOpsClusterPlacementResolved indicates whether the placement reference was resolved
+	// and managed clusters were successfully retrieved.
+	GitOpsClusterPlacementResolved = "PlacementResolved"
+
+	// GitOpsClusterClustersRegistered indicates whether managed clusters were successfully
+	// registered with the ArgoCD server.
+	GitOpsClusterClustersRegistered = "ClustersRegistered"
+
+	// GitOpsClusterArgoCDAgentReady indicates whether the ArgoCD agent is properly enabled,
+	// configured, and functioning correctly.
+	GitOpsClusterArgoCDAgentReady = "ArgoCDAgentReady"
+
+	// GitOpsClusterCertificatesReady indicates whether ArgoCD agent certificates are properly
+	// signed and ready for use.
+	GitOpsClusterCertificatesReady = "CertificatesReady"
+
+	// GitOpsClusterManifestWorksApplied indicates whether CA propagation ManifestWorks were
+	// successfully applied to managed clusters.
+	GitOpsClusterManifestWorksApplied = "ManifestWorksApplied"
+)
+
+// GitOpsCluster condition reasons
+const (
+	// Success reasons
+	ReasonSuccess     = "Success"
+	ReasonDisabled    = "Disabled"
+	ReasonNotRequired = "NotRequired"
+
+	// Error reasons
+	ReasonInvalidConfiguration      = "InvalidConfiguration"
+	ReasonPlacementNotFound         = "PlacementNotFound"
+	ReasonManagedClustersNotFound   = "ManagedClustersNotFound"
+	ReasonArgoServerNotFound        = "ArgoServerNotFound"
+	ReasonClusterRegistrationFailed = "ClusterRegistrationFailed"
+	ReasonCertificateSigningFailed  = "CertificateSigningFailed"
+	ReasonManifestWorkFailed        = "ManifestWorkFailed"
+	ReasonArgoCDAgentFailed         = "ArgoCDAgentFailed"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope="Namespaced"
@@ -41,8 +85,6 @@ type GitOpsCluster struct {
 	Spec   GitOpsClusterSpec   `json:"spec"`
 	Status GitOpsClusterStatus `json:"status,omitempty"`
 }
-
-// +kubebuilder:object:root=true
 
 // GitOpsClusterSpec defines the desired state of GitOpsCluster.
 type GitOpsClusterSpec struct {
@@ -77,9 +119,44 @@ type ArgoCDAgentSpec struct {
 	// Enabled indicates whether the ArgoCD agent is enabled. Default is false.
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
-}
 
-// +kubebuilder:object:root=true
+	// PropagateHubCA indicates whether to propagate the hub CA certificate to managed clusters via ManifestWork. Default is true.
+	// +kubebuilder:default=true
+	PropagateHubCA *bool `json:"propagateHubCA,omitempty"`
+
+	// Image specifies the ArgoCD agent container image. Default is empty.
+	Image string `json:"image,omitempty"`
+
+	// ServerAddress specifies the ArgoCD server address for the agent. Default is empty.
+	ServerAddress string `json:"serverAddress,omitempty"`
+
+	// ServerPort specifies the ArgoCD server port for the agent. Default is empty.
+	ServerPort string `json:"serverPort,omitempty"`
+
+	// Mode specifies the ArgoCD agent mode. Default is empty.
+	Mode string `json:"mode,omitempty"`
+
+	// GitOpsOperatorImage specifies the GitOps operator container image. Default is empty.
+	GitOpsOperatorImage string `json:"gitOpsOperatorImage,omitempty"`
+
+	// GitOpsOperatorNamespace specifies the GitOps operator namespace. Default is empty.
+	GitOpsOperatorNamespace string `json:"gitOpsOperatorNamespace,omitempty"`
+
+	// GitOpsImage specifies the GitOps (ArgoCD) container image. Default is empty.
+	GitOpsImage string `json:"gitOpsImage,omitempty"`
+
+	// GitOpsNamespace specifies the GitOps namespace. Default is empty.
+	GitOpsNamespace string `json:"gitOpsNamespace,omitempty"`
+
+	// RedisImage specifies the Redis container image. Default is empty.
+	RedisImage string `json:"redisImage,omitempty"`
+
+	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
+	ReconcileScope string `json:"reconcileScope,omitempty"`
+
+	// Action specifies the action to be performed by the GitOps operator. Default is empty.
+	Action string `json:"action,omitempty"`
+}
 
 // GitOpsClusterStatus defines the observed state of GitOpsCluster.
 type GitOpsClusterStatus struct {
@@ -90,7 +167,15 @@ type GitOpsClusterStatus struct {
 	Message string `json:"message,omitempty"`
 
 	// Phase provides the overall phase of the GitOpsCluster status. Valid values include failed or successful.
+	// This field is kept for backward compatibility. For detailed status information, use the Conditions field.
 	Phase string `json:"phase,omitempty"`
+
+	// Conditions represent the latest available observations of the GitOpsCluster's current state.
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
@@ -104,4 +189,56 @@ type GitOpsClusterList struct {
 
 func init() {
 	SchemeBuilder.Register(&GitOpsCluster{}, &GitOpsClusterList{})
+}
+
+// SetCondition adds or updates a condition in the GitOpsCluster status.
+// If a condition of the same type already exists, it will be updated.
+func (g *GitOpsCluster) SetCondition(conditionType string, status metav1.ConditionStatus, reason, message string) {
+	condition := metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	}
+
+	// Find existing condition of the same type
+	for i, existingCondition := range g.Status.Conditions {
+		if existingCondition.Type == conditionType {
+			// Only update LastTransitionTime if status changed
+			if existingCondition.Status != status {
+				g.Status.Conditions[i] = condition
+			} else {
+				// Status didn't change, keep the original LastTransitionTime but update reason/message
+				g.Status.Conditions[i].Reason = reason
+				g.Status.Conditions[i].Message = message
+			}
+			return
+		}
+	}
+
+	// Condition not found, add new one
+	g.Status.Conditions = append(g.Status.Conditions, condition)
+}
+
+// GetCondition returns the condition of the specified type.
+func (g *GitOpsCluster) GetCondition(conditionType string) *metav1.Condition {
+	for _, condition := range g.Status.Conditions {
+		if condition.Type == conditionType {
+			return &condition
+		}
+	}
+	return nil
+}
+
+// IsConditionTrue returns true if the condition is set to True.
+func (g *GitOpsCluster) IsConditionTrue(conditionType string) bool {
+	condition := g.GetCondition(conditionType)
+	return condition != nil && condition.Status == metav1.ConditionTrue
+}
+
+// IsConditionFalse returns true if the condition is set to False.
+func (g *GitOpsCluster) IsConditionFalse(conditionType string) bool {
+	condition := g.GetCondition(conditionType)
+	return condition != nil && condition.Status == metav1.ConditionFalse
 }

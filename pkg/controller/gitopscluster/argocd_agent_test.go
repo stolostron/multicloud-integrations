@@ -704,3 +704,493 @@ func TestCreateArgoCDAgentManifestWorksSkipLocalCluster(t *testing.T) {
 	g.Expect(manifestWork.Namespace).To(gomega.Equal("regular-cluster"))
 	g.Expect(len(manifestWork.Spec.Workload.Manifests)).To(gomega.Equal(1))
 }
+
+func TestPropagateHubCADefaultTrue(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Create test cluster
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-propagate",
+		},
+	}
+
+	// Create ArgoCD agent CA secret
+	argoCDAgentCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "openshift-gitops",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("-----BEGIN CERTIFICATE-----\nTEST-CERT\n-----END CERTIFICATE-----"),
+			"tls.key": []byte("-----BEGIN RSA PRIVATE KEY-----\nTEST-KEY\n-----END RSA PRIVATE KEY-----"),
+		},
+	}
+
+	// Create GitOpsCluster with ArgoCD agent enabled but PropagateHubCA not set (should default to true)
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-default-propagate",
+			Namespace: "test-propagate-default",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled: &[]bool{true}[0],
+				// PropagateHubCA not set - should default to true
+			},
+		},
+	}
+
+	// Create fake client
+	fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(argoCDAgentCASecret).Build()
+	reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	// Test CreateArgoCDAgentManifestWorks - should create ManifestWork since PropagateHubCA defaults to true
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was created
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-propagate",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify it has the correct annotation
+	g.Expect(manifestWork.Annotations).NotTo(gomega.BeNil())
+	g.Expect(manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation]).To(gomega.Equal("true"))
+}
+
+func TestPropagateHubCAExplicitTrue(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-explicit-true",
+		},
+	}
+
+	argoCDAgentCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "openshift-gitops",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("-----BEGIN CERTIFICATE-----\nTEST-CERT\n-----END CERTIFICATE-----"),
+		},
+	}
+
+	// Create GitOpsCluster with PropagateHubCA explicitly set to true
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-explicit-true",
+			Namespace: "test-propagate-true",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled:        &[]bool{true}[0],
+				PropagateHubCA: &[]bool{true}[0], // Explicitly true
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(argoCDAgentCASecret).Build()
+	reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was created
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-explicit-true",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation]).To(gomega.Equal("true"))
+}
+
+func TestMarkManifestWorkAsOutdated(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-outdated",
+		},
+	}
+
+	// Create existing ManifestWork
+	existingManifestWork := &workv1.ManifestWork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca-mw",
+			Namespace: "test-cluster-outdated",
+			Annotations: map[string]string{
+				ArgoCDAgentPropagateCAAnnotation: "true",
+			},
+		},
+		Spec: workv1.ManifestWorkSpec{
+			Workload: workv1.ManifestsTemplate{
+				Manifests: []workv1.Manifest{
+					{
+						RawExtension: runtime.RawExtension{
+							Object: &corev1.Secret{
+								TypeMeta: metav1.TypeMeta{
+									APIVersion: "v1",
+									Kind:       "Secret",
+								},
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "argocd-agent-ca",
+									Namespace: "openshift-gitops",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-mark-outdated",
+			Namespace: "test-mark-outdated",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled:        &[]bool{true}[0],
+				PropagateHubCA: &[]bool{false}[0], // Set to false
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(existingManifestWork).Build()
+	reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	// Test MarkArgoCDAgentManifestWorksAsOutdated
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.MarkArgoCDAgentManifestWorksAsOutdated(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was marked as outdated
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-outdated",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(manifestWork.Annotations).NotTo(gomega.BeNil())
+	g.Expect(manifestWork.Annotations[ArgoCDAgentOutdatedAnnotation]).To(gomega.Equal("true"))
+	g.Expect(manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation]).To(gomega.Equal("false"))
+}
+
+func TestFalseToTrueTransition(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	testCluster := &clusterv1.ManagedCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-transition",
+		},
+	}
+
+	// Create existing ManifestWork marked as outdated (from previous false state)
+	existingManifestWork := &workv1.ManifestWork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca-mw",
+			Namespace: "test-cluster-transition",
+			Annotations: map[string]string{
+				ArgoCDAgentOutdatedAnnotation:    "true",
+				ArgoCDAgentPropagateCAAnnotation: "false",
+			},
+		},
+		Spec: workv1.ManifestWorkSpec{
+			Workload: workv1.ManifestsTemplate{
+				Manifests: []workv1.Manifest{
+					{
+						RawExtension: runtime.RawExtension{
+							Object: &corev1.Secret{
+								TypeMeta: metav1.TypeMeta{
+									APIVersion: "v1",
+									Kind:       "Secret",
+								},
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "argocd-agent-ca",
+									Namespace: "openshift-gitops",
+								},
+								Data: map[string][]byte{
+									"ca.crt": []byte("old-cert-data"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	argoCDAgentCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: "openshift-gitops",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("-----BEGIN CERTIFICATE-----\nNEW-CERT-DATA\n-----END CERTIFICATE-----"),
+		},
+	}
+
+	// Create GitOpsCluster with PropagateHubCA set to true (transition from false to true)
+	testGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster-transition",
+			Namespace: "test-transition",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "openshift-gitops",
+			},
+			ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+				Enabled:        &[]bool{true}[0],
+				PropagateHubCA: &[]bool{true}[0], // Now set to true
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(existingManifestWork, argoCDAgentCASecret).Build()
+	reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	// Test CreateArgoCDAgentManifestWorks - should update the outdated ManifestWork
+	managedClusters := []*clusterv1.ManagedCluster{testCluster}
+	err := reconciler.CreateArgoCDAgentManifestWorks(testGitOpsCluster, managedClusters)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify ManifestWork was updated and outdated annotation removed
+	manifestWork := &workv1.ManifestWork{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "argocd-agent-ca-mw",
+		Namespace: "test-cluster-transition",
+	}, manifestWork)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify annotations
+	g.Expect(manifestWork.Annotations).NotTo(gomega.BeNil())
+	g.Expect(manifestWork.Annotations[ArgoCDAgentOutdatedAnnotation]).To(gomega.Equal("")) // Should be removed
+	g.Expect(manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation]).To(gomega.Equal("true"))
+
+	// Verify the content was updated with new certificate data
+	manifest := manifestWork.Spec.Workload.Manifests[0]
+	secret := &corev1.Secret{}
+	err = json.Unmarshal(manifest.RawExtension.Raw, secret)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(string(secret.Data["ca.crt"])).To(gomega.Equal("-----BEGIN CERTIFICATE-----\nNEW-CERT-DATA\n-----END CERTIFICATE-----"))
+}
+
+// Tests for ensureArgoCDRedisSecret functionality
+func TestEnsureArgoCDRedisSecret(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	// Test case 1: No redis-initial-password secret exists
+	t.Run("NoInitialPasswordSecret", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := reconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("no secret found ending with 'redis-initial-password'"))
+	})
+
+	// Test case 2: Initial password secret exists, argocd-redis secret should be created
+	t.Run("CreateArgoCDRedisSecret", func(t *testing.T) {
+		initialPasswordSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "openshift-gitops-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"admin.password": []byte("test-redis-password"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(initialPasswordSecret).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := reconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the argocd-redis secret was created
+		argoCDSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(argoCDSecret.Type).To(gomega.Equal(corev1.SecretTypeOpaque))
+		g.Expect(argoCDSecret.Data["auth"]).To(gomega.Equal([]byte("test-redis-password")))
+		g.Expect(argoCDSecret.Labels["apps.open-cluster-management.io/gitopscluster"]).To(gomega.Equal("true"))
+	})
+
+	// Test case 3: Custom prefix for redis-initial-password secret
+	t.Run("CustomPrefixInitialPasswordSecret", func(t *testing.T) {
+		initialPasswordSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-custom-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"admin.password": []byte("custom-redis-password"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(initialPasswordSecret).Build()
+		freshReconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := freshReconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the argocd-redis secret was created with the custom password
+		argoCDSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(argoCDSecret.Data["auth"]).To(gomega.Equal([]byte("custom-redis-password")))
+	})
+
+	// Test case 4: argocd-redis secret already exists
+	t.Run("ArgoCDRedisSecretAlreadyExists", func(t *testing.T) {
+		existingRedisSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "argocd-redis",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"auth": []byte("existing-password"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(existingRedisSecret).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := reconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the existing secret was not modified
+		argoCDSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(argoCDSecret.Data["auth"]).To(gomega.Equal([]byte("existing-password")))
+	})
+
+	// Test case 5: Initial password secret missing admin.password field
+	t.Run("MissingAdminPasswordField", func(t *testing.T) {
+		initialPasswordSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "openshift-gitops-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"other.field": []byte("some-value"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(initialPasswordSecret).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := reconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("admin.password not found in secret openshift-gitops-redis-initial-password"))
+	})
+
+	// Test case 6: Default namespace handling
+	t.Run("DefaultNamespace", func(t *testing.T) {
+		initialPasswordSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "openshift-gitops-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"admin.password": []byte("default-namespace-password"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(initialPasswordSecret).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		// Pass empty namespace - should default to openshift-gitops
+		err := reconciler.ensureArgoCDRedisSecret("")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the argocd-redis secret was created in default namespace
+		argoCDSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(argoCDSecret.Data["auth"]).To(gomega.Equal([]byte("default-namespace-password")))
+	})
+
+	// Test case 7: Multiple redis-initial-password secrets (should pick the first one found)
+	t.Run("MultipleInitialPasswordSecrets", func(t *testing.T) {
+		firstSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "first-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"admin.password": []byte("first-password"),
+			},
+		}
+
+		secondSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "second-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"admin.password": []byte("second-password"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(setupScheme()).WithObjects(firstSecret, secondSecret).Build()
+		reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+
+		err := reconciler.ensureArgoCDRedisSecret("openshift-gitops")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the argocd-redis secret was created with one of the passwords
+		argoCDSecret := &corev1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		// Should use either first or second password (implementation detail)
+		password := string(argoCDSecret.Data["auth"])
+		g.Expect(password == "first-password" || password == "second-password").To(gomega.BeTrue())
+	})
+}

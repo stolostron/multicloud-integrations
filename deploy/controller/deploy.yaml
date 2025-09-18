@@ -32,8 +32,6 @@ spec:
           capabilities:
             drop:
               - "ALL"
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
             cpu: 500m

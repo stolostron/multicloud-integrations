@@ -32,6 +32,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
+	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
@@ -90,6 +91,10 @@ var errInvalidPlacementRef = errors.New("invalid placement reference")
 const (
 	clusterSecretSuffix = "-cluster-secret"
 	maxStatusMsgLen     = 128 * 1024
+
+	// Annotation keys for tracking ManifestWork state
+	ArgoCDAgentOutdatedAnnotation    = "apps.open-cluster-management.io/argocd-agent-outdated"
+	ArgoCDAgentPropagateCAAnnotation = "apps.open-cluster-management.io/argocd-agent-propagate-ca"
 )
 
 // newReconciler returns a new reconcile.Reconciler
@@ -350,6 +355,29 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	orphanSecretsList map[types.NamespacedName]string) (int, error) {
 	instance := gitOpsCluster.DeepCopy()
 
+	// Validate ArgoCDAgent spec fields
+	if err := r.ValidateArgoCDAgentSpec(instance.Spec.ArgoCDAgent); err != nil {
+		klog.Errorf("ArgoCDAgent spec validation failed: %v", err)
+
+		r.updateGitOpsClusterConditions(instance, "failed",
+			fmt.Sprintf("ArgoCDAgent spec validation failed: %v", err),
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+					Message: fmt.Sprintf("ArgoCDAgent spec validation failed: %v", err),
+				},
+			})
+
+		err2 := r.Client.Status().Update(context.TODO(), instance)
+		if err2 != nil {
+			klog.Errorf("failed to update GitOpsCluster %s status after validation failure: %s", instance.Namespace+"/"+instance.Name, err2)
+			return 1, err2
+		}
+
+		return 1, err
+	}
+
 	annotations := instance.GetAnnotations()
 
 	// Create default policy template
@@ -380,9 +408,15 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		annotations["skipArgoNamespaceVerify"] != "true" {
 		klog.Info("invalid argocd namespace because argo server pod was not found")
 
-		instance.Status.LastUpdateTime = metav1.Now()
-		instance.Status.Phase = "failed"
-		instance.Status.Message = "invalid gitops namespace because argo server pod was not found"
+		r.updateGitOpsClusterConditions(instance, "failed",
+			"invalid gitops namespace because argo server pod was not found",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonArgoServerNotFound,
+					Message: "ArgoCD server pod was not found in the specified namespace",
+				},
+			})
 
 		err := r.Client.Status().Update(context.TODO(), instance)
 
@@ -414,9 +448,14 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	if err != nil {
 		klog.Info("failed to get managed cluster list")
 
-		instance.Status.LastUpdateTime = metav1.Now()
-		instance.Status.Phase = "failed"
-		instance.Status.Message = err.Error()
+		r.updateGitOpsClusterConditions(instance, "failed", err.Error(),
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterPlacementResolved: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonPlacementNotFound,
+					Message: err.Error(),
+				},
+			})
 
 		err2 := r.Client.Status().Update(context.TODO(), instance)
 
@@ -439,6 +478,100 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		argoCDAgentEnabled = *instance.Spec.ArgoCDAgent.Enabled
 	}
 
+	// 3a. Ensure argocd-redis secret exists if ArgoCD agent is enabled
+	if argoCDAgentEnabled {
+		err = r.ensureArgoCDRedisSecret(instance.Spec.ArgoServer.ArgoNamespace)
+		if err != nil {
+			klog.Errorf("failed to ensure argocd-redis secret: %v", err)
+
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after redis secret failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+	}
+
+	// 3b. Auto-discover server address and port if ArgoCD agent is enabled and values are empty
+	if argoCDAgentEnabled {
+		updated, err := r.EnsureServerAddressAndPort(instance, managedClusters)
+		if err != nil {
+			klog.Warningf("failed to auto-discover server address/port: %v", err)
+		} else if updated {
+			// Update the GitOpsCluster spec with discovered values
+			err = r.Update(context.TODO(), instance)
+			if err != nil {
+				klog.Errorf("failed to update GitOpsCluster with discovered server address/port: %v", err)
+			} else {
+				klog.Infof("updated GitOpsCluster %s/%s with auto-discovered server address/port", instance.Namespace, instance.Name)
+			}
+		}
+
+		// 3b. Ensure addon-manager-controller RBAC resources exist in GitOps namespace
+		if err := r.ensureAddonManagerRBAC(instance.Namespace); err != nil {
+			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", instance.Namespace, err)
+			r.updateGitOpsClusterConditions(instance, "failed",
+				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
+						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources: %v", err),
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after RBAC setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+			return 3, err
+		}
+
+		// 3c. Ensure argocd-agent-ca secret exists in GitOps namespace
+		if err := r.ensureArgoCDAgentCASecret(instance.Namespace); err != nil {
+			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", instance.Namespace, err)
+			r.updateGitOpsClusterConditions(instance, "failed",
+				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
+						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret: %v", err),
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after CA secret setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+			return 3, err
+		}
+
+		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC and CA secret) for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+	}
+
+	// Check if Hub CA propagation is enabled (default true)
+	propagateHubCA := true
+	if instance.Spec.ArgoCDAgent != nil && instance.Spec.ArgoCDAgent.PropagateHubCA != nil {
+		propagateHubCA = *instance.Spec.ArgoCDAgent.PropagateHubCA
+	}
+
 	// 4. Copy secret contents from the managed cluster namespaces and create the secret in spec.argoServer.argoNamespace
 	// if spec.createBlankClusterSecrets is true then do err on missing secret from the managed cluster namespace
 	// if argoCDAgent is enabled, createBlankClusterSecrets should also be true
@@ -451,20 +584,42 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		createBlankClusterSecrets = true
 	}
 
+	// Create AddOnDeploymentConfig for each managed cluster namespace
+	for _, managedCluster := range managedClusters {
+		err = r.CreateAddOnDeploymentConfig(instance, managedCluster.Name)
+		if err != nil {
+			klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
+		}
+	}
+
+	// Create ManagedClusterAddon for each managed cluster namespace if ArgoCD agent is enabled
+	if argoCDAgentEnabled {
+		for _, managedCluster := range managedClusters {
+			err = r.EnsureManagedClusterAddon(managedCluster.Name)
+			if err != nil {
+				klog.Errorf("failed to ensure ManagedClusterAddon for managed cluster %s: %v", managedCluster.Name, err)
+			}
+		}
+	}
+
 	err = r.AddManagedClustersToArgo(instance, managedClusters, orphanSecretsList, createBlankClusterSecrets)
 
 	if err != nil {
 		klog.Info("failed to add managed clusters to argo")
-
-		instance.Status.LastUpdateTime = metav1.Now()
-		instance.Status.Phase = "failed"
 
 		msg := err.Error()
 		if len(msg) > maxStatusMsgLen {
 			msg = msg[:maxStatusMsgLen]
 		}
 
-		instance.Status.Message = msg
+		r.updateGitOpsClusterConditions(instance, "failed", msg,
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
+					Message: msg,
+				},
+			})
 
 		err2 := r.Client.Status().Update(context.TODO(), instance)
 
@@ -476,30 +631,43 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		return 3, err
 	}
 
-	// 5. Create ManifestWork for ArgoCD agent CA secret if argoCDAgent is enabled
+	// 5. Handle ArgoCD agent CA secret ManifestWork based on propagateHubCA setting
 	if argoCDAgentEnabled {
-		err = r.CreateArgoCDAgentManifestWorks(instance, managedClusters)
-		if err != nil {
-			klog.Errorf("failed to create ArgoCD agent ManifestWorks: %v", err)
+		if propagateHubCA {
+			// Create/update ManifestWork for ArgoCD agent CA secret
+			err = r.CreateArgoCDAgentManifestWorks(instance, managedClusters)
+			if err != nil {
+				klog.Errorf("failed to create ArgoCD agent ManifestWorks: %v", err)
 
-			instance.Status.LastUpdateTime = metav1.Now()
-			instance.Status.Phase = "failed"
+				msg := err.Error()
+				if len(msg) > maxStatusMsgLen {
+					msg = msg[:maxStatusMsgLen]
+				}
 
-			msg := err.Error()
-			if len(msg) > maxStatusMsgLen {
-				msg = msg[:maxStatusMsgLen]
+				r.updateGitOpsClusterConditions(instance, "failed", msg,
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonManifestWorkFailed,
+							Message: msg,
+						},
+					})
+
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+
+				if err2 != nil {
+					klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+					return 3, err2
+				}
+
+				return 3, err
 			}
-
-			instance.Status.Message = msg
-
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
+		} else {
+			// Mark existing ManifestWorks as outdated when propagateHubCA is false
+			err = r.MarkArgoCDAgentManifestWorksAsOutdated(instance, managedClusters)
+			if err != nil {
+				klog.Errorf("failed to mark ArgoCD agent ManifestWorks as outdated: %v", err)
 			}
-
-			return 3, err
 		}
 	}
 
@@ -509,15 +677,19 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		if err != nil {
 			klog.Errorf("failed to ensure ArgoCD agent certificates: %v", err)
 
-			instance.Status.LastUpdateTime = metav1.Now()
-			instance.Status.Phase = "failed"
-
 			msg := err.Error()
 			if len(msg) > maxStatusMsgLen {
 				msg = msg[:maxStatusMsgLen]
 			}
 
-			instance.Status.Message = msg
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
 
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 
@@ -530,15 +702,74 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	instance.Status.LastUpdateTime = metav1.Now()
-	instance.Status.Phase = "successful"
-
 	managedClustersStr := strings.Join(managedClusterNames, " ")
 	if len(managedClustersStr) > 4096 {
 		managedClustersStr = fmt.Sprintf("%.4096v", managedClustersStr) + "..."
 	}
 
-	instance.Status.Message = fmt.Sprintf("Added managed clusters [%v] to gitops namespace %s", managedClustersStr, instance.Spec.ArgoServer.ArgoNamespace)
+	successMessage := fmt.Sprintf("Added managed clusters [%v] to gitops namespace %s", managedClustersStr, instance.Spec.ArgoServer.ArgoNamespace)
+
+	// Build condition updates for successful case
+	conditionUpdates := map[string]ConditionUpdate{
+		gitopsclusterV1beta1.GitOpsClusterPlacementResolved: {
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonSuccess,
+			Message: fmt.Sprintf("Successfully resolved %d managed clusters from placement", len(managedClusterNames)),
+		},
+		gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonSuccess,
+			Message: fmt.Sprintf("Successfully registered %d managed clusters to ArgoCD", len(managedClusterNames)),
+		},
+	}
+
+	// Add ArgoCD agent specific conditions if enabled
+	if argoCDAgentEnabled {
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonSuccess,
+			Message: "ArgoCD agent is properly configured and enabled",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterCertificatesReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonSuccess,
+			Message: "ArgoCD agent certificates are properly signed and ready",
+		}
+
+		// Only set ManifestWorks condition if CA propagation is enabled
+		if propagateHubCA {
+			conditionUpdates[gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied] = ConditionUpdate{
+				Status:  metav1.ConditionTrue,
+				Reason:  gitopsclusterV1beta1.ReasonSuccess,
+				Message: "CA propagation ManifestWorks successfully applied to managed clusters",
+			}
+		} else {
+			conditionUpdates[gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied] = ConditionUpdate{
+				Status:  metav1.ConditionTrue,
+				Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+				Message: "CA propagation is disabled, ManifestWorks not required",
+			}
+		}
+	} else {
+		// ArgoCD agent is disabled, set conditions accordingly
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonDisabled,
+			Message: "ArgoCD agent is disabled",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterCertificatesReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "ArgoCD agent certificates not required (agent disabled)",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "ManifestWorks not required (agent disabled)",
+		}
+	}
+
+	r.updateGitOpsClusterConditions(instance, "successful", successMessage, conditionUpdates)
 
 	err = r.Client.Status().Update(context.TODO(), instance)
 
@@ -548,6 +779,60 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	}
 
 	return 0, nil
+}
+
+// ValidateArgoCDAgentSpec validates the ArgoCDAgent spec fields and returns an error if validation fails
+func (r *ReconcileGitOpsCluster) ValidateArgoCDAgentSpec(argoCDAgent *gitopsclusterV1beta1.ArgoCDAgentSpec) error {
+	if argoCDAgent == nil {
+		return nil // nil spec is valid
+	}
+
+	// Validate Mode field
+	if argoCDAgent.Mode != "" {
+		validModes := []string{"managed", "autonomous"}
+		isValidMode := false
+		for _, validMode := range validModes {
+			if argoCDAgent.Mode == validMode {
+				isValidMode = true
+				break
+			}
+		}
+		if !isValidMode {
+			return fmt.Errorf("invalid Mode '%s': must be one of %v", argoCDAgent.Mode, validModes)
+		}
+	}
+
+	// Validate ReconcileScope field
+	if argoCDAgent.ReconcileScope != "" {
+		validScopes := []string{"All-Namespaces", "Single-Namespace"}
+		isValidScope := false
+		for _, validScope := range validScopes {
+			if argoCDAgent.ReconcileScope == validScope {
+				isValidScope = true
+				break
+			}
+		}
+		if !isValidScope {
+			return fmt.Errorf("invalid ReconcileScope '%s': must be one of %v", argoCDAgent.ReconcileScope, validScopes)
+		}
+	}
+
+	// Validate Action field
+	if argoCDAgent.Action != "" {
+		validActions := []string{"Install", "Delete-Operator"}
+		isValidAction := false
+		for _, validAction := range validActions {
+			if argoCDAgent.Action == validAction {
+				isValidAction = true
+				break
+			}
+		}
+		if !isValidAction {
+			return fmt.Errorf("invalid Action '%s': must be one of %v", argoCDAgent.Action, validActions)
+		}
+	}
+
+	return nil
 }
 
 // GetAllManagedClusterSecretsInArgo returns list of secrets from all GitOps managed cluster
@@ -862,6 +1147,418 @@ func (r *ReconcileGitOpsCluster) CreateApplicationSetRbac(namespace string) erro
 	return nil
 }
 
+// CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace
+// It only updates GitOpsCluster-managed variables and preserves user-added custom variables
+func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, namespace string) error {
+	if namespace == "" {
+		return errors.New("no namespace provided")
+	}
+
+	// Define variables managed by GitOpsCluster controller - only ArgoCD agent related variables
+	managedVariables := map[string]string{
+		"ARGOCD_AGENT_ENABLED": "true", // Only default we set
+	}
+
+	// Add ArgoCD agent values from GitOpsCluster spec only if they are provided (no defaults)
+	if gitOpsCluster.Spec.ArgoCDAgent != nil {
+		if gitOpsCluster.Spec.ArgoCDAgent.Image != "" {
+			managedVariables["ARGOCD_AGENT_IMAGE"] = gitOpsCluster.Spec.ArgoCDAgent.Image
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.ServerAddress != "" {
+			managedVariables["ARGOCD_AGENT_SERVER_ADDRESS"] = gitOpsCluster.Spec.ArgoCDAgent.ServerAddress
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.ServerPort != "" {
+			managedVariables["ARGOCD_AGENT_SERVER_PORT"] = gitOpsCluster.Spec.ArgoCDAgent.ServerPort
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.Mode != "" {
+			managedVariables["ARGOCD_AGENT_MODE"] = gitOpsCluster.Spec.ArgoCDAgent.Mode
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.GitOpsOperatorImage != "" {
+			managedVariables["GITOPS_OPERATOR_IMAGE"] = gitOpsCluster.Spec.ArgoCDAgent.GitOpsOperatorImage
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.GitOpsOperatorNamespace != "" {
+			managedVariables["GITOPS_OPERATOR_NAMESPACE"] = gitOpsCluster.Spec.ArgoCDAgent.GitOpsOperatorNamespace
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.GitOpsImage != "" {
+			managedVariables["GITOPS_IMAGE"] = gitOpsCluster.Spec.ArgoCDAgent.GitOpsImage
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.GitOpsNamespace != "" {
+			managedVariables["GITOPS_NAMESPACE"] = gitOpsCluster.Spec.ArgoCDAgent.GitOpsNamespace
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.RedisImage != "" {
+			managedVariables["REDIS_IMAGE"] = gitOpsCluster.Spec.ArgoCDAgent.RedisImage
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.ReconcileScope != "" {
+			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.ArgoCDAgent.ReconcileScope
+		}
+
+		if gitOpsCluster.Spec.ArgoCDAgent.Action != "" {
+			managedVariables["ACTION"] = gitOpsCluster.Spec.ArgoCDAgent.Action
+		}
+	}
+
+	// Check if AddOnDeploymentConfig already exists
+	existing := &addonv1alpha1.AddOnDeploymentConfig{}
+	err := r.Get(context.Background(), types.NamespacedName{
+		Name:      "gitops-addon-config",
+		Namespace: namespace,
+	}, existing)
+
+	if k8errors.IsNotFound(err) {
+		// Create new AddOnDeploymentConfig with default managed variables
+		klog.Infof("Creating AddOnDeploymentConfig gitops-addon-config in namespace %s", namespace)
+
+		customizedVariables := make([]addonv1alpha1.CustomizedVariable, 0, len(managedVariables))
+		for name, value := range managedVariables {
+			customizedVariables = append(customizedVariables, addonv1alpha1.CustomizedVariable{
+				Name:  name,
+				Value: value,
+			})
+		}
+
+		addonDeploymentConfig := &addonv1alpha1.AddOnDeploymentConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "gitops-addon-config",
+				Namespace: namespace,
+			},
+			Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+				CustomizedVariables: customizedVariables,
+			},
+		}
+
+		err = r.Create(context.Background(), addonDeploymentConfig)
+		if err != nil {
+			klog.Errorf("Failed to create AddOnDeploymentConfig: %v", err)
+			return err
+		}
+	} else if err != nil {
+		klog.Errorf("Failed to get AddOnDeploymentConfig: %v", err)
+		return err
+	} else {
+		// Update existing AddOnDeploymentConfig - merge managed variables with existing ones
+		klog.Infof("Updating AddOnDeploymentConfig gitops-addon-config in namespace %s", namespace)
+
+		// Create a map of existing variables for easy lookup
+		existingVars := make(map[string]addonv1alpha1.CustomizedVariable)
+		for _, variable := range existing.Spec.CustomizedVariables {
+			existingVars[variable.Name] = variable
+		}
+
+		// Update or add managed variables, preserve user-added variables
+		updatedVariables := make([]addonv1alpha1.CustomizedVariable, 0)
+
+		// First, add all existing user variables (non-managed ones will be preserved)
+		for _, variable := range existing.Spec.CustomizedVariables {
+			if _, isManaged := managedVariables[variable.Name]; !isManaged {
+				// This is a user-added variable, preserve it
+				updatedVariables = append(updatedVariables, variable)
+			}
+		}
+
+		// Then add/update all managed variables with current values
+		for name, value := range managedVariables {
+			updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
+				Name:  name,
+				Value: value,
+			})
+		}
+
+		existing.Spec.CustomizedVariables = updatedVariables
+		err = r.Update(context.Background(), existing)
+
+		if err != nil {
+			klog.Errorf("Failed to update AddOnDeploymentConfig: %v", err)
+			return err
+		}
+	}
+
+	// Check and update existing ManagedClusterAddOn if it exists
+	err = r.UpdateManagedClusterAddonConfig(namespace)
+	if err != nil {
+		klog.Errorf("Failed to update ManagedClusterAddOn config: %v", err)
+	}
+
+	return nil
+}
+
+// UpdateManagedClusterAddonConfig updates the ManagedClusterAddOn configs to reference the AddOnDeploymentConfig
+func (r *ReconcileGitOpsCluster) UpdateManagedClusterAddonConfig(namespace string) error {
+	if namespace == "" {
+		return errors.New("no namespace provided")
+	}
+
+	// Check if ManagedClusterAddOn exists
+	existing := &addonv1alpha1.ManagedClusterAddOn{}
+	err := r.Get(context.Background(), types.NamespacedName{
+		Name:      "gitops-addon",
+		Namespace: namespace,
+	}, existing)
+
+	if k8errors.IsNotFound(err) {
+		// ManagedClusterAddOn doesn't exist, nothing to update
+		klog.V(2).Infof("ManagedClusterAddOn gitops-addon not found in namespace %s, skipping config update", namespace)
+		return nil
+	} else if err != nil {
+		klog.Errorf("Failed to get ManagedClusterAddOn gitops-addon: %v", err)
+		return err
+	}
+
+	// Check if the config reference already exists and points to the correct AddOnDeploymentConfig
+	expectedConfig := addonv1alpha1.AddOnConfig{
+		ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+			Group:    "addon.open-cluster-management.io",
+			Resource: "addondeploymentconfigs",
+		},
+		ConfigReferent: addonv1alpha1.ConfigReferent{
+			Name:      "gitops-addon-config",
+			Namespace: namespace,
+		},
+	}
+
+	// Check if the expected config already exists in the configs list
+	configExists := false
+
+	for _, config := range existing.Spec.Configs {
+		if config.Group == expectedConfig.Group &&
+			config.Resource == expectedConfig.Resource &&
+			config.Name == expectedConfig.Name &&
+			config.Namespace == expectedConfig.Namespace {
+			configExists = true
+			break
+		}
+	}
+
+	if configExists {
+		klog.V(2).Infof("ManagedClusterAddOn gitops-addon already has correct config reference in namespace %s", namespace)
+		return nil
+	}
+
+	// Add the config reference if it doesn't exist
+	existing.Spec.Configs = append(existing.Spec.Configs, expectedConfig)
+
+	err = r.Update(context.Background(), existing)
+	if err != nil {
+		klog.Errorf("Failed to update ManagedClusterAddOn gitops-addon: %v", err)
+		return err
+	}
+
+	klog.Infof("Updated ManagedClusterAddOn gitops-addon config reference in namespace %s", namespace)
+
+	return nil
+}
+
+// EnsureManagedClusterAddon creates the ManagedClusterAddon if it doesn't exist, or updates its config if it does
+func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) error {
+	if namespace == "" {
+		return errors.New("no namespace provided")
+	}
+
+	// Check if ManagedClusterAddOn already exists
+	existing := &addonv1alpha1.ManagedClusterAddOn{}
+	err := r.Get(context.Background(), types.NamespacedName{
+		Name:      "gitops-addon",
+		Namespace: namespace,
+	}, existing)
+
+	expectedConfig := addonv1alpha1.AddOnConfig{
+		ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+			Group:    "addon.open-cluster-management.io",
+			Resource: "addondeploymentconfigs",
+		},
+		ConfigReferent: addonv1alpha1.ConfigReferent{
+			Name:      "gitops-addon-config",
+			Namespace: namespace,
+		},
+	}
+
+	if k8errors.IsNotFound(err) {
+		// Create new ManagedClusterAddOn with config reference
+		klog.Infof("Creating ManagedClusterAddOn gitops-addon in namespace %s", namespace)
+
+		managedClusterAddOn := &addonv1alpha1.ManagedClusterAddOn{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "gitops-addon",
+				Namespace: namespace,
+			},
+			Spec: addonv1alpha1.ManagedClusterAddOnSpec{
+				InstallNamespace: "open-cluster-management-agent-addon",
+				Configs:          []addonv1alpha1.AddOnConfig{expectedConfig},
+			},
+		}
+
+		err = r.Create(context.Background(), managedClusterAddOn)
+		if err != nil {
+			klog.Errorf("Failed to create ManagedClusterAddOn gitops-addon: %v", err)
+			return err
+		}
+
+		klog.Infof("Successfully created ManagedClusterAddOn gitops-addon in namespace %s", namespace)
+		return nil
+	} else if err != nil {
+		klog.Errorf("Failed to get ManagedClusterAddOn gitops-addon: %v", err)
+		return err
+	}
+
+	// ManagedClusterAddOn exists, ensure it has the correct config reference
+	configExists := false
+	for _, config := range existing.Spec.Configs {
+		if config.Group == expectedConfig.Group &&
+			config.Resource == expectedConfig.Resource &&
+			config.Name == expectedConfig.Name &&
+			config.Namespace == expectedConfig.Namespace {
+			configExists = true
+			break
+		}
+	}
+
+	if !configExists {
+		// Add the config reference if it doesn't exist
+		klog.Infof("Adding config reference to existing ManagedClusterAddOn gitops-addon in namespace %s", namespace)
+		existing.Spec.Configs = append(existing.Spec.Configs, expectedConfig)
+
+		err = r.Update(context.Background(), existing)
+		if err != nil {
+			klog.Errorf("Failed to update ManagedClusterAddOn gitops-addon: %v", err)
+			return err
+		}
+
+		klog.Infof("Updated ManagedClusterAddOn gitops-addon config reference in namespace %s", namespace)
+	} else {
+		klog.V(2).Infof("ManagedClusterAddOn gitops-addon already has correct config reference in namespace %s", namespace)
+	}
+
+	return nil
+}
+
+// EnsureServerAddressAndPort auto-discovers and populates server address and port if they are empty
+func (r *ReconcileGitOpsCluster) EnsureServerAddressAndPort(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) (bool, error) {
+	// Check if serverAddress and serverPort are already set in the GitOpsCluster spec
+	if gitOpsCluster.Spec.ArgoCDAgent != nil &&
+		(gitOpsCluster.Spec.ArgoCDAgent.ServerAddress != "" || gitOpsCluster.Spec.ArgoCDAgent.ServerPort != "") {
+		klog.V(2).Infof("serverAddress or serverPort already set in GitOpsCluster spec, skipping auto-discovery")
+		return false, nil
+	}
+
+	// Check if any existing AddonDeploymentConfig already has these values set
+	hasExistingAddonConfig, err := r.HasExistingServerConfig(managedClusters)
+	if err != nil {
+		return false, fmt.Errorf("failed to check existing addon configs: %w", err)
+	}
+	if hasExistingAddonConfig {
+		klog.V(2).Infof("serverAddress or serverPort already set in existing AddonDeploymentConfig, skipping auto-discovery")
+		return false, nil
+	}
+
+	// Try to discover server address and port from the ArgoCD agent principal service
+	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
+	if argoNamespace == "" {
+		argoNamespace = "openshift-gitops"
+	}
+
+	serverAddress, serverPort, err := r.DiscoverServerAddressAndPort(argoNamespace)
+	if err != nil {
+		return false, fmt.Errorf("failed to discover server address and port: %w", err)
+	}
+
+	// Initialize ArgoCDAgent spec if it doesn't exist
+	if gitOpsCluster.Spec.ArgoCDAgent == nil {
+		gitOpsCluster.Spec.ArgoCDAgent = &gitopsclusterV1beta1.ArgoCDAgentSpec{}
+	}
+
+	// Set the discovered values
+	gitOpsCluster.Spec.ArgoCDAgent.ServerAddress = serverAddress
+	gitOpsCluster.Spec.ArgoCDAgent.ServerPort = serverPort
+
+	klog.Infof("auto-discovered server address: %s, port: %s for GitOpsCluster %s/%s",
+		serverAddress, serverPort, gitOpsCluster.Namespace, gitOpsCluster.Name)
+
+	return true, nil
+}
+
+// HasExistingServerConfig checks if any existing AddonDeploymentConfig has server address/port configured
+func (r *ReconcileGitOpsCluster) HasExistingServerConfig(managedClusters []*spokeclusterv1.ManagedCluster) (bool, error) {
+	for _, managedCluster := range managedClusters {
+		existing := &addonv1alpha1.AddOnDeploymentConfig{}
+		err := r.Get(context.Background(), types.NamespacedName{
+			Name:      "gitops-addon-config",
+			Namespace: managedCluster.Name,
+		}, existing)
+
+		if err != nil {
+			if k8errors.IsNotFound(err) {
+				// Config doesn't exist, continue checking other clusters
+				continue
+			}
+			return false, fmt.Errorf("failed to get AddOnDeploymentConfig in namespace %s: %w", managedCluster.Name, err)
+		}
+
+		// Check if any of the existing variables contain server address or port
+		for _, variable := range existing.Spec.CustomizedVariables {
+			if variable.Name == "ARGOCD_AGENT_SERVER_ADDRESS" && variable.Value != "" {
+				klog.V(2).Infof("found existing ARGOCD_AGENT_SERVER_ADDRESS in namespace %s", managedCluster.Name)
+				return true, nil
+			}
+			if variable.Name == "ARGOCD_AGENT_SERVER_PORT" && variable.Value != "" {
+				klog.V(2).Infof("found existing ARGOCD_AGENT_SERVER_PORT in namespace %s", managedCluster.Name)
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal service
+func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(argoNamespace string) (string, string, error) {
+	// Use the existing logic from argocd_agent_certificates.go to find the principal service
+	service, err := r.findArgoCDAgentPrincipalService(argoNamespace)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
+	}
+
+	// Look for LoadBalancer external endpoints
+	var serverAddress string
+	var serverPort string = "443" // Default HTTPS port
+
+	for _, ingress := range service.Status.LoadBalancer.Ingress {
+		if ingress.Hostname != "" {
+			serverAddress = ingress.Hostname
+			klog.V(2).Infof("discovered server address from LoadBalancer hostname: %s", serverAddress)
+			break
+		}
+		if ingress.IP != "" {
+			serverAddress = ingress.IP
+			klog.V(2).Infof("discovered server address from LoadBalancer IP: %s", serverAddress)
+			break
+		}
+	}
+
+	if serverAddress == "" {
+		return "", "", fmt.Errorf("no external LoadBalancer IP or hostname found for service %s in namespace %s", service.Name, argoNamespace)
+	}
+
+	// Try to get the actual port from the service spec
+	for _, port := range service.Spec.Ports {
+		if port.Name == "https" || port.Port == 443 {
+			serverPort = fmt.Sprintf("%d", port.Port)
+			klog.V(2).Infof("discovered server port from service spec: %s", serverPort)
+			break
+		}
+	}
+
+	klog.Infof("discovered ArgoCD agent server endpoint: %s:%s", serverAddress, serverPort)
+	return serverAddress, serverPort, nil
+}
+
 // GetManagedClusters retrieves managed cluster names from placement decision
 func (r *ReconcileGitOpsCluster) GetManagedClusters(namespace string, placementref v1.ObjectReference) ([]*spokeclusterv1.ManagedCluster, error) {
 	if !(placementref.Kind == "Placement" &&
@@ -1002,14 +1699,17 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 					klog.Infof("Found ManagedServiceAccount %s created by managed cluster %s", componentName, managedCluster.Name)
 					msaExists = true
 				} else {
-					klog.Error("failed to find ManagedServiceAccount created secret application-manager")
-					saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
-
-					continue
+					if !createBlankClusterSecrets {
+						klog.Error("failed to find ManagedServiceAccount created secret application-manager")
+						saveClusterSecret(orphanSecretsList, secretObjectKey, msaSecretObjectKey)
+						continue
+					}
 				}
 			} else {
 				// fallback to old code
-				klog.Infof("Failed to find ManagedServiceAccount CR in namespace %s", managedCluster.Name)
+				if !createBlankClusterSecrets {
+					klog.Infof("Failed to find ManagedServiceAccount CR in namespace %s", managedCluster.Name)
+				}
 				secretName := managedCluster.Name + clusterSecretSuffix
 				managedClusterSecretKey := types.NamespacedName{Name: secretName, Namespace: managedCluster.Name}
 
@@ -1708,7 +2408,12 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 
 		if err != nil {
 			if k8errors.IsNotFound(err) {
-				// Create new ManifestWork
+				// Create new ManifestWork with proper annotations
+				if manifestWork.Annotations == nil {
+					manifestWork.Annotations = make(map[string]string)
+				}
+				manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true"
+
 				err = r.Create(context.TODO(), manifestWork)
 				if err != nil {
 					klog.Errorf("failed to create ManifestWork %s/%s: %v", manifestWork.Namespace, manifestWork.Name, err)
@@ -1720,16 +2425,84 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 				return fmt.Errorf("failed to get ManifestWork %s/%s: %w", manifestWork.Namespace, manifestWork.Name, err)
 			}
 		} else {
-			// Update existing ManifestWork
-			existingMW.Spec = manifestWork.Spec
+			// ManifestWork exists - check if it needs updating
+			needsUpdate := false
 
-			err = r.Update(context.TODO(), existingMW)
-			if err != nil {
-				klog.Errorf("failed to update ManifestWork %s/%s: %v", existingMW.Namespace, existingMW.Name, err)
-				return err
+			// Check if ManifestWork was previously marked as outdated
+			isOutdated := existingMW.Annotations != nil && existingMW.Annotations[ArgoCDAgentOutdatedAnnotation] == "true"
+			previousPropagateCA := existingMW.Annotations != nil && existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] == "true"
+
+			// Check if certificate data has changed
+			certificateChanged := false
+
+			if len(existingMW.Spec.Workload.Manifests) > 0 {
+				// Extract the existing certificate data from the ManifestWork
+				existingManifest := existingMW.Spec.Workload.Manifests[0]
+
+				if existingManifest.RawExtension.Raw != nil {
+					existingSecret := &v1.Secret{}
+					err := json.Unmarshal(existingManifest.RawExtension.Raw, existingSecret)
+
+					if err == nil {
+						existingCert := string(existingSecret.Data["ca.crt"])
+
+						if existingCert != caCert {
+							certificateChanged = true
+
+							klog.Infof("Certificate data changed for ManifestWork %s/%s", existingMW.Namespace, existingMW.Name)
+						}
+					}
+				}
 			}
 
-			klog.Infof("updated ManifestWork %s/%s for ArgoCD agent CA", existingMW.Namespace, existingMW.Name)
+			// Update if:
+			// 1. ManifestWork was marked as outdated (false->true transition)
+			// 2. Spec has changed
+			// 3. Certificate data has changed
+			if isOutdated || !previousPropagateCA || certificateChanged {
+				needsUpdate = true
+
+				klog.Infof("ManifestWork %s/%s needs update (outdated: %v, previousPropagateCA: %v, certificateChanged: %v)",
+					existingMW.Namespace, existingMW.Name, isOutdated, previousPropagateCA, certificateChanged)
+			}
+
+			if needsUpdate {
+				// Update the ManifestWork spec
+				existingMW.Spec = manifestWork.Spec
+
+				// Update annotations to reflect current state
+				if existingMW.Annotations == nil {
+					existingMW.Annotations = make(map[string]string)
+				}
+
+				delete(existingMW.Annotations, ArgoCDAgentOutdatedAnnotation)     // Remove outdated marker
+				existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true" // Mark as propagating
+
+				err = r.Update(context.TODO(), existingMW)
+				if err != nil {
+					klog.Errorf("failed to update ManifestWork %s/%s: %v", existingMW.Namespace, existingMW.Name, err)
+					return err
+				}
+
+				klog.Infof("updated ManifestWork %s/%s for ArgoCD agent CA", existingMW.Namespace, existingMW.Name)
+			} else {
+				// Ensure annotations are set correctly even if no update is needed
+				if existingMW.Annotations == nil {
+					existingMW.Annotations = make(map[string]string)
+				}
+
+				if existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] != "true" {
+					existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true"
+
+					err = r.Update(context.TODO(), existingMW)
+					if err != nil {
+						klog.Errorf("failed to update ManifestWork annotations %s/%s: %v", existingMW.Namespace, existingMW.Name, err)
+						return err
+					}
+				}
+
+				klog.V(2).Infof("ManifestWork %s/%s already up to date", existingMW.Namespace, existingMW.Name)
+			}
 		}
 	}
 
@@ -1809,4 +2582,430 @@ func (r *ReconcileGitOpsCluster) createArgoCDAgentManifestWork(clusterName, argo
 	}
 
 	return manifestWork
+}
+
+// MarkArgoCDAgentManifestWorksAsOutdated marks existing ArgoCD agent ManifestWorks as outdated
+// This is called when propagateHubCA is set to false
+func (r *ReconcileGitOpsCluster) MarkArgoCDAgentManifestWorksAsOutdated(
+	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
+	for _, managedCluster := range managedClusters {
+		// Skip local-cluster - same logic as in CreateArgoCDAgentManifestWorks
+		if managedCluster.Name == "local-cluster" {
+			continue
+		}
+
+		// Skip clusters with local-cluster: "true" label
+		if managedCluster.Labels != nil {
+			if localClusterLabel, exists := managedCluster.Labels["local-cluster"]; exists && localClusterLabel == "true" {
+				continue
+			}
+		}
+
+		// Check if ManifestWork exists
+		existingMW := &workv1.ManifestWork{}
+		err := r.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-agent-ca-mw",
+			Namespace: managedCluster.Name,
+		}, existingMW)
+
+		if err != nil {
+			if k8errors.IsNotFound(err) {
+				// ManifestWork doesn't exist, nothing to mark
+				continue
+			}
+
+			return fmt.Errorf("failed to get ManifestWork argocd-agent-ca-mw/%s: %w", managedCluster.Name, err)
+		}
+
+		// Mark the ManifestWork as outdated
+		if existingMW.Annotations == nil {
+			existingMW.Annotations = make(map[string]string)
+		}
+		existingMW.Annotations[ArgoCDAgentOutdatedAnnotation] = "true"
+		existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "false"
+
+		err = r.Update(context.TODO(), existingMW)
+		if err != nil {
+			klog.Errorf("failed to mark ManifestWork %s/%s as outdated: %v", existingMW.Namespace, existingMW.Name, err)
+			return err
+		}
+
+		klog.Infof("marked ManifestWork %s/%s as outdated", existingMW.Namespace, existingMW.Name)
+	}
+
+	return nil
+}
+
+// updateGitOpsClusterConditions updates conditions based on the current state while maintaining
+// backward compatibility with the phase field
+func (r *ReconcileGitOpsCluster) updateGitOpsClusterConditions(
+	instance *gitopsclusterV1beta1.GitOpsCluster,
+	phase string,
+	message string,
+	conditionUpdates map[string]ConditionUpdate) {
+
+	// Always update the legacy fields for backward compatibility
+	instance.Status.LastUpdateTime = metav1.Now()
+	instance.Status.Phase = phase
+	instance.Status.Message = message
+
+	// Update individual conditions
+	for conditionType, update := range conditionUpdates {
+		instance.SetCondition(conditionType, update.Status, update.Reason, update.Message)
+	}
+
+	// Set overall Ready condition based on all other conditions
+	r.updateReadyCondition(instance)
+}
+
+// ConditionUpdate represents a condition update
+type ConditionUpdate struct {
+	Status  metav1.ConditionStatus
+	Reason  string
+	Message string
+}
+
+// updateReadyCondition sets the Ready condition based on other conditions
+func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1beta1.GitOpsCluster) {
+	// Ready is True if all critical conditions are True and no conditions are False
+	placementResolved := instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterPlacementResolved)
+	clustersRegistered := instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterClustersRegistered)
+
+	// Check if ArgoCD agent is enabled to determine if agent conditions matter
+	argoCDAgentEnabled := false
+	if instance.Spec.ArgoCDAgent != nil && instance.Spec.ArgoCDAgent.Enabled != nil {
+		argoCDAgentEnabled = *instance.Spec.ArgoCDAgent.Enabled
+	}
+
+	// If ArgoCD agent is enabled, also check its conditions
+	agentReady := true
+	certificatesReady := true
+	manifestWorksApplied := true
+
+	if argoCDAgentEnabled {
+		agentReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady)
+		certificatesReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
+
+		// Check if CA propagation is enabled
+		propagateHubCA := true
+		if instance.Spec.ArgoCDAgent.PropagateHubCA != nil {
+			propagateHubCA = *instance.Spec.ArgoCDAgent.PropagateHubCA
+		}
+
+		// Only require ManifestWorks if CA propagation is enabled
+		if propagateHubCA {
+			manifestWorksApplied = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
+		}
+	}
+
+	// Check if any condition is False (indicating an error)
+	hasError := false
+	for _, condition := range instance.Status.Conditions {
+		if condition.Status == metav1.ConditionFalse {
+			hasError = true
+			break
+		}
+	}
+
+	if hasError {
+		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionFalse,
+			gitopsclusterV1beta1.ReasonClusterRegistrationFailed, "One or more components have failed")
+	} else if placementResolved && clustersRegistered && agentReady && certificatesReady && manifestWorksApplied {
+		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionTrue,
+			gitopsclusterV1beta1.ReasonSuccess, "GitOpsCluster is ready and all components are functioning correctly")
+	} else {
+		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionUnknown,
+			"InProgress", "GitOpsCluster components are still being processed")
+	}
+}
+
+// ensureAddonManagerRBAC creates the addon-manager-controller RBAC resources if they don't exist
+func (r *ReconcileGitOpsCluster) ensureAddonManagerRBAC(gitopsNamespace string) error {
+	// Create Role
+	err := r.ensureAddonManagerRole(gitopsNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to ensure addon-manager-controller role: %w", err)
+	}
+
+	// Create RoleBinding
+	err = r.ensureAddonManagerRoleBinding(gitopsNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to ensure addon-manager-controller rolebinding: %w", err)
+	}
+
+	return nil
+}
+
+// ensureAddonManagerRole creates the addon-manager-controller role if it doesn't exist
+func (r *ReconcileGitOpsCluster) ensureAddonManagerRole(gitopsNamespace string) error {
+	role := &rbacv1.Role{}
+	roleName := types.NamespacedName{
+		Name:      "addon-manager-controller-role",
+		Namespace: gitopsNamespace,
+	}
+
+	err := r.Get(context.TODO(), roleName, role)
+	if err == nil {
+		klog.Info("addon-manager-controller-role already exists in namespace", gitopsNamespace)
+		return nil
+	}
+
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check addon-manager-controller-role: %w", err)
+	}
+
+	klog.Info("Creating addon-manager-controller-role in namespace", gitopsNamespace)
+
+	newRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "addon-manager-controller-role",
+			Namespace: gitopsNamespace,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopsaddon": "true",
+			},
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+
+	err = r.Create(context.TODO(), newRole)
+	if err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			klog.Info("addon-manager-controller-role was created by another process in namespace", gitopsNamespace)
+			return nil
+		}
+
+		return fmt.Errorf("failed to create addon-manager-controller-role: %w", err)
+	}
+
+	klog.Info("Successfully created addon-manager-controller-role in namespace", gitopsNamespace)
+
+	return nil
+}
+
+// ensureAddonManagerRoleBinding creates the addon-manager-controller rolebinding if it doesn't exist
+func (r *ReconcileGitOpsCluster) ensureAddonManagerRoleBinding(gitopsNamespace string) error {
+	roleBinding := &rbacv1.RoleBinding{}
+	roleBindingName := types.NamespacedName{
+		Name:      "addon-manager-controller-rolebinding",
+		Namespace: gitopsNamespace,
+	}
+
+	err := r.Get(context.TODO(), roleBindingName, roleBinding)
+	if err == nil {
+		klog.Info("addon-manager-controller-rolebinding already exists in namespace", gitopsNamespace)
+		return nil
+	}
+
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check addon-manager-controller-rolebinding: %w", err)
+	}
+
+	klog.Info("Creating addon-manager-controller-rolebinding in namespace", gitopsNamespace)
+
+	// Use the correct addon manager namespace
+	addonManagerNamespace := utils.GetComponentNamespace("open-cluster-management") + "-hub"
+
+	newRoleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "addon-manager-controller-rolebinding",
+			Namespace: gitopsNamespace,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopsaddon": "true",
+			},
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "addon-manager-controller-sa",
+				Namespace: addonManagerNamespace,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "Role",
+			Name:     "addon-manager-controller-role",
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+
+	err = r.Create(context.TODO(), newRoleBinding)
+	if err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			klog.Info("addon-manager-controller-rolebinding was created by another process in namespace", gitopsNamespace)
+			return nil
+		}
+
+		return fmt.Errorf("failed to create addon-manager-controller-rolebinding: %w", err)
+	}
+
+	klog.Info("Successfully created addon-manager-controller-rolebinding in namespace", gitopsNamespace)
+
+	return nil
+}
+
+// ensureArgoCDAgentCASecret ensures the argocd-agent-ca secret exists in GitOps namespace
+// by copying it from the multicluster-operators-application-svc-ca secret in open-cluster-management namespace
+func (r *ReconcileGitOpsCluster) ensureArgoCDAgentCASecret(gitopsNamespace string) error {
+	// Check if argocd-agent-ca secret already exists
+	targetSecret := &v1.Secret{}
+	targetSecretName := types.NamespacedName{
+		Name:      "argocd-agent-ca",
+		Namespace: gitopsNamespace,
+	}
+
+	err := r.Get(context.TODO(), targetSecretName, targetSecret)
+	if err == nil {
+		klog.Info("argocd-agent-ca secret already exists in namespace", gitopsNamespace)
+		return nil
+	}
+
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check argocd-agent-ca secret: %w", err)
+	}
+
+	klog.Info("argocd-agent-ca secret not found, copying from source secret in namespace", gitopsNamespace)
+
+	// Get the source secret from open-cluster-management namespace
+	sourceSecret := &v1.Secret{}
+	sourceSecretName := types.NamespacedName{
+		Name:      "multicluster-operators-application-svc-ca",
+		Namespace: utils.GetComponentNamespace("open-cluster-management"),
+	}
+
+	err = r.Get(context.TODO(), sourceSecretName, sourceSecret)
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			return fmt.Errorf("source secret multicluster-operators-application-svc-ca not found in %s namespace - ensure OCM is properly installed", sourceSecretName.Namespace)
+		}
+
+		return fmt.Errorf("failed to get source secret: %w", err)
+	}
+
+	// Create the new secret with modified name and namespace
+	newSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-ca",
+			Namespace: gitopsNamespace,
+		},
+		Type: sourceSecret.Type,
+		Data: sourceSecret.Data,
+	}
+
+	// Copy labels and annotations from source secret
+	if sourceSecret.Labels != nil {
+		newSecret.Labels = make(map[string]string)
+		for k, v := range sourceSecret.Labels {
+			newSecret.Labels[k] = v
+		}
+	} else {
+		newSecret.Labels = make(map[string]string)
+	}
+
+	if sourceSecret.Annotations != nil {
+		newSecret.Annotations = make(map[string]string)
+		for k, v := range sourceSecret.Annotations {
+			newSecret.Annotations[k] = v
+		}
+	} else {
+		newSecret.Annotations = make(map[string]string)
+	}
+
+	err = r.Create(context.TODO(), newSecret)
+	if err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			klog.Info("argocd-agent-ca secret was created by another process in namespace", gitopsNamespace)
+			return nil
+		}
+
+		return fmt.Errorf("failed to create argocd-agent-ca secret: %w", err)
+	}
+
+	klog.Info("Successfully created argocd-agent-ca secret in namespace", gitopsNamespace)
+
+	return nil
+}
+
+func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string) error {
+	// Default to openshift-gitops if namespace is empty
+	if gitopsNamespace == "" {
+		gitopsNamespace = "openshift-gitops"
+	}
+
+	// Check if argocd-redis secret already exists
+	argoCDRedisSecret := &v1.Secret{}
+	argoCDRedisSecretKey := types.NamespacedName{
+		Name:      "argocd-redis",
+		Namespace: gitopsNamespace,
+	}
+
+	err := r.Get(context.TODO(), argoCDRedisSecretKey, argoCDRedisSecret)
+	if err == nil {
+		klog.Info("argocd-redis secret already exists, skipping creation")
+		return nil
+	}
+
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check argocd-redis secret: %w", err)
+	}
+
+	klog.Info("argocd-redis secret not found, creating it...")
+
+	// Find the secret ending with "redis-initial-password"
+	secretList := &v1.SecretList{}
+	err = r.List(context.TODO(), secretList, client.InNamespace(gitopsNamespace))
+	if err != nil {
+		return fmt.Errorf("failed to list secrets in namespace %s: %w", gitopsNamespace, err)
+	}
+
+	var initialPasswordSecret *v1.Secret
+	for i := range secretList.Items {
+		if strings.HasSuffix(secretList.Items[i].Name, "redis-initial-password") {
+			initialPasswordSecret = &secretList.Items[i]
+			break
+		}
+	}
+
+	if initialPasswordSecret == nil {
+		return fmt.Errorf("no secret found ending with 'redis-initial-password' in namespace %s", gitopsNamespace)
+	}
+
+	// Extract the admin.password value
+	adminPasswordBytes, exists := initialPasswordSecret.Data["admin.password"]
+	if !exists {
+		return fmt.Errorf("admin.password not found in secret %s", initialPasswordSecret.Name)
+	}
+
+	// Create the argocd-redis secret
+	argoCDRedisSecretNew := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-redis",
+			Namespace: gitopsNamespace,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopscluster": "true",
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"auth": adminPasswordBytes,
+		},
+	}
+
+	err = r.Create(context.TODO(), argoCDRedisSecretNew)
+	if err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			klog.Info("argocd-redis secret was created by another process, continuing...")
+			return nil
+		}
+
+		return fmt.Errorf("failed to create argocd-redis secret: %w", err)
+	}
+
+	klog.Info("Successfully created argocd-redis secret")
+
+	return nil
 }

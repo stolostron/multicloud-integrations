@@ -42,7 +42,7 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 	t.Run("NoInitialPasswordSecret", func(t *testing.T) {
 		err := reconciler.ensureArgoCDRedisSecret()
 		g.Expect(err).To(gomega.HaveOccurred())
-		g.Expect(err.Error()).To(gomega.ContainSubstring("failed to get openshift-gitops-redis-initial-password secret"))
+		g.Expect(err.Error()).To(gomega.ContainSubstring("no secret found ending with 'redis-initial-password'"))
 	})
 
 	// Test case 2: Initial password secret exists, argocd-redis secret should be created
@@ -74,7 +74,43 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 		g.Expect(argoCDSecret.Labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 	})
 
-	// Test case 3: argocd-redis secret already exists
+	// Test case 3: Dynamic lookup with different prefix secret name
+	t.Run("DynamicLookupWithDifferentPrefix", func(t *testing.T) {
+		// Create a fresh fake client for this test
+		freshClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+		freshReconciler := &GitopsAddonReconciler{
+			Client:   freshClient,
+			GitopsNS: "openshift-gitops",
+		}
+
+		// Create a secret with a different prefix but ending with "redis-initial-password"
+		differentPrefixSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-custom-redis-initial-password",
+				Namespace: "openshift-gitops",
+			},
+			Data: map[string][]byte{
+				"admin.password": []byte("custom-password"),
+			},
+		}
+		g.Expect(freshClient.Create(context.TODO(), differentPrefixSecret)).NotTo(gomega.HaveOccurred())
+
+		// Call the function
+		err := freshReconciler.ensureArgoCDRedisSecret()
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the argocd-redis secret was created with the custom password
+		argoCDSecret := &corev1.Secret{}
+		err = freshClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-redis",
+			Namespace: "openshift-gitops",
+		}, argoCDSecret)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(argoCDSecret.Data["auth"]).To(gomega.Equal([]byte("custom-password")))
+		g.Expect(argoCDSecret.Labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
+	})
+
+	// Test case 4: argocd-redis secret already exists
 	t.Run("ArgoCDRedisSecretAlreadyExists", func(t *testing.T) {
 		// The secret should already exist from the previous test
 		err := reconciler.ensureArgoCDRedisSecret()
@@ -272,14 +308,14 @@ func TestArgoCDAgentParameters(t *testing.T) {
 		reconciler := &GitopsAddonReconciler{
 			ArgoCDAgentEnabled:       "false",
 			ArgoCDAgentServerAddress: "",
-			ArgoCDAgentServerPort:    "443",
+			ArgoCDAgentServerPort:    "",
 			ArgoCDAgentMode:          "managed",
 		}
 
 		// Verify default values
 		g.Expect(reconciler.ArgoCDAgentEnabled).To(gomega.Equal("false"))
 		g.Expect(reconciler.ArgoCDAgentServerAddress).To(gomega.Equal(""))
-		g.Expect(reconciler.ArgoCDAgentServerPort).To(gomega.Equal("443"))
+		g.Expect(reconciler.ArgoCDAgentServerPort).To(gomega.Equal(""))
 		g.Expect(reconciler.ArgoCDAgentMode).To(gomega.Equal("managed"))
 	})
 }
@@ -342,7 +378,7 @@ func TestArgoCDAgentSecretErrorHandling(t *testing.T) {
 
 		err := reconciler.ensureArgoCDRedisSecret()
 		g.Expect(err).To(gomega.HaveOccurred())
-		g.Expect(err.Error()).To(gomega.ContainSubstring("admin.password not found in openshift-gitops-redis-initial-password secret"))
+		g.Expect(err.Error()).To(gomega.ContainSubstring("admin.password not found in secret openshift-gitops-redis-initial-password"))
 	})
 }
 

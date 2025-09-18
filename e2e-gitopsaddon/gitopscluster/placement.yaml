@@ -10,11 +10,3 @@ spec:
     operator: Exists
   - key: cluster.open-cluster-management.io/unavailable
     operator: Exists
-  predicates:
-  - requiredClusterSelector:
-      labelSelector:
-        matchExpressions:
-        - key: vendor
-          operator: "In"
-          values:
-          - OpenShift

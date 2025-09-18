@@ -31,6 +31,7 @@ import (
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -522,6 +523,11 @@ func getReport() *appsetreport.MulticlusterApplicationSetReport {
 }
 
 func initClient() client.Client {
-	ncb := fake.NewClientBuilder()
+	scheme := runtime.NewScheme()
+	_ = clusterv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = appsetreport.AddToScheme(scheme)
+
+	ncb := fake.NewClientBuilder().WithScheme(scheme)
 	return ncb.Build()
 }

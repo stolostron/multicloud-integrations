@@ -22,10 +22,10 @@ spec:
   - name: ARGOCD_AGENT_ENABLED
     value: "false"
   - name: ARGOCD_AGENT_IMAGE
-    value: ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest
+    value: registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a
   - name: ARGOCD_AGENT_SERVER_ADDRESS
     value: ""
   - name: ARGOCD_AGENT_SERVER_PORT
-    value: "443"
+    value: ""
   - name: ARGOCD_AGENT_MODE
     value: "managed"
