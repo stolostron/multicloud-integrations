@@ -404,7 +404,7 @@ func TestGitOpsClusterSpec_DefaultValues(t *testing.T) {
 	assert.Equal(t, "argocd", gitopsCluster.Spec.ArgoServer.ArgoNamespace)
 	assert.Nil(t, gitopsCluster.Spec.PlacementRef)
 	assert.Empty(t, gitopsCluster.Spec.ManagedServiceAccountRef)
-	assert.Nil(t, gitopsCluster.Spec.ArgoCDAgent)
+	assert.Nil(t, gitopsCluster.Spec.GitOpsAddon)
 	assert.Nil(t, gitopsCluster.Spec.CreateBlankClusterSecrets)
 	assert.Nil(t, gitopsCluster.Spec.CreatePolicyTemplate)
 }
@@ -426,38 +426,58 @@ func TestArgoCDAgentSpec_DefaultValues(t *testing.T) {
 	assert.Nil(t, agentSpec.PropagateHubCA)
 }
 
-func TestGitOpsClusterWithArgoCDAgent(t *testing.T) {
-	// Test GitOpsCluster with ArgoCDAgent configuration
+func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
+	// Test GitOpsCluster with GitOpsAddon configuration
 	enabled := true
 	propagateCA := true
 
 	gitopsCluster := &GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops-with-agent",
+			Name:      "test-gitops-with-addon",
 			Namespace: "test-namespace",
 		},
 		Spec: GitOpsClusterSpec{
 			ArgoServer: ArgoServerSpec{
 				ArgoNamespace: "argocd",
 			},
-			ArgoCDAgent: &ArgoCDAgentSpec{
-				Enabled:        &enabled,
-				PropagateHubCA: &propagateCA,
-				Image:          "test-agent-image",
-				ServerAddress:  "test-server.example.com",
-				ServerPort:     "443",
-				Mode:           "grpc",
+			GitOpsAddon: &GitOpsAddonSpec{
+				Enabled:                 &enabled,
+				GitOpsOperatorImage:     "operator:v1.0.0",
+				GitOpsImage:             "argocd:v2.0.0",
+				RedisImage:              "redis:v3.0.0",
+				GitOpsOperatorNamespace: "gitops-operator",
+				GitOpsNamespace:         "gitops",
+				ReconcileScope:          "All-Namespaces",
+				Action:                  "Install",
+				ArgoCDAgent: &ArgoCDAgentSpec{
+					Enabled:        &enabled,
+					PropagateHubCA: &propagateCA,
+					Image:          "test-agent-image",
+					ServerAddress:  "test-server.example.com",
+					ServerPort:     "443",
+					Mode:           "grpc",
+				},
 			},
 		},
 	}
 
-	assert.NotNil(t, gitopsCluster.Spec.ArgoCDAgent)
-	assert.True(t, *gitopsCluster.Spec.ArgoCDAgent.Enabled)
-	assert.True(t, *gitopsCluster.Spec.ArgoCDAgent.PropagateHubCA)
-	assert.Equal(t, "test-agent-image", gitopsCluster.Spec.ArgoCDAgent.Image)
-	assert.Equal(t, "test-server.example.com", gitopsCluster.Spec.ArgoCDAgent.ServerAddress)
-	assert.Equal(t, "443", gitopsCluster.Spec.ArgoCDAgent.ServerPort)
-	assert.Equal(t, "grpc", gitopsCluster.Spec.ArgoCDAgent.Mode)
+	assert.NotNil(t, gitopsCluster.Spec.GitOpsAddon)
+	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.Enabled)
+	assert.Equal(t, "operator:v1.0.0", gitopsCluster.Spec.GitOpsAddon.GitOpsOperatorImage)
+	assert.Equal(t, "argocd:v2.0.0", gitopsCluster.Spec.GitOpsAddon.GitOpsImage)
+	assert.Equal(t, "redis:v3.0.0", gitopsCluster.Spec.GitOpsAddon.RedisImage)
+	assert.Equal(t, "gitops-operator", gitopsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace)
+	assert.Equal(t, "gitops", gitopsCluster.Spec.GitOpsAddon.GitOpsNamespace)
+	assert.Equal(t, "All-Namespaces", gitopsCluster.Spec.GitOpsAddon.ReconcileScope)
+	assert.Equal(t, "Install", gitopsCluster.Spec.GitOpsAddon.Action)
+
+	assert.NotNil(t, gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent)
+	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled)
+	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA)
+	assert.Equal(t, "test-agent-image", gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.Image)
+	assert.Equal(t, "test-server.example.com", gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress)
+	assert.Equal(t, "443", gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
+	assert.Equal(t, "grpc", gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.Mode)
 }
 
 // TestGitOpsClusterDeepCopy tests the DeepCopy functionality
@@ -478,18 +498,23 @@ func TestGitOpsClusterDeepCopy(t *testing.T) {
 				Name:      "test-placement",
 				Namespace: "test-ns",
 			},
-			ArgoCDAgent: &ArgoCDAgentSpec{
+			GitOpsAddon: &GitOpsAddonSpec{
 				Enabled:                 &[]bool{true}[0],
-				PropagateHubCA:          &[]bool{true}[0],
-				Image:                   "quay.io/test/argocd-agent:latest",
-				ServerAddress:           "https://argocd.example.com",
-				ServerPort:              "443",
-				Mode:                    "pull",
 				GitOpsOperatorImage:     "quay.io/test/gitops-operator:latest",
 				GitOpsOperatorNamespace: "gitops-system",
 				GitOpsImage:             "quay.io/test/argocd:latest",
 				GitOpsNamespace:         "argocd",
 				RedisImage:              "redis:6.2",
+				ReconcileScope:          "All-Namespaces",
+				Action:                  "Install",
+				ArgoCDAgent: &ArgoCDAgentSpec{
+					Enabled:        &[]bool{true}[0],
+					PropagateHubCA: &[]bool{true}[0],
+					Image:          "quay.io/test/argocd-agent:latest",
+					ServerAddress:  "https://argocd.example.com",
+					ServerPort:     "443",
+					Mode:           "pull",
+				},
 			},
 		},
 		Status: GitOpsClusterStatus{
@@ -512,17 +537,20 @@ func TestGitOpsClusterDeepCopy(t *testing.T) {
 	assert.Equal(t, original.Name, copied.Name)
 	assert.Equal(t, original.Namespace, copied.Namespace)
 	assert.Equal(t, original.Spec.ArgoServer.ArgoNamespace, copied.Spec.ArgoServer.ArgoNamespace)
-	assert.Equal(t, *original.Spec.ArgoCDAgent.Enabled, *copied.Spec.ArgoCDAgent.Enabled)
+	assert.Equal(t, *original.Spec.GitOpsAddon.Enabled, *copied.Spec.GitOpsAddon.Enabled)
+	assert.Equal(t, *original.Spec.GitOpsAddon.ArgoCDAgent.Enabled, *copied.Spec.GitOpsAddon.ArgoCDAgent.Enabled)
 	assert.Equal(t, original.Status.Phase, copied.Status.Phase)
 
 	// Modify original to ensure deep copy worked
 	original.Name = "modified"
 	original.Spec.ArgoServer.ArgoNamespace = "modified-ns"
-	*original.Spec.ArgoCDAgent.Enabled = false
+	*original.Spec.GitOpsAddon.Enabled = false
+	*original.Spec.GitOpsAddon.ArgoCDAgent.Enabled = false
 
 	assert.Equal(t, "test-cluster", copied.Name)
 	assert.Equal(t, "argo-ns", copied.Spec.ArgoServer.ArgoNamespace)
-	assert.True(t, *copied.Spec.ArgoCDAgent.Enabled)
+	assert.True(t, *copied.Spec.GitOpsAddon.Enabled)
+	assert.True(t, *copied.Spec.GitOpsAddon.ArgoCDAgent.Enabled)
 }
 
 // TestGitOpsClusterListDeepCopy tests the GitOpsClusterList DeepCopy functionality
@@ -570,17 +598,12 @@ func TestGitOpsClusterListDeepCopy(t *testing.T) {
 // TestArgoCDAgentSpecDeepCopy tests the ArgoCDAgentSpec DeepCopy functionality
 func TestArgoCDAgentSpecDeepCopy(t *testing.T) {
 	original := &ArgoCDAgentSpec{
-		Enabled:                 &[]bool{true}[0],
-		PropagateHubCA:          &[]bool{false}[0],
-		Image:                   "quay.io/test/argocd-agent:v1.0.0",
-		ServerAddress:           "https://argocd.example.com",
-		ServerPort:              "8080",
-		Mode:                    "push",
-		GitOpsOperatorImage:     "quay.io/test/gitops-operator:v1.0.0",
-		GitOpsOperatorNamespace: "gitops-system",
-		GitOpsImage:             "quay.io/test/argocd:v2.8.0",
-		GitOpsNamespace:         "argocd",
-		RedisImage:              "redis:7.0",
+		Enabled:        &[]bool{true}[0],
+		PropagateHubCA: &[]bool{false}[0],
+		Image:          "quay.io/test/argocd-agent:v1.0.0",
+		ServerAddress:  "https://argocd.example.com",
+		ServerPort:     "8080",
+		Mode:           "push",
 	}
 
 	// Test DeepCopy
@@ -616,9 +639,12 @@ func TestGitOpsClusterSpecDeepCopy(t *testing.T) {
 			Namespace: "test-ns",
 			Kind:      "Placement",
 		},
-		ArgoCDAgent: &ArgoCDAgentSpec{
+		GitOpsAddon: &GitOpsAddonSpec{
 			Enabled: &[]bool{true}[0],
-			Image:   "test-image",
+			ArgoCDAgent: &ArgoCDAgentSpec{
+				Enabled: &[]bool{true}[0],
+				Image:   "test-image",
+			},
 		},
 	}
 
@@ -627,15 +653,16 @@ func TestGitOpsClusterSpecDeepCopy(t *testing.T) {
 	assert.NotNil(t, copied)
 	assert.NotSame(t, original, copied)
 	assert.NotSame(t, original.PlacementRef, copied.PlacementRef)
-	assert.NotSame(t, original.ArgoCDAgent, copied.ArgoCDAgent)
+	assert.NotSame(t, original.GitOpsAddon, copied.GitOpsAddon)
 	assert.Equal(t, original.ArgoServer.ArgoNamespace, copied.ArgoServer.ArgoNamespace)
 	assert.Equal(t, original.PlacementRef.Name, copied.PlacementRef.Name)
-	assert.Equal(t, *original.ArgoCDAgent.Enabled, *copied.ArgoCDAgent.Enabled)
+	assert.Equal(t, *original.GitOpsAddon.Enabled, *copied.GitOpsAddon.Enabled)
+	assert.Equal(t, *original.GitOpsAddon.ArgoCDAgent.Enabled, *copied.GitOpsAddon.ArgoCDAgent.Enabled)
 
-	// Test with nil ArgoCDAgent
-	original.ArgoCDAgent = nil
+	// Test with nil GitOpsAddon
+	original.GitOpsAddon = nil
 	copied = original.DeepCopy()
-	assert.Nil(t, copied.ArgoCDAgent)
+	assert.Nil(t, copied.GitOpsAddon)
 }
 
 // TestGitOpsClusterStatusDeepCopy tests the GitOpsClusterStatus DeepCopy functionality

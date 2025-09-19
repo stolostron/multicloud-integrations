@@ -434,6 +434,16 @@ func (r *ReconcileGitOpsCluster) generateTLSCertificate(caCert *x509.Certificate
 		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
+	// Normalize IP addresses to ensure IPv4 addresses are stored as 4-byte addresses
+	normalizedIPs := make([]net.IP, len(ips))
+	for i, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			normalizedIPs[i] = ipv4
+		} else {
+			normalizedIPs[i] = ip
+		}
+	}
+
 	// Create certificate template
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
@@ -445,7 +455,7 @@ func (r *ReconcileGitOpsCluster) generateTLSCertificate(caCert *x509.Certificate
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
-		IPAddresses:           ips,
+		IPAddresses:           normalizedIPs,
 		DNSNames:              dnsNames,
 	}
 

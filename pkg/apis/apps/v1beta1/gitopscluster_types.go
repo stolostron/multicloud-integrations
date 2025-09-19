@@ -95,8 +95,8 @@ type GitOpsClusterSpec struct {
 	// ManagedServiceAccountRef defines managed service account in the managed cluster namespace used to create the ArgoCD cluster secret.
 	ManagedServiceAccountRef string `json:"managedServiceAccountRef,omitempty"`
 
-	// ArgoCDAgent defines the configuration for the ArgoCD agent.
-	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
+	// GitOpsAddon defines the configuration for the GitOps addon.
+	GitOpsAddon *GitOpsAddonSpec `json:"gitopsAddon,omitempty"`
 
 	// Internally used.
 	CreateBlankClusterSecrets *bool `json:"createBlankClusterSecrets,omitempty"`
@@ -112,6 +112,38 @@ type ArgoServerSpec struct {
 
 	// ArgoNamespace is the namespace in which the Argo CD server is installed.
 	ArgoNamespace string `json:"argoNamespace"`
+}
+
+// GitOpsAddonSpec defines the configuration for the GitOps addon.
+type GitOpsAddonSpec struct {
+	// Enabled indicates whether the GitOps addon is enabled. Default is false.
+	// When enabled, creates AddonDeploymentConfigs/ManagedClusterAddon resources.
+	// +kubebuilder:default=false
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// GitOpsOperatorImage specifies the GitOps operator container image. Default is empty.
+	GitOpsOperatorImage string `json:"gitOpsOperatorImage,omitempty"`
+
+	// GitOpsImage specifies the GitOps (ArgoCD) container image. Default is empty.
+	GitOpsImage string `json:"gitOpsImage,omitempty"`
+
+	// RedisImage specifies the Redis container image. Default is empty.
+	RedisImage string `json:"redisImage,omitempty"`
+
+	// GitOpsOperatorNamespace specifies the GitOps operator namespace. Default is empty.
+	GitOpsOperatorNamespace string `json:"gitOpsOperatorNamespace,omitempty"`
+
+	// GitOpsNamespace specifies the GitOps namespace. Default is empty.
+	GitOpsNamespace string `json:"gitOpsNamespace,omitempty"`
+
+	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
+	ReconcileScope string `json:"reconcileScope,omitempty"`
+
+	// Action specifies the action to be performed by the GitOps operator. Default is empty.
+	Action string `json:"action,omitempty"`
+
+	// ArgoCDAgent defines the configuration for the ArgoCD agent.
+	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
 }
 
 // ArgoCDAgentSpec defines the configuration for the ArgoCD agent.
@@ -135,27 +167,6 @@ type ArgoCDAgentSpec struct {
 
 	// Mode specifies the ArgoCD agent mode. Default is empty.
 	Mode string `json:"mode,omitempty"`
-
-	// GitOpsOperatorImage specifies the GitOps operator container image. Default is empty.
-	GitOpsOperatorImage string `json:"gitOpsOperatorImage,omitempty"`
-
-	// GitOpsOperatorNamespace specifies the GitOps operator namespace. Default is empty.
-	GitOpsOperatorNamespace string `json:"gitOpsOperatorNamespace,omitempty"`
-
-	// GitOpsImage specifies the GitOps (ArgoCD) container image. Default is empty.
-	GitOpsImage string `json:"gitOpsImage,omitempty"`
-
-	// GitOpsNamespace specifies the GitOps namespace. Default is empty.
-	GitOpsNamespace string `json:"gitOpsNamespace,omitempty"`
-
-	// RedisImage specifies the Redis container image. Default is empty.
-	RedisImage string `json:"redisImage,omitempty"`
-
-	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
-	ReconcileScope string `json:"reconcileScope,omitempty"`
-
-	// Action specifies the action to be performed by the GitOps operator. Default is empty.
-	Action string `json:"action,omitempty"`
 }
 
 // GitOpsClusterStatus defines the observed state of GitOpsCluster.
