@@ -380,7 +380,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("GitOpsAddon spec validation failed: %v", err),
 				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
 						Message: fmt.Sprintf("GitOpsAddon spec validation failed: %v", err),
@@ -430,7 +430,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		r.updateGitOpsClusterConditions(instance, "failed",
 			"invalid gitops namespace because argo server pod was not found",
 			map[string]ConditionUpdate{
-				gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+				gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 					Status:  metav1.ConditionFalse,
 					Reason:  gitopsclusterV1beta1.ReasonArgoServerNotFound,
 					Message: "ArgoCD server pod was not found in the specified namespace",
@@ -494,8 +494,9 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	// 3. Check if GitOps addon and ArgoCD agent are enabled
 	gitopsAddonEnabled, argoCDAgentEnabled := r.GetGitOpsAddonStatus(instance)
 
-	// 3a. Ensure argocd-redis secret exists if ArgoCD agent is enabled
+	// 3a. Ensure secrets exists if ArgoCD agent is enabled
 	if argoCDAgentEnabled {
+		// Ensure argocd-redis secret exists if ArgoCD agent is enabled
 		err = r.ensureArgoCDRedisSecret(instance.Spec.ArgoServer.ArgoNamespace)
 		if err != nil {
 			klog.Errorf("failed to ensure argocd-redis secret: %v", err)
@@ -507,7 +508,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 			r.updateGitOpsClusterConditions(instance, "failed", msg,
 				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
 						Message: msg,
@@ -517,6 +518,34 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
 				klog.Errorf("failed to update GitOpsCluster %s status after redis secret failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+
+		// Ensure argocd-agent-jwt secret exists if ArgoCD agent is enabled
+		err = r.ensureArgoCDAgentJWTSecret(instance.Spec.ArgoServer.ArgoNamespace)
+		if err != nil {
+			klog.Errorf("failed to ensure argocd-agent-jwt secret: %v", err)
+
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after JWT secret failure: %s", instance.Namespace+"/"+instance.Name, err2)
 				return 3, err2
 			}
 
@@ -545,7 +574,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
 				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
 						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources: %v", err),
@@ -565,7 +594,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
 				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady: {
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
 						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret: %v", err),
@@ -579,7 +608,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			return 3, err
 		}
 
-		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC and CA secret) for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
 	}
 
 	// Check if Hub CA propagation is enabled (default true)
@@ -738,7 +767,12 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// Add ArgoCD agent specific conditions if enabled
 	if argoCDAgentEnabled {
-		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady] = ConditionUpdate{
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonSuccess,
+			Message: "ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) are ready",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
 			Reason:  gitopsclusterV1beta1.ReasonSuccess,
 			Message: "ArgoCD agent is properly configured and enabled",
@@ -765,7 +799,12 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	} else {
 		// ArgoCD agent is disabled, set conditions accordingly
-		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady] = ConditionUpdate{
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "ArgoCD agent prerequisites not required (agent disabled)",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
 			Reason:  gitopsclusterV1beta1.ReasonDisabled,
 			Message: "ArgoCD agent is disabled",
@@ -963,19 +1002,6 @@ func (r *ReconcileGitOpsCluster) GetAllGitOpsClusters() (gitopsclusterV1beta1.Gi
 
 	return *gitOpsClusterList, nil
 }
-
-// VerifyArgocdNamespace verifies that the given argoNamespace is a valid namspace by verifying that ArgoCD is actually
-// installed in that namespace
-
-// FindServiceWithLabelsAndNamespace finds a list of services with provided labels from the specified namespace
-
-// EnsureServerAddressAndPort auto-discovers and populates server address and port if they are empty
-
-// HasExistingServerConfig checks if any existing AddonDeploymentConfig has server address/port configured
-
-// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal service
-
-// GetManagedClusters retrieves managed cluster names from placement decision
 
 const componentName = "application-manager"
 
@@ -1706,15 +1732,6 @@ spec:
 	return yamlString
 }
 
-// CreateArgoCDAgentManifestWorks creates ManifestWork resources for ArgoCD agent CA secret in each managed cluster
-
-// getArgoCDAgentCACert retrieves the CA certificate from the argocd-agent-ca secret
-
-// createArgoCDAgentManifestWork creates a ManifestWork for deploying the ArgoCD agent CA secret
-
-// MarkArgoCDAgentManifestWorksAsOutdated marks existing ArgoCD agent ManifestWorks as outdated
-// This is called when propagateHubCA is set to false
-
 // updateGitOpsClusterConditions updates conditions based on the current state while maintaining
 // backward compatibility with the phase field
 func (r *ReconcileGitOpsCluster) updateGitOpsClusterConditions(
@@ -1757,12 +1774,12 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 	}
 
 	// If ArgoCD agent is enabled, also check its conditions
-	agentReady := true
+	agentPrereqsReady := true
 	certificatesReady := true
 	manifestWorksApplied := true
 
 	if argoCDAgentEnabled {
-		agentReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterArgoCDAgentReady)
+		agentPrereqsReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady)
 		certificatesReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
 
 		// Check if CA propagation is enabled
@@ -1789,7 +1806,7 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 	if hasError {
 		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionFalse,
 			gitopsclusterV1beta1.ReasonClusterRegistrationFailed, "One or more components have failed")
-	} else if placementResolved && clustersRegistered && agentReady && certificatesReady && manifestWorksApplied {
+	} else if placementResolved && clustersRegistered && agentPrereqsReady && certificatesReady && manifestWorksApplied {
 		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionTrue,
 			gitopsclusterV1beta1.ReasonSuccess, "GitOpsCluster is ready and all components are functioning correctly")
 	} else {
@@ -1797,19 +1814,3 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 			"InProgress", "GitOpsCluster components are still being processed")
 	}
 }
-
-// ensureAddonManagerRBAC creates the addon-manager-controller RBAC resources if they don't exist
-
-// ensureAddonManagerRole creates the addon-manager-controller role if it doesn't exist
-
-// ensureAddonManagerRoleBinding creates the addon-manager-controller rolebinding if it doesn't exist
-
-// ensureArgoCDAgentCASecret ensures the argocd-agent-ca secret exists in GitOps namespace
-// by copying it from the multicluster-operators-application-svc-ca secret in open-cluster-management namespace
-
-// GetGitOpsAddonStatus checks the current enablement status of GitOps addon and ArgoCD agent
-// Returns (gitopsAddonEnabled, argoCDAgentEnabled) booleans
-
-// ExtractVariablesFromGitOpsCluster extracts configuration variables from GitOpsCluster spec for AddOnDeploymentConfig
-
-// extractArgoCDAgentVariables extracts ArgoCD agent specific variables from ArgoCDAgentSpec

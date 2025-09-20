@@ -16,6 +16,10 @@ package gitopscluster
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -171,6 +175,140 @@ func TestEnsureArgoCDAgentCASecret(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestJWTSecretEdgeCases(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		gitopsNamespace string
+		existingObjects []client.Object
+		expectedError   bool
+	}{
+		{
+			name:            "empty namespace should use default",
+			gitopsNamespace: "",
+			existingObjects: []client.Object{},
+			expectedError:   false,
+		},
+		{
+			name:            "very long namespace name",
+			gitopsNamespace: "this-is-a-very-long-namespace-name-that-should-still-work-fine-in-kubernetes",
+			existingObjects: []client.Object{},
+			expectedError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			err := reconciler.ensureArgoCDAgentJWTSecret(tt.gitopsNamespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+
+				// Verify secret was created in correct namespace
+				expectedNamespace := tt.gitopsNamespace
+				if expectedNamespace == "" {
+					expectedNamespace = "openshift-gitops"
+				}
+
+				secret := &v1.Secret{}
+				err := fakeClient.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-jwt",
+					Namespace: expectedNamespace,
+				}, secret)
+				assert.NoError(t, err)
+
+				// Validate JWT key format and strength
+				jwtKeyData := secret.Data["jwt.key"]
+				assert.NotEmpty(t, jwtKeyData)
+
+				// Parse and validate the key
+				block, _ := pem.Decode(jwtKeyData)
+				assert.NotNil(t, block, "Should be valid PEM format")
+				assert.Equal(t, "PRIVATE KEY", block.Type)
+
+				privateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+				assert.NoError(t, err)
+
+				rsaKey, ok := privateKey.(*rsa.PrivateKey)
+				assert.True(t, ok, "Should be RSA key")
+				assert.Equal(t, 4096, rsaKey.Size()*8, "Should be 4096-bit key")
+
+				// Verify secret labels
+				assert.Equal(t, "true", secret.Labels["apps.open-cluster-management.io/gitopscluster"])
+			}
+		})
+	}
+}
+
+func TestJWTKeyUniqueness(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	generatedKeys := make(map[string]bool)
+	iterations := 3
+
+	for i := 0; i < iterations; i++ {
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		reconciler := &ReconcileGitOpsCluster{
+			Client: fakeClient,
+		}
+
+		namespace := fmt.Sprintf("test-namespace-%d", i)
+		err := reconciler.ensureArgoCDAgentJWTSecret(namespace)
+		assert.NoError(t, err)
+
+		secret := &v1.Secret{}
+		err = fakeClient.Get(context.TODO(), types.NamespacedName{
+			Name:      "argocd-agent-jwt",
+			Namespace: namespace,
+		}, secret)
+		assert.NoError(t, err)
+
+		keyData := string(secret.Data["jwt.key"])
+		assert.NotEmpty(t, keyData)
+
+		// Ensure key is unique
+		assert.False(t, generatedKeys[keyData], "Generated key should be unique")
+		generatedKeys[keyData] = true
+
+		// Validate key structure
+		block, _ := pem.Decode(secret.Data["jwt.key"])
+		assert.NotNil(t, block)
+		assert.Equal(t, "PRIVATE KEY", block.Type)
+
+		privateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		assert.NoError(t, err)
+
+		rsaKey, ok := privateKey.(*rsa.PrivateKey)
+		assert.True(t, ok)
+		assert.Equal(t, 4096, rsaKey.Size()*8)
+
+		// Validate that the key can be used for JWT signing
+		assert.NotNil(t, rsaKey.PublicKey)
+		assert.True(t, rsaKey.Validate() == nil, "RSA key should be valid")
+	}
+
+	assert.Equal(t, iterations, len(generatedKeys), "Should have generated unique keys")
 }
 
 func TestEnsureArgoCDRedisSecret(t *testing.T) {
