@@ -16,6 +16,10 @@ package gitopscluster
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"strings"
 
@@ -185,6 +189,80 @@ func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string)
 	}
 
 	klog.Info("Successfully created argocd-redis secret")
+
+	return nil
+}
+
+// ensureArgoCDAgentJWTSecret ensures the argocd-agent-jwt secret exists in GitOps namespace
+// This function creates a JWT signing key similar to the argocd-agentctl jwt create-key command
+func (r *ReconcileGitOpsCluster) ensureArgoCDAgentJWTSecret(gitopsNamespace string) error {
+	// Default to openshift-gitops if namespace is empty
+	if gitopsNamespace == "" {
+		gitopsNamespace = "openshift-gitops"
+	}
+
+	// Check if argocd-agent-jwt secret already exists
+	argoCDAgentJWTSecret := &v1.Secret{}
+	argoCDAgentJWTSecretKey := types.NamespacedName{
+		Name:      "argocd-agent-jwt",
+		Namespace: gitopsNamespace,
+	}
+
+	err := r.Get(context.TODO(), argoCDAgentJWTSecretKey, argoCDAgentJWTSecret)
+	if err == nil {
+		klog.Info("argocd-agent-jwt secret already exists, skipping creation")
+		return nil
+	}
+
+	if !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check argocd-agent-jwt secret: %w", err)
+	}
+
+	klog.Info("argocd-agent-jwt secret not found, creating JWT signing key...")
+
+	// Generate 4096-bit RSA private key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return fmt.Errorf("could not generate RSA private key: %w", err)
+	}
+
+	// Convert to PKCS#8 PEM format
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("could not marshal private key: %w", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: keyBytes,
+	})
+
+	// Create the argocd-agent-jwt secret
+	argoCDAgentJWTSecretNew := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-jwt",
+			Namespace: gitopsNamespace,
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopscluster": "true",
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"jwt.key": keyPEM,
+		},
+	}
+
+	err = r.Create(context.TODO(), argoCDAgentJWTSecretNew)
+	if err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			klog.Info("argocd-agent-jwt secret was created by another process, continuing...")
+			return nil
+		}
+
+		return fmt.Errorf("failed to create argocd-agent-jwt secret: %w", err)
+	}
+
+	klog.Info("Successfully created argocd-agent-jwt secret with RSA-4096 signing key")
 
 	return nil
 }

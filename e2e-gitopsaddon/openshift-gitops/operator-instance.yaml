@@ -13,5 +13,4 @@ spec:
       auth: mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent
       enabled: true
       image: ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest
-      jwtAllowGenerate: true
       logLevel: trace
