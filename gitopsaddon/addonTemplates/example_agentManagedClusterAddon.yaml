@@ -4,7 +4,6 @@ metadata:
   name: gitops-addon
   namespace: cluster1
 spec:
-  installNamespace: open-cluster-management-agent-addon
   configs:
   - group: addon.open-cluster-management.io
     resource: addondeploymentconfigs
