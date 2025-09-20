@@ -21,9 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 const (
 	// TLS minimum version as an integer
 	TLSMinVersionInt = tls.VersionTLS12
@@ -42,9 +39,9 @@ const (
 	// registered with the ArgoCD server.
 	GitOpsClusterClustersRegistered = "ClustersRegistered"
 
-	// GitOpsClusterArgoCDAgentReady indicates whether the ArgoCD agent is properly enabled,
-	// configured, and functioning correctly.
-	GitOpsClusterArgoCDAgentReady = "ArgoCDAgentReady"
+	// GitOpsClusterArgoCDAgentPrereqsReady indicates whether the ArgoCD agent prerequisites
+	// (like JWT secrets and configuration) are properly set up.
+	GitOpsClusterArgoCDAgentPrereqsReady = "ArgoCDAgentPrereqsReady"
 
 	// GitOpsClusterCertificatesReady indicates whether ArgoCD agent certificates are properly
 	// signed and ready for use.

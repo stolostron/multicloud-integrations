@@ -169,7 +169,7 @@ func TestGitOpsCluster_GetCondition(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				},
 				{
-					Type:   GitOpsClusterArgoCDAgentReady,
+					Type:   GitOpsClusterArgoCDAgentPrereqsReady,
 					Status: metav1.ConditionFalse,
 				},
 				{
@@ -177,9 +177,9 @@ func TestGitOpsCluster_GetCondition(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				},
 			},
-			conditionType: GitOpsClusterArgoCDAgentReady,
+			conditionType: GitOpsClusterArgoCDAgentPrereqsReady,
 			expectedCondition: &metav1.Condition{
-				Type:   GitOpsClusterArgoCDAgentReady,
+				Type:   GitOpsClusterArgoCDAgentPrereqsReady,
 				Status: metav1.ConditionFalse,
 			},
 		},
@@ -339,11 +339,11 @@ func TestGitOpsCluster_IsConditionFalse(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				},
 				{
-					Type:   GitOpsClusterArgoCDAgentReady,
+					Type:   GitOpsClusterArgoCDAgentPrereqsReady,
 					Status: metav1.ConditionFalse,
 				},
 			},
-			conditionType:  GitOpsClusterArgoCDAgentReady,
+			conditionType:  GitOpsClusterArgoCDAgentPrereqsReady,
 			expectedResult: true,
 		},
 	}
@@ -367,7 +367,7 @@ func TestGitOpsClusterConstants(t *testing.T) {
 	assert.Equal(t, "Ready", GitOpsClusterReady)
 	assert.Equal(t, "PlacementResolved", GitOpsClusterPlacementResolved)
 	assert.Equal(t, "ClustersRegistered", GitOpsClusterClustersRegistered)
-	assert.Equal(t, "ArgoCDAgentReady", GitOpsClusterArgoCDAgentReady)
+	assert.Equal(t, "ArgoCDAgentPrereqsReady", GitOpsClusterArgoCDAgentPrereqsReady)
 	assert.Equal(t, "CertificatesReady", GitOpsClusterCertificatesReady)
 	assert.Equal(t, "ManifestWorksApplied", GitOpsClusterManifestWorksApplied)
 
@@ -677,7 +677,7 @@ func TestGitOpsClusterStatusDeepCopy(t *testing.T) {
 				Reason: ReasonSuccess,
 			},
 			{
-				Type:   GitOpsClusterArgoCDAgentReady,
+				Type:   GitOpsClusterArgoCDAgentPrereqsReady,
 				Status: metav1.ConditionFalse,
 				Reason: ReasonArgoCDAgentFailed,
 			},

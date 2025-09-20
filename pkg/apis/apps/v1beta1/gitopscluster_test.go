@@ -128,7 +128,7 @@ func TestGitOpsClusterConditionMethods(t *testing.T) {
 		gitopsCluster.SetCondition(GitOpsClusterReady, metav1.ConditionTrue, ReasonSuccess, "Ready")
 		gitopsCluster.SetCondition(GitOpsClusterPlacementResolved, metav1.ConditionTrue, ReasonSuccess, "Resolved")
 		gitopsCluster.SetCondition(GitOpsClusterClustersRegistered, metav1.ConditionFalse, ReasonClusterRegistrationFailed, "Failed")
-		gitopsCluster.SetCondition(GitOpsClusterArgoCDAgentReady, metav1.ConditionTrue, ReasonSuccess, "Agent ready")
+		gitopsCluster.SetCondition(GitOpsClusterArgoCDAgentPrereqsReady, metav1.ConditionTrue, ReasonSuccess, "Agent ready")
 		gitopsCluster.SetCondition(GitOpsClusterCertificatesReady, metav1.ConditionUnknown, "InProgress", "Processing")
 		gitopsCluster.SetCondition(GitOpsClusterManifestWorksApplied, metav1.ConditionTrue, ReasonNotRequired, "Not required")
 
@@ -138,7 +138,7 @@ func TestGitOpsClusterConditionMethods(t *testing.T) {
 		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterReady)).To(gomega.BeTrue())
 		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterPlacementResolved)).To(gomega.BeTrue())
 		g.Expect(gitopsCluster.IsConditionFalse(GitOpsClusterClustersRegistered)).To(gomega.BeTrue())
-		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterArgoCDAgentReady)).To(gomega.BeTrue())
+		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterArgoCDAgentPrereqsReady)).To(gomega.BeTrue())
 		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterCertificatesReady)).To(gomega.BeFalse())
 		g.Expect(gitopsCluster.IsConditionFalse(GitOpsClusterCertificatesReady)).To(gomega.BeFalse())
 		g.Expect(gitopsCluster.IsConditionTrue(GitOpsClusterManifestWorksApplied)).To(gomega.BeTrue())
@@ -178,7 +178,7 @@ func TestGitOpsClusterConditionMethods(t *testing.T) {
 		g.Expect(GitOpsClusterReady).To(gomega.Equal("Ready"))
 		g.Expect(GitOpsClusterPlacementResolved).To(gomega.Equal("PlacementResolved"))
 		g.Expect(GitOpsClusterClustersRegistered).To(gomega.Equal("ClustersRegistered"))
-		g.Expect(GitOpsClusterArgoCDAgentReady).To(gomega.Equal("ArgoCDAgentReady"))
+		g.Expect(GitOpsClusterArgoCDAgentPrereqsReady).To(gomega.Equal("ArgoCDAgentPrereqsReady"))
 		g.Expect(GitOpsClusterCertificatesReady).To(gomega.Equal("CertificatesReady"))
 		g.Expect(GitOpsClusterManifestWorksApplied).To(gomega.Equal("ManifestWorksApplied"))
 
