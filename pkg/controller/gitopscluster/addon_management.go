@@ -27,7 +27,9 @@ import (
 )
 
 // CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace
-// It only updates GitOpsCluster-managed variables and preserves user-added custom variables
+// Behavior depends on the overrideExistingConfigs flag:
+// - When false (default): preserves all existing variables and only adds new ones from GitOpsCluster spec
+// - When true: preserves user variables but overrides managed variables with values from GitOpsCluster spec
 func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, namespace string) error {
 	if namespace == "" {
 		return errors.New("no namespace provided")
@@ -88,23 +90,44 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 			existingVars[variable.Name] = variable
 		}
 
-		// Update or add managed variables, preserve user-added variables
-		updatedVariables := make([]addonv1alpha1.CustomizedVariable, 0)
-
-		// First, add all existing user variables (non-managed ones will be preserved)
-		for _, variable := range existing.Spec.CustomizedVariables {
-			if _, isManaged := managedVariables[variable.Name]; !isManaged {
-				// This is a user-added variable, preserve it
-				updatedVariables = append(updatedVariables, variable)
-			}
+		// Determine behavior based on overrideExistingConfigs setting
+		shouldOverrideExisting := false
+		if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs != nil {
+			shouldOverrideExisting = *gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs
 		}
 
-		// Then add/update all managed variables with current values
-		for name, value := range managedVariables {
-			updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
-				Name:  name,
-				Value: value,
-			})
+		updatedVariables := make([]addonv1alpha1.CustomizedVariable, 0)
+
+		if shouldOverrideExisting {
+			// Override mode: preserve user variables, update/add managed variables
+			for _, variable := range existing.Spec.CustomizedVariables {
+				if _, isManaged := managedVariables[variable.Name]; !isManaged {
+					// This is a user-added variable, preserve it
+					updatedVariables = append(updatedVariables, variable)
+				}
+			}
+
+			// Add/update all managed variables with current values
+			for name, value := range managedVariables {
+				updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
+					Name:  name,
+					Value: value,
+				})
+			}
+		} else {
+			// Preserve mode (default): preserve ALL existing variables and only add new ones
+			updatedVariables = append(updatedVariables, existing.Spec.CustomizedVariables...)
+
+			// Add only NEW managed variables that don't already exist
+			for name, value := range managedVariables {
+				if _, exists := existingVars[name]; !exists {
+					// Only add if the variable doesn't already exist
+					updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
+						Name:  name,
+						Value: value,
+					})
+				}
+			}
 		}
 
 		existing.Spec.CustomizedVariables = updatedVariables
@@ -225,8 +248,7 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) err
 				Namespace: namespace,
 			},
 			Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-				InstallNamespace: "open-cluster-management-agent-addon",
-				Configs:          []addonv1alpha1.AddOnConfig{expectedConfig},
+				Configs: []addonv1alpha1.AddOnConfig{expectedConfig},
 			},
 		}
 
@@ -248,8 +270,7 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) err
 	for _, config := range existing.Spec.Configs {
 		if config.Group == expectedConfig.Group &&
 			config.Resource == expectedConfig.Resource &&
-			config.Name == expectedConfig.Name &&
-			config.Namespace == expectedConfig.Namespace {
+			config.Name == expectedConfig.Name {
 			configExists = true
 			break
 		}

@@ -110,7 +110,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "update existing AddOnDeploymentConfig preserving user variables",
+			name:      "update existing AddOnDeploymentConfig preserving all existing variables",
 			namespace: "test-cluster",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -157,10 +157,125 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 
 				// User variable should be preserved
 				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
-				// Managed variables should be updated
-				assert.Equal(t, "updated-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Managed variable should be updated")
-				assert.Equal(t, "updated-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "Managed variable should be updated")
-				assert.Equal(t, "updated-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "Managed variable should be updated")
+				// Existing managed variables should be preserved (not overridden)
+				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved")
+				// New managed variables should be added
+				assert.Equal(t, "updated-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "New managed variable should be added")
+				assert.Equal(t, "updated-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
+			},
+		},
+		{
+			name:      "override existing configs when overrideExistingConfigs is true",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						OverrideExistingConfigs: func(b bool) *bool { return &b }(true),
+						GitOpsOperatorImage:     "new-operator-image:latest",
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Image:         "new-agent-image:latest",
+							ServerAddress: "new-server.com",
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "ARGOCD_AGENT_ENABLED", Value: "true"},
+							{Name: "USER_CUSTOM_VAR", Value: "user-value"},
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-operator-image:latest"},
+							{Name: "ARGOCD_AGENT_IMAGE", Value: "old-agent-image:latest"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				// User variable should be preserved
+				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
+				// Managed variables should be overridden
+				assert.Equal(t, "new-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Managed variable should be overridden")
+				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "Managed variable should be overridden")
+				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
+				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be present")
+			},
+		},
+		{
+			name:      "preserve existing configs when overrideExistingConfigs is false (explicit)",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						OverrideExistingConfigs: func(b bool) *bool { return &b }(false),
+						GitOpsOperatorImage:     "new-operator-image:latest",
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Image:         "new-agent-image:latest",
+							ServerAddress: "new-server.com",
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "ARGOCD_AGENT_ENABLED", Value: "true"},
+							{Name: "USER_CUSTOM_VAR", Value: "user-value"},
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-operator-image:latest"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				// User variable should be preserved
+				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
+				// Existing managed variables should be preserved (not overridden)
+				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved")
+				// New managed variables should be added
+				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "New managed variable should be added")
+				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
+				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be present")
 			},
 		},
 	}
@@ -220,9 +335,7 @@ func TestUpdateManagedClusterAddonConfig(t *testing.T) {
 						Name:      "gitops-addon",
 						Namespace: "test-cluster",
 					},
-					Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-						InstallNamespace: "open-cluster-management-agent-addon",
-					},
+					Spec: addonv1alpha1.ManagedClusterAddOnSpec{},
 				},
 			},
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
@@ -252,7 +365,6 @@ func TestUpdateManagedClusterAddonConfig(t *testing.T) {
 						Namespace: "test-cluster",
 					},
 					Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-						InstallNamespace: "open-cluster-management-agent-addon",
 						Configs: []addonv1alpha1.AddOnConfig{
 							{
 								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
@@ -335,7 +447,6 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
-				assert.Equal(t, "open-cluster-management-agent-addon", addon.Spec.InstallNamespace)
 				assert.Len(t, addon.Spec.Configs, 1)
 
 				config := addon.Spec.Configs[0]
@@ -354,9 +465,7 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 						Name:      "gitops-addon",
 						Namespace: "test-cluster",
 					},
-					Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-						InstallNamespace: "open-cluster-management-agent-addon",
-					},
+					Spec: addonv1alpha1.ManagedClusterAddOnSpec{},
 				},
 			},
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {

@@ -141,6 +141,12 @@ type GitOpsAddonSpec struct {
 
 	// ArgoCDAgent defines the configuration for the ArgoCD agent.
 	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
+
+	// OverrideExistingConfigs indicates whether to override existing configuration values in AddOnDeploymentConfig.
+	// When false (default), existing config values are preserved and only new ones are added.
+	// When true, config values from GitOpsCluster spec will override existing values.
+	// +kubebuilder:default=false
+	OverrideExistingConfigs *bool `json:"overrideExistingConfigs,omitempty"`
 }
 
 // ArgoCDAgentSpec defines the configuration for the ArgoCD agent.

@@ -449,6 +449,7 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 				GitOpsNamespace:         "gitops",
 				ReconcileScope:          "All-Namespaces",
 				Action:                  "Install",
+				OverrideExistingConfigs: &enabled,
 				ArgoCDAgent: &ArgoCDAgentSpec{
 					Enabled:        &enabled,
 					PropagateHubCA: &propagateCA,
@@ -470,6 +471,7 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 	assert.Equal(t, "gitops", gitopsCluster.Spec.GitOpsAddon.GitOpsNamespace)
 	assert.Equal(t, "All-Namespaces", gitopsCluster.Spec.GitOpsAddon.ReconcileScope)
 	assert.Equal(t, "Install", gitopsCluster.Spec.GitOpsAddon.Action)
+	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.OverrideExistingConfigs)
 
 	assert.NotNil(t, gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent)
 	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled)
