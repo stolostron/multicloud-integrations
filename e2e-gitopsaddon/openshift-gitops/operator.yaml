@@ -396,6 +396,8 @@ spec:
         env:
         - name: ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE
           value: "false"
+        - name: ARGOCD_PRINCIPAL_REDIS_SERVER_ADDRESS
+          value: "openshift-gitops-redis:6379"
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: "*"
         - name: WATCH_NAMESPACE

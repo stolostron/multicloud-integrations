@@ -331,6 +331,27 @@ func TestDiscoverPrincipalEndpoints(t *testing.T) {
 			},
 			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
 				assert.Contains(t, endpoints.DNSNames, "test-server.example.com")
+				assert.Contains(t, endpoints.DNSNames, "localhost")
+				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
+
+				// Verify both localhost IPs are included
+				localhostIPv4 := net.ParseIP("127.0.0.1")
+				localhostIPv6 := net.ParseIP("::1")
+				hasIPv4 := false
+				hasIPv6 := false
+
+				for _, ip := range endpoints.IPs {
+					if ip.Equal(localhostIPv4) {
+						hasIPv4 = true
+					}
+					if ip.Equal(localhostIPv6) {
+						hasIPv6 = true
+					}
+				}
+
+				assert.True(t, hasIPv4, "Expected 127.0.0.1 to be included in principal endpoints")
+				assert.True(t, hasIPv6, "Expected ::1 to be included in principal endpoints")
+
 				// IP addresses depend on DNS resolution which may not work in tests
 				assert.NotNil(t, endpoints.IPs)
 			},
@@ -340,7 +361,7 @@ func TestDiscoverPrincipalEndpoints(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			name: "service with no external endpoints should return error",
+			name: "service with no external endpoints should still work with localhost",
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -354,7 +375,32 @@ func TestDiscoverPrincipalEndpoints(t *testing.T) {
 					},
 				},
 			},
-			expectedError: true,
+			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
+				// Should have localhost DNS names even when no external endpoints
+				assert.Contains(t, endpoints.DNSNames, "localhost")
+				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
+				assert.Len(t, endpoints.DNSNames, 2)
+
+				// Should have both localhost IPs
+				assert.Len(t, endpoints.IPs, 2)
+
+				localhostIPv4 := net.ParseIP("127.0.0.1")
+				localhostIPv6 := net.ParseIP("::1")
+				hasIPv4 := false
+				hasIPv6 := false
+
+				for _, ip := range endpoints.IPs {
+					if ip.Equal(localhostIPv4) {
+						hasIPv4 = true
+					}
+					if ip.Equal(localhostIPv6) {
+						hasIPv6 = true
+					}
+				}
+
+				assert.True(t, hasIPv4, "Expected localhost IPv4 127.0.0.1")
+				assert.True(t, hasIPv6, "Expected localhost IPv6 ::1")
+			},
 		},
 	}
 
@@ -409,8 +455,35 @@ func TestDiscoverResourceProxyEndpoints(t *testing.T) {
 			},
 			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
 				assert.Contains(t, endpoints.DNSNames, "openshift-gitops-agent-principal.openshift-gitops.svc.cluster.local")
-				assert.Len(t, endpoints.IPs, 1)
-				assert.Equal(t, "10.0.0.100", endpoints.IPs[0].String())
+				assert.Contains(t, endpoints.DNSNames, "localhost")
+				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
+
+				// Should have ClusterIP and both localhost IPs (3 total)
+				assert.Len(t, endpoints.IPs, 3)
+
+				// Verify all IPs are present
+				clusterIP := net.ParseIP("10.0.0.100")
+				localhostIPv4 := net.ParseIP("127.0.0.1")
+				localhostIPv6 := net.ParseIP("::1")
+				hasClusterIP := false
+				hasLocalhostIPv4 := false
+				hasLocalhostIPv6 := false
+
+				for _, ip := range endpoints.IPs {
+					if ip.Equal(clusterIP) {
+						hasClusterIP = true
+					}
+					if ip.Equal(localhostIPv4) {
+						hasLocalhostIPv4 = true
+					}
+					if ip.Equal(localhostIPv6) {
+						hasLocalhostIPv6 = true
+					}
+				}
+
+				assert.True(t, hasClusterIP, "Expected ClusterIP 10.0.0.100 to be included")
+				assert.True(t, hasLocalhostIPv4, "Expected localhost IPv4 127.0.0.1 to be included")
+				assert.True(t, hasLocalhostIPv6, "Expected localhost IPv6 ::1 to be included")
 			},
 		},
 		{
@@ -428,7 +501,28 @@ func TestDiscoverResourceProxyEndpoints(t *testing.T) {
 			},
 			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
 				assert.Contains(t, endpoints.DNSNames, "openshift-gitops-agent-principal.openshift-gitops.svc.cluster.local")
-				assert.Empty(t, endpoints.IPs)
+				assert.Contains(t, endpoints.DNSNames, "localhost")
+				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
+
+				// Should have both localhost IPs even with headless service
+				assert.Len(t, endpoints.IPs, 2)
+
+				localhostIPv4 := net.ParseIP("127.0.0.1")
+				localhostIPv6 := net.ParseIP("::1")
+				hasIPv4 := false
+				hasIPv6 := false
+
+				for _, ip := range endpoints.IPs {
+					if ip.Equal(localhostIPv4) {
+						hasIPv4 = true
+					}
+					if ip.Equal(localhostIPv6) {
+						hasIPv6 = true
+					}
+				}
+
+				assert.True(t, hasIPv4, "Expected localhost IPv4 127.0.0.1 to be included")
+				assert.True(t, hasIPv6, "Expected localhost IPv6 ::1 to be included")
 			},
 		},
 		{
@@ -605,6 +699,47 @@ func TestContainsIP(t *testing.T) {
 	}
 }
 
+func TestContains(t *testing.T) {
+	tests := []struct {
+		name     string
+		slice    []string
+		target   string
+		expected bool
+	}{
+		{
+			name:     "string found in list",
+			slice:    []string{"localhost", "example.com"},
+			target:   "localhost",
+			expected: true,
+		},
+		{
+			name:     "string not found in list",
+			slice:    []string{"localhost", "example.com"},
+			target:   "notfound.com",
+			expected: false,
+		},
+		{
+			name:     "empty list",
+			slice:    []string{},
+			target:   "localhost",
+			expected: false,
+		},
+		{
+			name:     "case sensitive check",
+			slice:    []string{"localhost", "Example.com"},
+			target:   "example.com",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := contains(tt.slice, tt.target)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestCheckCertificateExists(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := v1.AddToScheme(scheme)
@@ -763,6 +898,42 @@ func TestGenerateTLSCertificate(t *testing.T) {
 				assert.Len(t, cert.DNSNames, 2)
 				assert.Contains(t, cert.DNSNames, "dns-only.example.com")
 				assert.Contains(t, cert.DNSNames, "alt.example.com")
+			},
+		},
+		{
+			name:       "generate certificate with localhost IPs and DNS names",
+			commonName: "localhost-cert",
+			ips:        []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+			dnsNames:   []string{"localhost", "localhost.localdomain"},
+			validateFunc: func(t *testing.T, certPEM, keyPEM []byte) {
+				block, _ := pem.Decode(certPEM)
+				cert, err := x509.ParseCertificate(block.Bytes)
+				require.NoError(t, err)
+
+				assert.Equal(t, "localhost-cert", cert.Subject.CommonName)
+				assert.Len(t, cert.IPAddresses, 2)
+				assert.Len(t, cert.DNSNames, 2)
+
+				// Verify both localhost IPs are included
+				localhostIPv4 := net.ParseIP("127.0.0.1")
+				localhostIPv6 := net.ParseIP("::1")
+				hasIPv4 := false
+				hasIPv6 := false
+
+				for _, ip := range cert.IPAddresses {
+					if ip.Equal(localhostIPv4) {
+						hasIPv4 = true
+					}
+					if ip.Equal(localhostIPv6) {
+						hasIPv6 = true
+					}
+				}
+
+				assert.True(t, hasIPv4, "Expected 127.0.0.1 in certificate IP addresses")
+				assert.True(t, hasIPv6, "Expected ::1 in certificate IP addresses")
+
+				assert.Contains(t, cert.DNSNames, "localhost")
+				assert.Contains(t, cert.DNSNames, "localhost.localdomain")
 			},
 		},
 	}
