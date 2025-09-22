@@ -210,9 +210,41 @@ func (r *ReconcileGitOpsCluster) discoverPrincipalEndpoints(argoNamespace string
 		}
 	}
 
-	// Validate that we have at least some endpoints (either IPs or DNS names)
-	if len(endpoints.IPs) == 0 && len(endpoints.DNSNames) == 0 {
-		return nil, fmt.Errorf("no external endpoints found for principal service %s - service needs LoadBalancer with external IP or hostname", service.Name)
+	// Check if we have external endpoints before adding localhost
+	hasExternalEndpoints := false
+	for _, ingress := range service.Status.LoadBalancer.Ingress {
+		if ingress.IP != "" || ingress.Hostname != "" {
+			hasExternalEndpoints = true
+			break
+		}
+	}
+
+	// Validate that we have at least some external endpoints (localhost doesn't count as external)
+	if !hasExternalEndpoints {
+		klog.Warningf("No external endpoints found for principal service %s - service needs LoadBalancer with external IP or hostname. Adding localhost for local access only.", service.Name)
+	}
+
+	// Always add localhost IPs and DNS names for local access
+	localhostIPv4 := net.ParseIP("127.0.0.1")
+	if !r.containsIP(endpoints.IPs, localhostIPv4) {
+		endpoints.IPs = append(endpoints.IPs, localhostIPv4)
+		klog.Infof("Added localhost IPv4 for principal certificate: 127.0.0.1")
+	}
+
+	localhostIPv6 := net.ParseIP("::1")
+	if !r.containsIP(endpoints.IPs, localhostIPv6) {
+		endpoints.IPs = append(endpoints.IPs, localhostIPv6)
+		klog.Infof("Added localhost IPv6 for principal certificate: ::1")
+	}
+
+	if !contains(endpoints.DNSNames, "localhost") {
+		endpoints.DNSNames = append(endpoints.DNSNames, "localhost")
+		klog.Infof("Added localhost DNS name for principal certificate: localhost")
+	}
+
+	if !contains(endpoints.DNSNames, "localhost.localdomain") {
+		endpoints.DNSNames = append(endpoints.DNSNames, "localhost.localdomain")
+		klog.Infof("Added localhost FQDN for principal certificate: localhost.localdomain")
 	}
 
 	// Log what we found
@@ -255,6 +287,29 @@ func (r *ReconcileGitOpsCluster) discoverResourceProxyEndpoints(argoNamespace st
 	internalDNS := fmt.Sprintf("openshift-gitops-agent-principal.%s.svc.cluster.local", argoNamespace)
 	endpoints.DNSNames = append(endpoints.DNSNames, internalDNS)
 	klog.Infof("Added internal DNS name for resource proxy: %s", internalDNS)
+
+	// Always add localhost IPs and DNS names for local access
+	localhostIPv4 := net.ParseIP("127.0.0.1")
+	if !r.containsIP(endpoints.IPs, localhostIPv4) {
+		endpoints.IPs = append(endpoints.IPs, localhostIPv4)
+		klog.Infof("Added localhost IPv4 for resource proxy certificate: 127.0.0.1")
+	}
+
+	localhostIPv6 := net.ParseIP("::1")
+	if !r.containsIP(endpoints.IPs, localhostIPv6) {
+		endpoints.IPs = append(endpoints.IPs, localhostIPv6)
+		klog.Infof("Added localhost IPv6 for resource proxy certificate: ::1")
+	}
+
+	if !contains(endpoints.DNSNames, "localhost") {
+		endpoints.DNSNames = append(endpoints.DNSNames, "localhost")
+		klog.Infof("Added localhost DNS name for resource proxy certificate: localhost")
+	}
+
+	if !contains(endpoints.DNSNames, "localhost.localdomain") {
+		endpoints.DNSNames = append(endpoints.DNSNames, "localhost.localdomain")
+		klog.Infof("Added localhost FQDN for resource proxy certificate: localhost.localdomain")
+	}
 
 	// For resource proxy, we always have at least the internal DNS name, but validate anyway
 	if len(endpoints.IPs) == 0 && len(endpoints.DNSNames) == 0 {
@@ -327,6 +382,17 @@ func (r *ReconcileGitOpsCluster) resolveHostname(hostname string) ([]net.IP, err
 func (r *ReconcileGitOpsCluster) containsIP(ips []net.IP, target net.IP) bool {
 	for _, ip := range ips {
 		if ip.Equal(target) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// contains checks if a string is already in the slice
+func contains(slice []string, target string) bool {
+	for _, item := range slice {
+		if item == target {
 			return true
 		}
 	}
