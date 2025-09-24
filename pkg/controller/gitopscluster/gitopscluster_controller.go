@@ -602,33 +602,86 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	err = r.AddManagedClustersToArgo(instance, managedClusters, orphanSecretsList, createBlankClusterSecrets)
+	// Handle cluster addition based on mode
+	if argoCDAgentEnabled {
+		// For ArgoCD agent mode, create agent cluster secrets - agent mode ALWAYS wins over all other options
+		klog.Infof("ArgoCD agent mode enabled - agent cluster secrets will override any existing cluster secrets")
 
-	if err != nil {
-		klog.Info("failed to add managed clusters to argo")
+		err = r.CreateArgoCDAgentClusters(instance, managedClusters, orphanSecretsList)
+		if err != nil {
+			klog.Errorf("failed to create ArgoCD agent clusters: %v", err)
 
-		msg := err.Error()
-		if len(msg) > maxStatusMsgLen {
-			msg = msg[:maxStatusMsgLen]
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
+						Message: fmt.Sprintf("ArgoCD agent cluster registration failed: %s", msg),
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
 		}
 
-		r.updateGitOpsClusterConditions(instance, "failed", msg,
+		// Agent cluster creation succeeded - update the ClustersRegistered condition
+		klog.Infof("Successfully created ArgoCD agent cluster secrets for %d managed clusters", len(managedClusters))
+
+		r.updateGitOpsClusterConditions(instance, "successful", "ArgoCD agent clusters registered successfully",
 			map[string]ConditionUpdate{
 				gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
-					Status:  metav1.ConditionFalse,
-					Reason:  gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
-					Message: msg,
+					Status:  metav1.ConditionTrue,
+					Reason:  gitopsclusterV1beta1.ReasonSuccess,
+					Message: fmt.Sprintf("Successfully registered %d managed clusters with ArgoCD agent configuration", len(managedClusters)),
 				},
 			})
 
 		err2 := r.Client.Status().Update(context.TODO(), instance)
-
 		if err2 != nil {
-			klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
-			return 3, err2
+			klog.Errorf("failed to update GitOpsCluster %s status after successful agent cluster registration: %s", instance.Namespace+"/"+instance.Name, err2)
+			// Don't return error here as the cluster registration actually succeeded
 		}
+	} else {
+		// For traditional mode, use the existing logic
+		err = r.AddManagedClustersToArgo(instance, managedClusters, orphanSecretsList, createBlankClusterSecrets)
 
-		return 3, err
+		if err != nil {
+			klog.Info("failed to add managed clusters to argo")
+
+			msg := err.Error()
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
 	}
 
 	// 5. Handle ArgoCD agent CA secret ManifestWork based on propagateHubCA setting
