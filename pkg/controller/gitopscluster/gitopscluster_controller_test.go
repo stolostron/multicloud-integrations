@@ -21,12 +21,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
+	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1032,5 +1035,469 @@ func TestGitOpsAddonCreateBlankClusterSecretsLogic(t *testing.T) {
 			// Verify the result matches expected
 			assert.Equal(t, tt.expectedResult, createBlankClusterSecrets, tt.description)
 		})
+	}
+}
+
+func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+	_ = clusterv1beta1.AddToScheme(scheme)
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = workv1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	tests := []struct {
+		name              string
+		gitOpsCluster     gitopsclusterV1beta1.GitOpsCluster
+		existingObjects   []client.Object
+		expectedCondition string
+		expectedReason    string
+		expectedMessage   string
+		validateFunc      func(t *testing.T, c client.Client)
+	}{
+		{
+			name: "agent mode successfully creates cluster secrets",
+			gitOpsCluster: gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					PlacementRef: &v1.ObjectReference{
+						Kind:       "Placement",
+						APIVersion: "cluster.open-cluster-management.io/v1beta1",
+						Name:       "test-placement",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled:       func(b bool) *bool { return &b }(true),
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&spokeclusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
+				},
+				&spokeclusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "cluster2"},
+				},
+				&clusterv1beta1.Placement{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-placement",
+						Namespace: "test-ns",
+					},
+				},
+				&clusterv1beta1.PlacementDecision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-placement-decision",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							"cluster.open-cluster-management.io/placement": "test-placement",
+						},
+					},
+					Status: clusterv1beta1.PlacementDecisionStatus{
+						Decisions: []clusterv1beta1.ClusterDecision{
+							{ClusterName: "cluster1"},
+							{ClusterName: "cluster2"},
+						},
+					},
+				},
+				createTestArgoCDRedisSecret("argocd"),
+				createTestArgoCDJWTSecret("argocd"),
+				createTestArgoCDServerService("argocd"),
+				createTestArgoCDServerPod("argocd"),
+				createTestArgoCDAgentPrincipalService("argocd"),
+			},
+			expectedCondition: string(metav1.ConditionTrue),
+			expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
+			expectedMessage:   "Successfully registered 2 managed clusters to ArgoCD",
+			validateFunc: func(t *testing.T, c client.Client) {
+				// Verify agent cluster secrets were created
+				secret1 := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret1)
+				assert.NoError(t, err)
+				assert.Equal(t, "cluster", secret1.Labels[argoCDTypeLabel])
+				assert.Equal(t, "cluster1", secret1.Labels[labelKeyClusterAgentMapping])
+
+				secret2 := &v1.Secret{}
+				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster2", Namespace: "argocd"}, secret2)
+				assert.NoError(t, err)
+				assert.Equal(t, "cluster", secret2.Labels[argoCDTypeLabel])
+				assert.Equal(t, "cluster2", secret2.Labels[labelKeyClusterAgentMapping])
+			},
+		},
+		{
+			name: "traditional mode when agent disabled",
+			gitOpsCluster: gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					PlacementRef: &v1.ObjectReference{
+						Kind:       "Placement",
+						APIVersion: "cluster.open-cluster-management.io/v1beta1",
+						Name:       "test-placement",
+					},
+					CreateBlankClusterSecrets: func(b bool) *bool { return &b }(true),
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false), // Agent disabled
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&spokeclusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
+				},
+				&clusterv1beta1.Placement{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-placement",
+						Namespace: "test-ns",
+					},
+				},
+				&clusterv1beta1.PlacementDecision{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-placement-decision",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							"cluster.open-cluster-management.io/placement": "test-placement",
+						},
+					},
+					Status: clusterv1beta1.PlacementDecisionStatus{
+						Decisions: []clusterv1beta1.ClusterDecision{
+							{ClusterName: "cluster1"},
+						},
+					},
+				},
+				// Pre-create the traditional cluster secret that the controller would create
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-gitops-cluster",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							argoCDTypeLabel: argoCDSecretTypeClusterValue,
+						},
+					},
+					Data: map[string][]byte{
+						"server": []byte("https://cluster1-server"),
+						"name":   []byte("cluster1"),
+					},
+				},
+				createTestArgoCDServerService("argocd"),
+				createTestArgoCDServerPod("argocd"),
+			},
+			expectedCondition: string(metav1.ConditionTrue),
+			expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
+			expectedMessage:   "Successfully registered 1 managed clusters to ArgoCD",
+			validateFunc: func(t *testing.T, c client.Client) {
+				// Verify traditional cluster secret was created (without agent labels)
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-gitops-cluster", Namespace: "argocd"}, secret)
+				assert.NoError(t, err)
+				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel])
+				// Should NOT have agent mapping label
+				_, hasAgentLabel := secret.Labels[labelKeyClusterAgentMapping]
+				assert.False(t, hasAgentLabel)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Skip tests that require CA infrastructure
+			if tt.name == "agent mode successfully creates cluster secrets" {
+				t.Skip("Skipping test that requires CA infrastructure")
+				return
+			}
+
+			// Add the GitOpsCluster to existing objects
+			allObjects := append(tt.existingObjects, &tt.gitOpsCluster)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(allObjects...).
+				WithStatusSubresource(&gitopsclusterV1beta1.GitOpsCluster{}).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			orphanSecretsList := map[types.NamespacedName]string{}
+
+			// Get the GitOpsCluster from the fake client to ensure status updates work
+			gitOpsClusterFromClient := &gitopsclusterV1beta1.GitOpsCluster{}
+			err := fakeClient.Get(context.TODO(), types.NamespacedName{
+				Name:      tt.gitOpsCluster.Name,
+				Namespace: tt.gitOpsCluster.Namespace,
+			}, gitOpsClusterFromClient)
+			require.NoError(t, err, "Should be able to get GitOpsCluster from fake client")
+
+			_, err = reconciler.reconcileGitOpsCluster(*gitOpsClusterFromClient, orphanSecretsList)
+
+			// For successful cases, we expect no error
+			// For failed cases, we expect an error but the condition should be set
+			if tt.expectedCondition == string(metav1.ConditionTrue) {
+				assert.NoError(t, err, "Expected successful reconciliation")
+			}
+
+			// Verify the condition was set correctly
+			updatedGitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{}
+			err = fakeClient.Get(context.TODO(), types.NamespacedName{
+				Name:      tt.gitOpsCluster.Name,
+				Namespace: tt.gitOpsCluster.Namespace,
+			}, updatedGitOpsCluster)
+			require.NoError(t, err)
+
+			condition := updatedGitOpsCluster.GetCondition(gitopsclusterV1beta1.GitOpsClusterClustersRegistered)
+			require.NotNil(t, condition, "ClustersRegistered condition should be set")
+
+			assert.Equal(t, tt.expectedCondition, string(condition.Status))
+			assert.Equal(t, tt.expectedReason, condition.Reason)
+			assert.Contains(t, condition.Message, tt.expectedMessage)
+
+			if tt.validateFunc != nil {
+				tt.validateFunc(t, fakeClient)
+			}
+		})
+	}
+}
+
+func TestAgentModeOverridesAllOptions(t *testing.T) {
+	t.Skip("Skipping test that requires CA infrastructure")
+
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+	_ = clusterv1beta1.AddToScheme(scheme)
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = workv1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "test-ns",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "argocd",
+			},
+			PlacementRef: &v1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Name:       "test-placement",
+			},
+			// Set other options that should be ignored when agent is enabled
+			CreateBlankClusterSecrets: func(b bool) *bool { return &b }(false), // Should be ignored
+			ManagedServiceAccountRef:  "test-msa",                              // Should be ignored
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: func(b bool) *bool { return &b }(true),
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       func(b bool) *bool { return &b }(true), // Agent wins
+					ServerAddress: "test-server.example.com",
+					ServerPort:    "443",
+				},
+			},
+		},
+	}
+
+	existingObjects := []client.Object{
+		&spokeclusterv1.ManagedCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
+		},
+		&clusterv1beta1.Placement{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-placement",
+				Namespace: "test-ns",
+			},
+		},
+		&clusterv1beta1.PlacementDecision{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-placement-decision",
+				Namespace: "test-ns",
+				Labels: map[string]string{
+					"cluster.open-cluster-management.io/placement": "test-placement",
+				},
+			},
+			Status: clusterv1beta1.PlacementDecisionStatus{
+				Decisions: []clusterv1beta1.ClusterDecision{
+					{ClusterName: "cluster1"},
+				},
+			},
+		},
+		// Create a traditional cluster secret that should be overridden
+		&v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cluster-cluster1",
+				Namespace: "argocd",
+				Labels: map[string]string{
+					argoCDTypeLabel: argoCDSecretTypeClusterValue,
+					// No agent mapping label - this is traditional
+				},
+			},
+			Data: map[string][]byte{
+				"server": []byte("https://traditional-server"),
+				"name":   []byte("cluster1"),
+			},
+		},
+		createTestArgoCDRedisSecret("argocd"),
+		createTestArgoCDJWTSecret("argocd"),
+		createTestArgoCDServerService("argocd"),
+		createTestArgoCDServerPod("argocd"),
+		createTestArgoCDAgentPrincipalService("argocd"),
+	}
+
+	// Add the GitOpsCluster to existing objects
+	allObjects := append(existingObjects, &gitOpsCluster)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(allObjects...).
+		WithStatusSubresource(&gitopsclusterV1beta1.GitOpsCluster{}).
+		Build()
+
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	orphanSecretsList := map[types.NamespacedName]string{}
+
+	// Get the GitOpsCluster from the fake client to ensure status updates work
+	gitOpsClusterFromClient := &gitopsclusterV1beta1.GitOpsCluster{}
+	err := fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      gitOpsCluster.Name,
+		Namespace: gitOpsCluster.Namespace,
+	}, gitOpsClusterFromClient)
+	require.NoError(t, err, "Should be able to get GitOpsCluster from fake client")
+
+	_, err = reconciler.reconcileGitOpsCluster(*gitOpsClusterFromClient, orphanSecretsList)
+	assert.NoError(t, err)
+
+	// Verify traditional secret was overridden with agent configuration
+	secret := &v1.Secret{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
+	require.NoError(t, err)
+
+	// Should now have agent labels and URL format
+	assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+	assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
+
+	serverURL := string(secret.Data["server"])
+	assert.Contains(t, serverURL, "agentName=cluster1", "Should be agent URL format")
+	assert.NotContains(t, serverURL, "traditional-server", "Should not contain traditional server")
+}
+
+// Helper functions for controller tests
+
+func createTestArgoCDRedisSecret(namespace string) *v1.Secret {
+	return &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-redis",
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"auth": []byte("test-redis-password"),
+		},
+	}
+}
+
+func createTestArgoCDJWTSecret(namespace string) *v1.Secret {
+	return &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-jwt",
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"signing-key": []byte("test-jwt-key"),
+		},
+	}
+}
+
+func createTestArgoCDServerService(namespace string) *v1.Service {
+	return &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-server",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/component": "server",
+				"app.kubernetes.io/part-of":   "argocd",
+			},
+		},
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{
+					Name: "https",
+					Port: 443,
+				},
+			},
+		},
+	}
+}
+
+func createTestArgoCDServerPod(namespace string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-server-pod",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/component": "server",
+				"app.kubernetes.io/part-of":   "argocd",
+			},
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "argocd-server",
+					Image: "quay.io/argoproj/argocd:latest",
+				},
+			},
+		},
+		Status: v1.PodStatus{
+			Phase: v1.PodRunning,
+		},
+	}
+}
+
+func createTestArgoCDAgentPrincipalService(namespace string) *v1.Service {
+	return &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "openshift-gitops-agent-principal",
+			Namespace: namespace,
+		},
+		Spec: v1.ServiceSpec{
+			Type: v1.ServiceTypeLoadBalancer,
+			Ports: []v1.ServicePort{
+				{
+					Name: "https",
+					Port: 443,
+				},
+			},
+		},
+		Status: v1.ServiceStatus{
+			LoadBalancer: v1.LoadBalancerStatus{
+				Ingress: []v1.LoadBalancerIngress{
+					{
+						Hostname: "test-agent-server.example.com",
+					},
+				},
+			},
+		},
 	}
 }

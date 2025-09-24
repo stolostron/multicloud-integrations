@@ -46,10 +46,16 @@ kubectl apply -f deploy/crds/apps.open-cluster-management.io_gitopsclusters.yaml
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
 kubectl apply -f deploy/controller/
 kubectl apply -f e2e-gitopsaddon/gitopscluster
+
+sleep 90s
+kubectl patch networkpolicy openshift-gitops-redis-network-policy -n openshift-gitops --context kind-hub --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-principal"}}}]}}]'
+kubectl patch networkpolicy acm-openshift-gitops-redis-network-policy -n openshift-gitops --context kind-cluster1 --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-agent"}}}]}}]'
+kubectl rollout restart deployment openshift-gitops-agent-principal -n openshift-gitops --context kind-hub
+kubectl rollout restart deployment argocd-agent-agent -n openshift-gitops --context kind-cluster1
+sleep 30s
+kubectl config use-context kind-hub
 kubectl apply -f e2e-gitopsaddon/app.yaml
-
-
-sleep 180s
+sleep 30s
 
 # Validate hub
 kubectl config use-context kind-hub
@@ -70,3 +76,18 @@ if ! kubectl wait -n openshift-gitops \
     echo "agent did not become ready in time"
     exit 1
 fi
+
+echo 
+echo 
+echo 
+echo "kind export kubeconfig --name hub"
+echo "kind get kubeconfig --name hub  > /tmp/hub-io-kubeconfig"
+echo "export KUBECONFIG=/tmp/hub-io-kubeconfig"
+echo 
+echo 
+echo 
+echo "kind export kubeconfig --name cluster1"
+echo "kind get kubeconfig --name cluster1 > /tmp/cluster1-io-kubeconfig"
+echo "export KUBECONFIG=/tmp/cluster1-io-kubeconfig"
+echo 
+echo 

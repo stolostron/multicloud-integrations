@@ -10,7 +10,7 @@ spec:
     targetRevision: HEAD
     path: guestbook
   destination:
-    server: https://kubernetes.default.svc
+    server: https://172.18.255.201:443?agentName=cluster1
     namespace: guestbook
   syncPolicy:
     automated:
