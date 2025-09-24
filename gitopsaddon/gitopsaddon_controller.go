@@ -346,18 +346,9 @@ func (r *GitopsAddonReconciler) installOrUpgradeChart(configFlags *genericcliopt
 	}
 
 	if releaseExists {
-		// Release exists, do upgrade
-		helmUpgrade := action.NewUpgrade(actionConfig)
-		helmUpgrade.Namespace = namespace
-		helmUpgrade.Force = true // Enable force option for upgrades
-
-		_, err = helmUpgrade.Run(releaseName, chart, nil)
-
-		if err != nil {
-			return fmt.Errorf("failed to upgrade helm chart: %v/%v, err: %w", namespace, releaseName, err)
-		}
-
-		klog.Infof("Successfully upgraded helm chart: %v/%v", namespace, releaseName)
+		// DISABLED: Skip helm upgrades to prevent continuous secret generation
+		klog.Infof("Skipping helm upgrade for existing chart: %v/%v (upgrades disabled)", namespace, releaseName)
+		return nil
 	} else {
 		// delete stuck helm release secret if it exists
 		r.deleteHelmReleaseSecret(namespace, releaseName)
