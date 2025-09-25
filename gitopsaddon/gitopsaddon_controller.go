@@ -29,10 +29,14 @@ import (
 	yaml "gopkg.in/yaml.v3"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/engine"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -170,6 +174,39 @@ func (r *GitopsAddonReconciler) deleteOpenshiftGitopsInstance(configFlags *gener
 	}
 }
 
+// waitForArgoCDCR waits for the ArgoCD custom resource to be created by the openshift-gitops-operator
+func (r *GitopsAddonReconciler) waitForArgoCDCR(timeout time.Duration) error {
+	argoCDName := "openshift-gitops"
+	argoCDKey := types.NamespacedName{
+		Name:      argoCDName,
+		Namespace: r.GitopsNS,
+	}
+
+	klog.Infof("Waiting for ArgoCD CR %s to be created in namespace %s...", argoCDName, r.GitopsNS)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		argoCD := &unstructured.Unstructured{}
+		argoCD.SetAPIVersion("argoproj.io/v1beta1")
+		argoCD.SetKind("ArgoCD")
+
+		err := r.Get(ctx, argoCDKey, argoCD)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				klog.Infof("ArgoCD CR %s not found yet, continuing to wait...", argoCDName)
+				return false, nil // Continue waiting
+			}
+			klog.Errorf("Error checking for ArgoCD CR %s, continuing to wait..., err: %v", argoCDName, err)
+			return false, nil // Continue waiting
+		}
+
+		klog.Infof("ArgoCD CR %s found successfully", argoCDName)
+		return true, nil // ArgoCD CR found, stop waiting
+	})
+}
+
 // install or update openshift gitops operator and its gitops instance
 func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *genericclioptions.ConfigFlags) {
 	klog.Info("Start installing/updating openshift gitops operator and its instance...")
@@ -194,6 +231,11 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *gene
 			return
 		}
 
+		err = r.applyCRDIfNotExists("clusterversions", "config.openshift.io/v1", "charts/dep-crds/clusterversions.config.openshift.io.crd.yaml")
+		if err != nil {
+			return
+		}
+
 		if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
 			err := r.installOrUpgradeChart(configFlags, "charts/openshift-gitops-operator", r.GitopsOperatorNS, "openshift-gitops-operator")
 			if err != nil {
@@ -204,26 +246,30 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *gene
 		}
 	}
 
-	// 2. install/update the openshift gitops dependency manifests
-	if !r.ShouldUpdateOpenshiftGiops() {
-		klog.Info("Don't update openshift gitops dependency")
-	} else {
-		// Install/upgrade the openshift-gitops-dependency helm chart
-		gitopsNsKey := types.NamespacedName{
-			Name: r.GitopsNS,
-		}
+	// 2. Wait for the ArgoCD CR to be created by the openshift-gitops-operator
+	klog.Info("Waiting for ArgoCD CR to be created by openshift-gitops-operator...")
+	timeout := 1 * time.Minute
+	err := r.waitForArgoCDCR(timeout)
+	if err != nil {
+		klog.Errorf("Failed to find ArgoCD CR within %v: %v", timeout, err)
+		return
+	}
 
-		if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-			err := r.installOrUpgradeChart(configFlags, "charts/openshift-gitops-dependency", r.GitopsNS, "openshift-gitops-dependency")
-			if err != nil {
-				klog.Errorf("Failed to process openshift-gitops-dependency: %v", err)
-			} else {
-				r.postUpdate(gitopsNsKey, "openshift-gitops")
-			}
+	// 3. Render and apply openshift-gitops-dependency helm chart manifests selectively
+	gitopsNsKey := types.NamespacedName{
+		Name: r.GitopsNS,
+	}
+
+	if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
+		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", r.GitopsNS)
+		if err != nil {
+			klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
+		} else {
+			r.postUpdate(gitopsNsKey, "openshift-gitops")
 		}
 	}
 
-	// 3. install/update the argocd-agent if enabled
+	// 4. install/update the argocd-agent if enabled
 	if r.ArgoCDAgentEnabled == "true" {
 		if !r.ShouldUpdateArgoCDAgent() {
 			klog.Info("Don't update argocd-agent")
@@ -297,6 +343,340 @@ func (r *GitopsAddonReconciler) deleteChart(configFlags *genericclioptions.Confi
 
 	fmt.Printf("Successfully deleted Helm chart %s from namespace %s\n", releaseName, namespace)
 
+	return nil
+}
+
+// renderAndApplyDependencyManifests renders the openshift-gitops-dependency helm chart and applies manifests selectively
+func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, namespace string) error {
+	klog.Info("Rendering openshift-gitops-dependency helm chart manifests...")
+
+	// Create temp directory for chart files
+	tempDir, err := os.MkdirTemp("", "helm-chart-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Copy embedded chart files to temp directory
+	err = r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir, "openshift-gitops-dependency")
+	if err != nil {
+		return fmt.Errorf("failed to copy files: %w", err)
+	}
+
+	// Load the chart
+	chart, err := loader.Load(tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to load chart: %w", err)
+	}
+
+	// Render the chart templates
+	values := map[string]interface{}{}
+	options := chartutil.ReleaseOptions{
+		Name:      "openshift-gitops-dependency",
+		Namespace: namespace,
+	}
+
+	valuesToRender, err := chartutil.ToRenderValues(chart, values, options, nil)
+	if err != nil {
+		return fmt.Errorf("failed to prepare chart values: %w", err)
+	}
+
+	files, err := engine.Engine{}.Render(chart, valuesToRender)
+	if err != nil {
+		return fmt.Errorf("failed to render chart templates: %w", err)
+	}
+
+	// Process each rendered manifest
+	for name, content := range files {
+		// Skip empty files and notes
+		if len(strings.TrimSpace(content)) == 0 || strings.HasSuffix(name, "NOTES.txt") {
+			continue
+		}
+
+		klog.Infof("Processing manifest: %s", name)
+
+		// Parse YAML documents in the file
+		yamlDocs := strings.Split(content, "\n---\n")
+		for _, doc := range yamlDocs {
+			doc = strings.TrimSpace(doc)
+			if len(doc) == 0 {
+				continue
+			}
+
+			// Parse the YAML into an unstructured object
+			var obj unstructured.Unstructured
+			if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
+				klog.Warningf("Failed to parse YAML document in %s: %v", name, err)
+				continue
+			}
+
+			// Skip if no kind or metadata
+			if obj.GetKind() == "" || obj.GetName() == "" {
+				continue
+			}
+
+			// Set the namespace if it's a namespaced resource and doesn't have one
+			if obj.GetNamespace() == "" {
+				obj.SetNamespace(namespace)
+			}
+
+			// Apply selective logic based on resource type
+			if err := r.applyManifestSelectively(&obj); err != nil {
+				klog.Errorf("Failed to apply manifest %s/%s %s: %v",
+					obj.GetKind(), obj.GetName(), obj.GetNamespace(), err)
+				return err
+			}
+		}
+	}
+
+	klog.Info("Successfully processed all openshift-gitops-dependency manifests")
+	return nil
+}
+
+// applyManifestSelectively applies manifests based on the specific logic for each resource type
+func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstructured) error {
+	kind := obj.GetKind()
+	name := obj.GetName()
+	namespace := obj.GetNamespace()
+
+	klog.Infof("Applying manifest selectively: %s/%s in namespace %s", kind, name, namespace)
+
+	switch {
+	case kind == "ArgoCD" && name == "openshift-gitops":
+		return r.handleArgoCDManifest(obj)
+	case kind == "ServiceAccount" && name == "default":
+		return r.handleDefaultServiceAccount(obj)
+	case kind == "AppProject" && name == "default":
+		return r.handleDefaultAppProject(obj)
+	case kind == "ServiceAccount" && name == "openshift-gitops-argocd-redis":
+		return r.handleRedisServiceAccount(obj)
+	case kind == "ServiceAccount" && name == "openshift-gitops-argocd-application-controller":
+		return r.handleApplicationControllerServiceAccount(obj)
+	case kind == "ClusterRoleBinding" && name == "openshift-gitops-argocd-application-controller":
+		return r.handleApplicationControllerClusterRoleBinding(obj)
+	default:
+		klog.Infof("Skipping unknown manifest: %s/%s", kind, name)
+		return nil
+	}
+}
+
+// handleArgoCDManifest waits for the default ArgoCD CR and overrides its spec
+func (r *GitopsAddonReconciler) handleArgoCDManifest(obj *unstructured.Unstructured) error {
+	klog.Info("Handling ArgoCD manifest - waiting for default ArgoCD CR and overriding spec")
+
+	argoCDKey := types.NamespacedName{
+		Name:      "openshift-gitops",
+		Namespace: obj.GetNamespace(),
+	}
+
+	// Wait up to 1 minute for the ArgoCD CR to exist
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	var existingArgoCD *unstructured.Unstructured
+	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
+		argoCD := &unstructured.Unstructured{}
+		argoCD.SetAPIVersion("argoproj.io/v1beta1")
+		argoCD.SetKind("ArgoCD")
+
+		err := r.Get(ctx, argoCDKey, argoCD)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				klog.Infof("ArgoCD CR %s not found yet, continuing to wait...", argoCDKey.Name)
+				return false, nil
+			}
+			return false, err
+		}
+
+		existingArgoCD = argoCD
+		return true, nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to wait for ArgoCD CR: %w", err)
+	}
+
+	// Override the spec with the rendered spec
+	renderedSpec, found, err := unstructured.NestedMap(obj.Object, "spec")
+	if err != nil {
+		return fmt.Errorf("failed to get rendered spec: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("no spec found in rendered ArgoCD manifest")
+	}
+
+	// Update the existing ArgoCD CR with the new spec
+	err = unstructured.SetNestedMap(existingArgoCD.Object, renderedSpec, "spec")
+	if err != nil {
+		return fmt.Errorf("failed to set spec: %w", err)
+	}
+
+	err = r.Update(context.TODO(), existingArgoCD)
+	if err != nil {
+		return fmt.Errorf("failed to update ArgoCD CR: %w", err)
+	}
+
+	klog.Info("Successfully updated ArgoCD CR spec")
+	return nil
+}
+
+// handleDefaultServiceAccount waits for the default service account and appends imagePullSecrets
+func (r *GitopsAddonReconciler) handleDefaultServiceAccount(obj *unstructured.Unstructured) error {
+	klog.Info("Handling default ServiceAccount - waiting for existence and appending imagePullSecrets")
+
+	saKey := types.NamespacedName{
+		Name:      "default",
+		Namespace: obj.GetNamespace(),
+	}
+
+	return r.waitAndAppendImagePullSecrets(saKey, obj)
+}
+
+// handleRedisServiceAccount waits for the redis service account and appends imagePullSecrets
+func (r *GitopsAddonReconciler) handleRedisServiceAccount(obj *unstructured.Unstructured) error {
+	klog.Info("Handling Redis ServiceAccount - waiting for ArgoCD deployment and appending imagePullSecrets")
+
+	saKey := types.NamespacedName{
+		Name:      "openshift-gitops-argocd-redis",
+		Namespace: obj.GetNamespace(),
+	}
+
+	return r.waitAndAppendImagePullSecrets(saKey, obj)
+}
+
+// handleApplicationControllerServiceAccount waits for the application controller service account and appends imagePullSecrets
+func (r *GitopsAddonReconciler) handleApplicationControllerServiceAccount(obj *unstructured.Unstructured) error {
+	klog.Info("Handling Application Controller ServiceAccount - waiting for ArgoCD deployment and appending imagePullSecrets")
+
+	saKey := types.NamespacedName{
+		Name:      "openshift-gitops-argocd-application-controller",
+		Namespace: obj.GetNamespace(),
+	}
+
+	return r.waitAndAppendImagePullSecrets(saKey, obj)
+}
+
+// handleDefaultAppProject applies the default AppProject directly
+func (r *GitopsAddonReconciler) handleDefaultAppProject(obj *unstructured.Unstructured) error {
+	klog.Info("Handling default AppProject - applying directly")
+
+	return r.applyManifest(obj)
+}
+
+// handleApplicationControllerClusterRoleBinding applies the ClusterRoleBinding directly
+func (r *GitopsAddonReconciler) handleApplicationControllerClusterRoleBinding(obj *unstructured.Unstructured) error {
+	klog.Info("Handling Application Controller ClusterRoleBinding - applying directly")
+
+	return r.applyManifest(obj)
+}
+
+// waitAndAppendImagePullSecrets waits for a service account to exist and appends imagePullSecrets
+func (r *GitopsAddonReconciler) waitAndAppendImagePullSecrets(saKey types.NamespacedName, renderedObj *unstructured.Unstructured) error {
+	// Wait for the service account to exist (up to 1 minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	var existingSA *corev1.ServiceAccount
+	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
+		sa := &corev1.ServiceAccount{}
+		err := r.Get(ctx, saKey, sa)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				klog.Infof("ServiceAccount %s not found yet, continuing to wait...", saKey.Name)
+				return false, nil
+			}
+			return false, err
+		}
+
+		existingSA = sa
+		return true, nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to wait for ServiceAccount %s: %w", saKey.Name, err)
+	}
+
+	// Get imagePullSecrets from the rendered manifest
+	renderedImagePullSecrets, found, err := unstructured.NestedSlice(renderedObj.Object, "imagePullSecrets")
+	if err != nil {
+		return fmt.Errorf("failed to get rendered imagePullSecrets: %w", err)
+	}
+	if !found || len(renderedImagePullSecrets) == 0 {
+		klog.Infof("No imagePullSecrets found in rendered ServiceAccount %s", saKey.Name)
+		return nil
+	}
+
+	// Convert rendered imagePullSecrets to structured format and append them
+	for _, renderedSecret := range renderedImagePullSecrets {
+		secretMap, ok := renderedSecret.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		secretName, ok := secretMap["name"].(string)
+		if !ok {
+			continue
+		}
+
+		// Check if this secret already exists in the service account
+		secretExists := false
+		for _, existingSecret := range existingSA.ImagePullSecrets {
+			if existingSecret.Name == secretName {
+				secretExists = true
+				break
+			}
+		}
+
+		// Append the secret if it doesn't already exist
+		if !secretExists {
+			existingSA.ImagePullSecrets = append(existingSA.ImagePullSecrets, corev1.LocalObjectReference{
+				Name: secretName,
+			})
+		}
+	}
+
+	// Update the service account
+	err = r.Update(context.TODO(), existingSA)
+	if err != nil {
+		return fmt.Errorf("failed to update ServiceAccount %s: %w", saKey.Name, err)
+	}
+
+	klog.Infof("Successfully updated ServiceAccount %s with imagePullSecrets", saKey.Name)
+	return nil
+}
+
+// applyManifest applies a manifest directly
+func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) error {
+	// Check if the resource already exists
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(obj.GroupVersionKind())
+
+	key := types.NamespacedName{
+		Name:      obj.GetName(),
+		Namespace: obj.GetNamespace(),
+	}
+
+	err := r.Get(context.TODO(), key, existing)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Resource doesn't exist, create it
+			err = r.Create(context.TODO(), obj)
+			if err != nil {
+				return fmt.Errorf("failed to create resource %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+			}
+			klog.Infof("Successfully created resource %s/%s", obj.GetKind(), obj.GetName())
+			return nil
+		}
+		return fmt.Errorf("failed to get existing resource: %w", err)
+	}
+
+	// Resource exists, update it
+	obj.SetResourceVersion(existing.GetResourceVersion())
+	err = r.Update(context.TODO(), obj)
+	if err != nil {
+		return fmt.Errorf("failed to update resource %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+	}
+
+	klog.Infof("Successfully updated resource %s/%s", obj.GetKind(), obj.GetName())
 	return nil
 }
 
@@ -872,11 +1252,50 @@ func (r *GitopsAddonReconciler) ShouldUpdateOpenshiftGiopsOperator() bool {
 			klog.Errorf("Failed to get the %v namespace, err: %v", r.GitopsOperatorNS, err)
 			return false
 		}
-	} else {
-		if namespace.Annotations["apps.open-cluster-management.io/gitops-operator-image"] != r.GitopsOperatorImage ||
-			namespace.Annotations["apps.open-cluster-management.io/gitops-operator-ns"] != r.GitopsOperatorNS {
-			klog.Infof("new gitops operator manifest found")
-			return true
+	}
+
+	// the OpenShift GitOps operator is installed by operator hub, gitops addon should not update it
+	if r.isGitOpsOperatorInstalledByOLM() {
+		klog.Infof("The OpenShift GitOps operator is already installed on the namespace %v by OLM", r.GitopsOperatorNS)
+		return false
+	}
+
+	// the OpenShift GitOps operator is installed by gitops addon
+	if _, ok := namespace.Labels["apps.open-cluster-management.io/gitopsaddon"]; ok {
+		if namespace.Annotations["apps.open-cluster-management.io/gitops-operator-image"] == r.GitopsOperatorImage &&
+			namespace.Annotations["apps.open-cluster-management.io/gitops-operator-ns"] == r.GitopsOperatorNS {
+			klog.Infof("No new gitops operator manifest found on the namespace %v", r.GitopsOperatorNS)
+			return false
+		}
+	}
+
+	return true
+}
+
+// isGitOpsOperatorInstalledByOLM checks if the OpenShift GitOps operator is installed by OLM
+func (r *GitopsAddonReconciler) isGitOpsOperatorInstalledByOLM() bool {
+	deploymentList := &appsv1.DeploymentList{}
+	err := r.List(context.TODO(), deploymentList, &client.ListOptions{
+		Namespace: r.GitopsOperatorNS,
+	})
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("No deployments found in namespace %v", r.GitopsOperatorNS)
+			return false
+		}
+		klog.Errorf("Failed to list deployments in namespace %v, err: %v", r.GitopsOperatorNS, err)
+		return false
+	}
+
+	for _, deployment := range deploymentList.Items {
+		// Check if the deployment has the label control-plane=gitops-operator
+		if controlPlane, ok := deployment.Labels["control-plane"]; ok && controlPlane == "gitops-operator" {
+			// Check if the deployment has the annotation olm.operatorGroup
+			if _, hasOLMAnnotation := deployment.Annotations["olm.operatorGroup"]; hasOLMAnnotation {
+				klog.Infof("Found deployment %v with control-plane=gitops-operator label and olm.operatorGroup annotation, indicating OLM installation", deployment.Name)
+				return true
+			}
 		}
 	}
 
@@ -968,31 +1387,31 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 			klog.Errorf("Failed to get the openshift-gitops-operator namespace, err: %v", err)
 			return err
 		}
-	} else {
-		if namespace.Labels == nil {
-			namespace.Labels = make(map[string]string)
-		}
-		namespace.Labels["addon.open-cluster-management.io/namespace"] = "true"
-		namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+	}
 
-		if err := r.Update(context.TODO(), namespace); err != nil {
-			klog.Errorf("Failed to update the labels to the openshift-gitops-operator namespace, err: %v", err)
-			return err
-		}
+	if namespace.Labels == nil {
+		namespace.Labels = make(map[string]string)
+	}
+	namespace.Labels["addon.open-cluster-management.io/namespace"] = "true"
+	namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+
+	if err := r.Update(context.TODO(), namespace); err != nil {
+		klog.Errorf("Failed to update the labels to the openshift-gitops-operator namespace, err: %v", err)
+		return err
 	}
 
 	// If on the hcp hosted cluster, there is no klusterlet operator
 	// As a result, the open-cluster-management-image-pull-credentials secret is not automatically synced up
 	// to the new namespace even though the addon.open-cluster-management.io/namespace: true label is specified
-	// To support all kinds of clusters, we proactively copy the original git addon open-cluster-management-image-pull-credentials secret to the new namespace
+	// To support all kinds of clusters, we proactively copy the original git addon
+	// open-cluster-management-image-pull-credentials secret to the new namespace
 	err = r.copyImagePullSecret(nameSpaceKey)
 	if err != nil {
 		return err
 	}
 
-	// Waiting for the two resources ready
-	// 1. the image pull secret `open-cluster-management-image-pull-credentials`  is generated
-	// 2. the image pull secret ref is updated to the openshift-gitops/default SA
+	// Wait 1 min for the image pull secret `open-cluster-management-image-pull-credentials`
+	// to be generated
 	secretName := "open-cluster-management-image-pull-credentials"
 	secret := &corev1.Secret{}
 	timeout := time.Minute
@@ -1004,18 +1423,7 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 		if err == nil {
 			// Secret found
 			klog.Infof("Secret %s found in namespace %s", secretName, nameSpaceKey.Name)
-
-			// Patch the default sa in the openshift-gitops NS
-			saKey := types.NamespacedName{
-				Name:      "default",
-				Namespace: nameSpaceKey.Name,
-			}
-
-			err = r.patchDefaultSA(saKey)
-
-			if err == nil {
-				return nil
-			}
+			return nil
 		}
 
 		if !errors.IsNotFound(err) {
@@ -1023,7 +1431,7 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 			return err
 		}
 
-		klog.Infof("Either the image pull credentials secret or the default SA is NOT found, wait for next check, err: %v", err)
+		klog.Infof("the image pull credentials secret is NOT found, wait for the next check, err: %v", err)
 
 		time.Sleep(interval)
 	}
@@ -1075,28 +1483,7 @@ func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.Namespace
 		}
 	}
 
-	fmt.Printf("Successfully copied secret %s/%s to %s/%s\n", secretName, gitopsAddonNs, nameSpaceKey.Name, secretName)
-
-	return nil
-}
-
-func (r *GitopsAddonReconciler) patchDefaultSA(saKey types.NamespacedName) error {
-	sa := &corev1.ServiceAccount{}
-	err := r.Get(context.TODO(), saKey, sa)
-
-	if err != nil {
-		klog.Errorf("Failed to get the default service account, err: %v", err)
-		return err
-	}
-
-	sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{
-		Name: "open-cluster-management-image-pull-credentials",
-	})
-
-	if err := r.Update(context.TODO(), sa); err != nil {
-		klog.Errorf("Failed to update the image pull secret to the default SA, err: %v", err)
-		return err
-	}
+	fmt.Printf("Successfully copied secret %s/%s to %s/%s\n", gitopsAddonNs, secretName, nameSpaceKey.Name, secretName)
 
 	return nil
 }
