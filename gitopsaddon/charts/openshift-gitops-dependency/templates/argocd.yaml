@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD
 metadata:
-  name: acm-openshift-gitops
+  name: openshift-gitops
   namespace: {{ .Release.Namespace }}
 spec:
   image: {{ .Values.global.application_controller.image }}
@@ -19,11 +19,7 @@ spec:
     env:
       {{- if eq .Values.global.reconcile_scope "All-Namespaces"}}
       - name: ARGOCD_APPLICATION_NAMESPACES
-        valueFrom:
-          configMapKeyRef:
-            name: argocd-cmd-params-cm
-            key: application.namespaces
-            optional: true
+        value: '*'
       {{- end }}
       {{- if .Values.global.proxyConfig.HTTP_PROXY }}
       - name: HTTP_PROXY

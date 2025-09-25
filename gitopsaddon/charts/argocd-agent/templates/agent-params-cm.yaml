@@ -10,7 +10,7 @@ data:
   agent.tls.client.insecure: "false"
   agent.log.level: "info"
   agent.namespace: "openshift-gitops"
-  agent.redis.address: "acm-openshift-gitops-redis:6379"
+  agent.redis.address: "openshift-gitops-redis:6379"
   agent.server.address: "{{ .Values.global.argocdAgent.serverAddress }}"
   agent.server.port: "{{ .Values.global.argocdAgent.serverPort }}"
   agent.metrics.port: "8181"

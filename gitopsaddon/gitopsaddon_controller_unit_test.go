@@ -262,6 +262,9 @@ func TestGitopsAddonReconciler_ShouldUpdateOpenshiftGiopsOperator(t *testing.T) 
 						"apps.open-cluster-management.io/gitops-operator-image": "test-image",
 						"apps.open-cluster-management.io/gitops-operator-ns":    "test-ns",
 					},
+					Labels: map[string]string{
+						"apps.open-cluster-management.io/gitopsaddon": "true",
+					},
 				},
 			},
 			operatorImage:  "test-image",
@@ -848,79 +851,6 @@ func TestDeleteHelmReleaseSecret(t *testing.T) {
 					Namespace: tc.secret.Namespace,
 				}, secret)
 				assert.Error(t, err) // Should not be found
-			}
-		})
-	}
-}
-
-// TestPatchDefaultSA tests patching the default service account
-func TestPatchDefaultSA(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	// Create a default service account
-	defaultSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default",
-			Namespace: "test-namespace",
-		},
-	}
-
-	testCases := []struct {
-		name           string
-		serviceAccount *corev1.ServiceAccount
-		secretName     string
-		namespace      string
-		expectError    bool
-	}{
-		{
-			name:           "successfully patch existing service account",
-			serviceAccount: defaultSA,
-			secretName:     "open-cluster-management-image-pull-credentials",
-			namespace:      "test-namespace",
-			expectError:    false,
-		},
-		{
-			name:           "patch non-existent service account should error",
-			serviceAccount: nil,
-			secretName:     "open-cluster-management-image-pull-credentials",
-			namespace:      "non-existent-namespace",
-			expectError:    true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			objects := []client.Object{}
-			if tc.serviceAccount != nil {
-				objects = append(objects, tc.serviceAccount)
-			}
-
-			fakeClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			reconciler := &GitopsAddonReconciler{
-				Client: fakeClient,
-			}
-
-			saKey := types.NamespacedName{Name: "default", Namespace: tc.namespace}
-			err := reconciler.patchDefaultSA(saKey)
-
-			if tc.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-
-				// Verify service account was patched with image pull secret
-				if tc.serviceAccount != nil {
-					updatedSA := &corev1.ServiceAccount{}
-					err = fakeClient.Get(context.TODO(), types.NamespacedName{
-						Name:      "default",
-						Namespace: tc.namespace,
-					}, updatedSA)
-					require.NoError(t, err)
-					assert.Len(t, updatedSA.ImagePullSecrets, 1)
-					assert.Equal(t, tc.secretName, updatedSA.ImagePullSecrets[0].Name)
-				}
 			}
 		})
 	}

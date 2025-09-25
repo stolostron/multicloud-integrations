@@ -49,7 +49,7 @@ kubectl apply -f e2e-gitopsaddon/gitopscluster
 
 sleep 90s
 kubectl patch networkpolicy openshift-gitops-redis-network-policy -n openshift-gitops --context kind-hub --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-principal"}}}]}}]'
-kubectl patch networkpolicy acm-openshift-gitops-redis-network-policy -n openshift-gitops --context kind-cluster1 --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-agent"}}}]}}]'
+kubectl patch networkpolicy openshift-gitops-redis-network-policy -n openshift-gitops --context kind-cluster1 --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-agent"}}}]}}]'
 kubectl rollout restart deployment openshift-gitops-agent-principal -n openshift-gitops --context kind-hub
 kubectl rollout restart deployment argocd-agent-agent -n openshift-gitops --context kind-cluster1
 sleep 30s

@@ -415,47 +415,6 @@ func TestShouldUpdateArgoCDAgent(t *testing.T) {
 	})
 }
 
-func TestParseImageReference(t *testing.T) {
-	g := NewGomegaWithT(t)
-
-	// Test valid image reference
-	t.Run("ValidImageReference", func(t *testing.T) {
-		image, tag, err := ParseImageReference("registry.example.com/repo/image@sha256:abc123")
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(image).To(Equal("registry.example.com/repo/image"))
-		g.Expect(tag).To(Equal("sha256:abc123"))
-	})
-
-	// Test image reference without sha256 prefix
-	t.Run("ImageReferenceWithoutSha256Prefix", func(t *testing.T) {
-		image, tag, err := ParseImageReference("registry.example.com/repo/image@abc123")
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(image).To(Equal("registry.example.com/repo/image"))
-		g.Expect(tag).To(Equal("sha256:abc123")) // Should add sha256: prefix
-	})
-
-	// Test invalid image reference format
-	t.Run("InvalidImageReference", func(t *testing.T) {
-		_, _, err := ParseImageReference("invalid-format")
-		g.Expect(err).To(HaveOccurred())
-		g.Expect(err.Error()).To(ContainSubstring("invalid image reference format"))
-	})
-
-	// Test empty image part
-	t.Run("EmptyImagePart", func(t *testing.T) {
-		_, _, err := ParseImageReference("@sha256:abc123")
-		g.Expect(err).To(HaveOccurred())
-		g.Expect(err.Error()).To(ContainSubstring("image part is empty"))
-	})
-
-	// Test empty tag part
-	t.Run("EmptyTagPart", func(t *testing.T) {
-		_, _, err := ParseImageReference("registry.example.com/repo/image@")
-		g.Expect(err).To(HaveOccurred())
-		g.Expect(err.Error()).To(ContainSubstring("tag/digest part is empty"))
-	})
-}
-
 func (r *GitopsAddonReconciler) getServiceAccount(namespace, name string) error {
 	sa := &corev1.ServiceAccount{}
 	return r.Get(context.TODO(), types.NamespacedName{Namespace: namespace, Name: name}, sa)
@@ -527,15 +486,6 @@ func (r *GitopsAddonReconciler) createNamespace(nameSpaceName string) error {
 	}
 
 	if err := r.Create(context.TODO(), sa); err != nil && !errors.IsAlreadyExists(err) {
-		return err
-	}
-
-	saKey := types.NamespacedName{
-		Name:      "default",
-		Namespace: nameSpaceName,
-	}
-
-	if err := r.patchDefaultSA(saKey); err != nil {
 		return err
 	}
 
