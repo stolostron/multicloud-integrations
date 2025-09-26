@@ -247,7 +247,6 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *gene
 	}
 
 	// 2. Wait for the ArgoCD CR to be created by the openshift-gitops-operator
-	klog.Info("Waiting for ArgoCD CR to be created by openshift-gitops-operator...")
 	timeout := 1 * time.Minute
 	err := r.waitForArgoCDCR(timeout)
 	if err != nil {
@@ -256,16 +255,20 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops(configFlags *gene
 	}
 
 	// 3. Render and apply openshift-gitops-dependency helm chart manifests selectively
-	gitopsNsKey := types.NamespacedName{
-		Name: r.GitopsNS,
-	}
+	if !r.ShouldUpdateOpenshiftGiops() {
+		klog.Info("Don't update openshift gitops")
+	} else {
+		gitopsNsKey := types.NamespacedName{
+			Name: r.GitopsNS,
+		}
 
-	if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", r.GitopsNS)
-		if err != nil {
-			klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
-		} else {
-			r.postUpdate(gitopsNsKey, "openshift-gitops")
+		if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
+			err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", r.GitopsNS)
+			if err != nil {
+				klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
+			} else {
+				r.postUpdate(gitopsNsKey, "openshift-gitops")
+			}
 		}
 	}
 
