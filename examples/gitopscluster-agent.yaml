@@ -13,6 +13,7 @@ spec:
     namespace: openshift-gitops
   gitopsAddon:
     enabled: true
+    cleanup: false
     overrideExistingConfigs: true
     gitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-operator@sha256:..."
     gitOpsImage: "registry.redhat.io/openshift-gitops-1/argocd@sha256:..."

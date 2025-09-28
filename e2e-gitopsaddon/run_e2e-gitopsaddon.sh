@@ -47,7 +47,20 @@ kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.i
 kubectl apply -f deploy/controller/
 kubectl apply -f e2e-gitopsaddon/gitopscluster
 
-sleep 90s
+kubectl apply -f e2e-gitopsaddon/argocdexportcrd.yaml --context kind-cluster1
+
+sleep 30s
+kubectl create ns openshift-gitops --context kind-cluster1
+kubectl apply -f e2e-gitopsaddon/argocd.yaml --context kind-cluster1
+sleep 30s
+kubectl patch deployment openshift-gitops-redis -n openshift-gitops --type='json' -p='[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/securityContext",
+    "value": {"runAsUser": 1000}
+  }
+]' --context kind-cluster1
+sleep 60s
 kubectl patch networkpolicy openshift-gitops-redis-network-policy -n openshift-gitops --context kind-hub --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-principal"}}}]}}]'
 kubectl patch networkpolicy openshift-gitops-redis-network-policy -n openshift-gitops --context kind-cluster1 --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-agent"}}}]}}]'
 kubectl rollout restart deployment openshift-gitops-agent-principal -n openshift-gitops --context kind-hub
@@ -76,6 +89,25 @@ if ! kubectl wait -n openshift-gitops \
     echo "agent did not become ready in time"
     exit 1
 fi
+
+# Validate cleanup
+kubectl config use-context kind-hub
+kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"cleanup":true}}}'
+sleep 120s
+kubectl config use-context kind-cluster1
+if [ -z "$(kubectl -n openshift-gitops get all --no-headers 2>/dev/null)" ]; then
+  echo "No resources found in openshift-gitops namespace"
+else
+  echo "Resources still exist in openshift-gitops namespace"
+  exit 1
+fi
+if [ -z "$(kubectl -n openshift-gitops-operator get all --no-headers 2>/dev/null)" ]; then
+  echo "No resources found in openshift-gitops-operator namespace"
+else
+  echo "Resources still exist in openshift-gitops-operator namespace"
+  exit 1
+fi
+
 
 echo 
 echo 

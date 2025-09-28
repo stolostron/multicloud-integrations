@@ -448,7 +448,6 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 				GitOpsOperatorNamespace: "gitops-operator",
 				GitOpsNamespace:         "gitops",
 				ReconcileScope:          "All-Namespaces",
-				Action:                  "Install",
 				OverrideExistingConfigs: &enabled,
 				ArgoCDAgent: &ArgoCDAgentSpec{
 					Enabled:        &enabled,
@@ -470,7 +469,6 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 	assert.Equal(t, "gitops-operator", gitopsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace)
 	assert.Equal(t, "gitops", gitopsCluster.Spec.GitOpsAddon.GitOpsNamespace)
 	assert.Equal(t, "All-Namespaces", gitopsCluster.Spec.GitOpsAddon.ReconcileScope)
-	assert.Equal(t, "Install", gitopsCluster.Spec.GitOpsAddon.Action)
 	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.OverrideExistingConfigs)
 
 	assert.NotNil(t, gitopsCluster.Spec.GitOpsAddon.ArgoCDAgent)
@@ -508,7 +506,6 @@ func TestGitOpsClusterDeepCopy(t *testing.T) {
 				GitOpsNamespace:         "argocd",
 				RedisImage:              "redis:6.2",
 				ReconcileScope:          "All-Namespaces",
-				Action:                  "Install",
 				ArgoCDAgent: &ArgoCDAgentSpec{
 					Enabled:        &[]bool{true}[0],
 					PropagateHubCA: &[]bool{true}[0],

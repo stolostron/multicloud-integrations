@@ -889,21 +889,6 @@ func (r *ReconcileGitOpsCluster) ValidateGitOpsAddonSpec(gitOpsAddon *gitopsclus
 		}
 	}
 
-	// Validate Action field
-	if gitOpsAddon.Action != "" {
-		validActions := []string{"Install", "Delete-Operator"}
-		isValidAction := false
-		for _, validAction := range validActions {
-			if gitOpsAddon.Action == validAction {
-				isValidAction = true
-				break
-			}
-		}
-		if !isValidAction {
-			return fmt.Errorf("invalid Action '%s': must be one of %v", gitOpsAddon.Action, validActions)
-		}
-	}
-
 	// Validate nested ArgoCDAgent spec
 	if err := r.ValidateArgoCDAgentSpec(gitOpsAddon.ArgoCDAgent); err != nil {
 		return fmt.Errorf("ArgoCDAgent validation failed: %w", err)

@@ -340,8 +340,10 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope
 		}
 
-		if gitOpsCluster.Spec.GitOpsAddon.Action != "" {
-			managedVariables["ACTION"] = gitOpsCluster.Spec.GitOpsAddon.Action
+		if gitOpsCluster.Spec.GitOpsAddon.Cleanup != nil && *gitOpsCluster.Spec.GitOpsAddon.Cleanup {
+			managedVariables["CLEANUP"] = "true"
+		} else {
+			managedVariables["CLEANUP"] = "false"
 		}
 
 		// Extract ArgoCD agent values from the nested structure

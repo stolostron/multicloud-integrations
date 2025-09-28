@@ -72,6 +72,11 @@ func (in *GitOpsAddonSpec) DeepCopyInto(out *GitOpsAddonSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Cleanup != nil {
+		in, out := &in.Cleanup, &out.Cleanup
+		*out = new(bool)
+		**out = **in
+	}
 	if in.ArgoCDAgent != nil {
 		in, out := &in.ArgoCDAgent, &out.ArgoCDAgent
 		*out = new(ArgoCDAgentSpec)
