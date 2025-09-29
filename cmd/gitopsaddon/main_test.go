@@ -33,7 +33,7 @@ func TestEnvironmentVariables(t *testing.T) {
 		g.Expect(GitopsNS).To(gomega.Equal("openshift-gitops"))
 		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Single-Namespace"))
-		g.Expect(CLEANUP).To(gomega.Equal("false"))
+		g.Expect(UNINSTALL).To(gomega.Equal("false"))
 		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("false"))
 		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a"))
 		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal(""))
@@ -264,14 +264,14 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		originalHTTPS_PROXY := HTTPS_PROXY
 		originalNO_PROXY := NO_PROXY
 		originalReconcileScope := ReconcileScope
-		originalCLEANUP := CLEANUP
+		originalUNINSTALL := UNINSTALL
 
 		// Set environment variables
 		t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
 		t.Setenv("HTTPS_PROXY", "https://proxy.example.com:8443")
 		t.Setenv("NO_PROXY", "localhost,127.0.0.1,.example.com")
 		t.Setenv("RECONCILE_SCOPE", "Multi-Namespace")
-		t.Setenv("CLEANUP", "true")
+		t.Setenv("UNINSTALL", "true")
 
 		// Simulate the environment variable processing logic from main()
 		if val, found := os.LookupEnv("HTTP_PROXY"); found && val > "" {
@@ -286,8 +286,8 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
 			ReconcileScope = val
 		}
-		if val, found := os.LookupEnv("CLEANUP"); found && val > "" {
-			CLEANUP = val
+		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
+			UNINSTALL = val
 		}
 
 		// Verify the values were updated
@@ -295,13 +295,13 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://proxy.example.com:8443"))
 		g.Expect(NO_PROXY).To(gomega.Equal("localhost,127.0.0.1,.example.com"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Multi-Namespace"))
-		g.Expect(CLEANUP).To(gomega.Equal("true"))
+		g.Expect(UNINSTALL).To(gomega.Equal("true"))
 		// Restore original values
 		HTTP_PROXY = originalHTTP_PROXY
 		HTTPS_PROXY = originalHTTPS_PROXY
 		NO_PROXY = originalNO_PROXY
 		ReconcileScope = originalReconcileScope
-		CLEANUP = originalCLEANUP
+		UNINSTALL = originalUNINSTALL
 	})
 }
 
@@ -393,7 +393,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"HTTPS_PROXY":                 HTTPS_PROXY,
 			"NO_PROXY":                    NO_PROXY,
 			"ReconcileScope":              ReconcileScope,
-			"CLEANUP":                     CLEANUP,
+			"UNINSTALL":                   UNINSTALL,
 			"ARGOCD_AGENT_ENABLED":        ARGOCD_AGENT_ENABLED,
 			"ARGOCD_AGENT_IMAGE":          ARGOCD_AGENT_IMAGE,
 			"ARGOCD_AGENT_SERVER_ADDRESS": ARGOCD_AGENT_SERVER_ADDRESS,
@@ -412,7 +412,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"HTTPS_PROXY":                 "https://test-proxy:8443",
 			"NO_PROXY":                    "test.local",
 			"RECONCILE_SCOPE":             "Test-Scope",
-			"CLEANUP":                     "true",
+			"UNINSTALL":                   "true",
 			"ARGOCD_AGENT_ENABLED":        "true",
 			"ARGOCD_AGENT_IMAGE":          "test.registry.io/argocd-agent:test",
 			"ARGOCD_AGENT_SERVER_ADDRESS": "test.argocd.local",
@@ -452,8 +452,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
 			ReconcileScope = val
 		}
-		if val, found := os.LookupEnv("CLEANUP"); found && val > "" {
-			CLEANUP = val
+		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
+			UNINSTALL = val
 		}
 		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
 			ARGOCD_AGENT_ENABLED = val
@@ -481,7 +481,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://test-proxy:8443"))
 		g.Expect(NO_PROXY).To(gomega.Equal("test.local"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Test-Scope"))
-		g.Expect(CLEANUP).To(gomega.Equal("true"))
+		g.Expect(UNINSTALL).To(gomega.Equal("true"))
 		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("true"))
 		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.Equal("test.registry.io/argocd-agent:test"))
 		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal("test.argocd.local"))
@@ -498,7 +498,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		HTTPS_PROXY = originalValues["HTTPS_PROXY"]
 		NO_PROXY = originalValues["NO_PROXY"]
 		ReconcileScope = originalValues["ReconcileScope"]
-		CLEANUP = originalValues["CLEANUP"]
+		UNINSTALL = originalValues["UNINSTALL"]
 		ARGOCD_AGENT_ENABLED = originalValues["ARGOCD_AGENT_ENABLED"]
 		ARGOCD_AGENT_IMAGE = originalValues["ARGOCD_AGENT_IMAGE"]
 		ARGOCD_AGENT_SERVER_ADDRESS = originalValues["ARGOCD_AGENT_SERVER_ADDRESS"]

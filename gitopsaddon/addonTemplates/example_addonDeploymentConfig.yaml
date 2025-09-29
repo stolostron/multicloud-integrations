@@ -17,7 +17,7 @@ spec:
     value: registry.redhat.io/rhel9/redis-7@sha256:848f4298a9465dafb7ce9790e991bd8a11de2558e3a6685e1d7c4a6e0fc5f371
   - name: RECONCILE_SCOPE
     value: Single-Namespace
-  - name: CLEANUP
+  - name: UNINSTALL
     value: "false"
   - name: ARGOCD_AGENT_ENABLED
     value: "false"

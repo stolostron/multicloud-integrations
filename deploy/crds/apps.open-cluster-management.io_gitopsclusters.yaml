@@ -97,11 +97,6 @@ spec:
                           the agent. Default is empty.
                         type: string
                     type: object
-                  cleanup:
-                    default: false
-                    description: Cleanup indicates whether to perform cleanup when
-                      the addon is deleted. Default is false.
-                    type: boolean
                   enabled:
                     default: false
                     description: |-
@@ -139,6 +134,13 @@ spec:
                     description: RedisImage specifies the Redis container image. Default
                       is empty.
                     type: string
+                  uninstall:
+                    default: false
+                    description: |-
+                      Uninstall indicates whether to uninstall the gitopsaddon. Default is false.
+                      When set to true, performs uninstall operations instead of install.
+                      When uninstall is true, OverrideExistingConfigs is automatically set to true.
+                    type: boolean
                 type: object
               managedServiceAccountRef:
                 description: ManagedServiceAccountRef defines managed service account

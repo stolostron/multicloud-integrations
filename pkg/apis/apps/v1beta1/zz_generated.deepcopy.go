@@ -72,8 +72,8 @@ func (in *GitOpsAddonSpec) DeepCopyInto(out *GitOpsAddonSpec) {
 		*out = new(bool)
 		**out = **in
 	}
-	if in.Cleanup != nil {
-		in, out := &in.Cleanup, &out.Cleanup
+	if in.Uninstall != nil {
+		in, out := &in.Uninstall, &out.Uninstall
 		*out = new(bool)
 		**out = **in
 	}

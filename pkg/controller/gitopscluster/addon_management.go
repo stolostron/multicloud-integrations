@@ -91,9 +91,14 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		}
 
 		// Determine behavior based on overrideExistingConfigs setting
+		// Automatically set to true when uninstall is true
 		shouldOverrideExisting := false
-		if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs != nil {
-			shouldOverrideExisting = *gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs
+		if gitOpsCluster.Spec.GitOpsAddon != nil {
+			if gitOpsCluster.Spec.GitOpsAddon.Uninstall != nil && *gitOpsCluster.Spec.GitOpsAddon.Uninstall {
+				shouldOverrideExisting = true
+			} else if gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs != nil {
+				shouldOverrideExisting = *gitOpsCluster.Spec.GitOpsAddon.OverrideExistingConfigs
+			}
 		}
 
 		updatedVariables := make([]addonv1alpha1.CustomizedVariable, 0)
@@ -340,10 +345,10 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope
 		}
 
-		if gitOpsCluster.Spec.GitOpsAddon.Cleanup != nil && *gitOpsCluster.Spec.GitOpsAddon.Cleanup {
-			managedVariables["CLEANUP"] = "true"
+		if gitOpsCluster.Spec.GitOpsAddon.Uninstall != nil && *gitOpsCluster.Spec.GitOpsAddon.Uninstall {
+			managedVariables["UNINSTALL"] = "true"
 		} else {
-			managedVariables["CLEANUP"] = "false"
+			managedVariables["UNINSTALL"] = "false"
 		}
 
 		// Extract ArgoCD agent values from the nested structure

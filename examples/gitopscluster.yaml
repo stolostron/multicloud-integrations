@@ -14,7 +14,7 @@ spec:
   # createBlankClusterSecrets: true
   # gitopsAddon:
   #   enabled: true
-  #   cleanup: false  # Optional: cleanup resources when addon is deleted (default: false)
+  #   uninstall: false  # Optional: uninstall gitopsaddon (default: false)
   #   argoCDAgent:
   #     enabled: true
   argoServer:

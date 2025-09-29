@@ -90,9 +90,9 @@ if ! kubectl wait -n openshift-gitops \
     exit 1
 fi
 
-# Validate cleanup
+# Validate uninstall
 kubectl config use-context kind-hub
-kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"cleanup":true}}}'
+kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"uninstall":true}}}'
 sleep 120s
 kubectl config use-context kind-cluster1
 if [ -z "$(kubectl -n openshift-gitops get all --no-headers 2>/dev/null)" ]; then

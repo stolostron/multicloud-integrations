@@ -33,44 +33,44 @@ import (
 	k8syaml "sigs.k8s.io/yaml"
 )
 
-// PerformCleanupOperations performs cleanup of all resources created by the controller
-func (r *GitopsAddonReconciler) PerformCleanupOperations() {
-	klog.Info("Starting aggressive cleanup - fire and forget...")
+// performUninstallOperations performs uninstall of all resources created by the controller
+func (r *GitopsAddonReconciler) performUninstallOperations() {
+	klog.Info("Starting aggressive uninstall - fire and forget...")
 
 	// 1. Delete argocd-agent resources (if enabled) - FASTEST
 	if r.ArgoCDAgentEnabled == "true" {
-		r.cleanupArgoCDAgent()
+		r.uninstallArgoCDAgent()
 	}
 
 	// 2. Delete argocd-redis secret
-	r.cleanupArgoCDRedisSecret()
+	r.uninstallArgoCDRedisSecret()
 
 	// 3. Delete ArgoCD CR explicitly
-	r.cleanupArgoCDCR()
+	r.uninstallArgoCDCR()
 
 	// 4. Delete openshift-gitops-dependency resources
-	r.cleanupGitOpsDependency()
+	r.uninstallGitOpsDependency()
 
 	// 5. Delete openshift-gitops-operator resources
-	r.cleanupGitOpsOperator()
+	r.uninstallGitOpsOperator()
 
 	// 6. Delete CRDs we applied
-	r.cleanupCRDs()
+	r.uninstallCRDs()
 
 	// Keep namespaces
 
-	klog.Info("Cleanup requests sent - exiting")
+	klog.Info("Uninstall requests sent - exiting")
 }
 
-// cleanupArgoCDAgent deletes all resources created by argocd-agent chart
-func (r *GitopsAddonReconciler) cleanupArgoCDAgent() {
-	klog.Info("Cleanup: Deleting argocd-agent resources...")
+// uninstallArgoCDAgent deletes all resources created by argocd-agent chart
+func (r *GitopsAddonReconciler) uninstallArgoCDAgent() {
+	klog.Info("Uninstall: Deleting argocd-agent resources...")
 	r.deleteChartResources("charts/argocd-agent", r.GitopsNS, "argocd-agent")
 }
 
-// cleanupArgoCDRedisSecret deletes the argocd-redis secret if it has our label
-func (r *GitopsAddonReconciler) cleanupArgoCDRedisSecret() {
-	klog.Info("Cleanup: Deleting argocd-redis secret...")
+// uninstallArgoCDRedisSecret deletes the argocd-redis secret if it has our label
+func (r *GitopsAddonReconciler) uninstallArgoCDRedisSecret() {
+	klog.Info("Uninstall: Deleting argocd-redis secret...")
 
 	argoCDRedisSecret := &corev1.Secret{}
 	argoCDRedisSecretKey := types.NamespacedName{
@@ -100,9 +100,9 @@ func (r *GitopsAddonReconciler) cleanupArgoCDRedisSecret() {
 	}
 }
 
-// cleanupArgoCDCR deletes the ArgoCD CR "openshift-gitops"
-func (r *GitopsAddonReconciler) cleanupArgoCDCR() {
-	klog.Info("Cleanup: Deleting ArgoCD CR...")
+// uninstallArgoCDCR deletes the ArgoCD CR "openshift-gitops"
+func (r *GitopsAddonReconciler) uninstallArgoCDCR() {
+	klog.Info("Uninstall: Deleting ArgoCD CR...")
 
 	argoCD := &unstructured.Unstructured{}
 	argoCD.SetAPIVersion("argoproj.io/v1beta1")
@@ -129,21 +129,21 @@ func (r *GitopsAddonReconciler) cleanupArgoCDCR() {
 	}
 }
 
-// cleanupGitOpsDependency deletes all resources created by gitops dependency manifests
-func (r *GitopsAddonReconciler) cleanupGitOpsDependency() {
-	klog.Info("Cleanup: Deleting gitops dependency resources...")
+// uninstallGitOpsDependency deletes all resources created by gitops dependency manifests
+func (r *GitopsAddonReconciler) uninstallGitOpsDependency() {
+	klog.Info("Uninstall: Deleting gitops dependency resources...")
 	r.deleteChartResources("charts/openshift-gitops-dependency", r.GitopsNS, "openshift-gitops-dependency")
 }
 
-// cleanupGitOpsOperator deletes all resources created by gitops operator chart
-func (r *GitopsAddonReconciler) cleanupGitOpsOperator() {
-	klog.Info("Cleanup: Deleting gitops operator resources...")
+// uninstallGitOpsOperator deletes all resources created by gitops operator chart
+func (r *GitopsAddonReconciler) uninstallGitOpsOperator() {
+	klog.Info("Uninstall: Deleting gitops operator resources...")
 	r.deleteChartResources("charts/openshift-gitops-operator", r.GitopsOperatorNS, "openshift-gitops-operator")
 }
 
-// cleanupCRDs deletes the CRDs we applied
-func (r *GitopsAddonReconciler) cleanupCRDs() {
-	klog.Info("Cleanup: Deleting CRDs...")
+// uninstallCRDs deletes the CRDs we applied
+func (r *GitopsAddonReconciler) uninstallCRDs() {
+	klog.Info("Uninstall: Deleting CRDs...")
 	r.deleteCRD("gitopsservices.pipelines.openshift.io")
 	r.deleteCRD("routes.route.openshift.io")
 	r.deleteCRD("clusterversions.config.openshift.io")
@@ -154,9 +154,9 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 	klog.Infof("Deleting chart resources: %s in namespace %s", releaseName, namespace)
 
 	// Create temp directory for chart files
-	tempDir, err := os.MkdirTemp("", "helm-chart-cleanup-*")
+	tempDir, err := os.MkdirTemp("", "helm-chart-uninstall-*")
 	if err != nil {
-		klog.Errorf("Failed to create temp dir for cleanup: %v", err)
+		klog.Errorf("Failed to create temp dir for uninstall: %v", err)
 		return
 	}
 	defer os.RemoveAll(tempDir)
@@ -164,14 +164,14 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 	// Copy embedded chart files to temp directory
 	err = r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir, releaseName)
 	if err != nil {
-		klog.Errorf("Failed to copy files for cleanup: %v", err)
+		klog.Errorf("Failed to copy files for uninstall: %v", err)
 		return
 	}
 
 	// Load the chart
 	chart, err := loader.Load(tempDir)
 	if err != nil {
-		klog.Errorf("Failed to load chart for cleanup: %v", err)
+		klog.Errorf("Failed to load chart for uninstall: %v", err)
 		return
 	}
 
@@ -184,7 +184,7 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 		// Parse the operator image
 		image, tag, err := ParseImageReference(r.GitopsOperatorImage)
 		if err != nil {
-			klog.Errorf("Failed to parse GitopsOperatorImage for cleanup: %v", err)
+			klog.Errorf("Failed to parse GitopsOperatorImage for uninstall: %v", err)
 			return
 		}
 
@@ -206,13 +206,13 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 		// Parse the gitops and redis images
 		gitopsImage, gitopsTag, err := ParseImageReference(r.GitopsImage)
 		if err != nil {
-			klog.Errorf("Failed to parse GitopsImage for cleanup: %v", err)
+			klog.Errorf("Failed to parse GitopsImage for uninstall: %v", err)
 			return
 		}
 
 		redisImage, redisTag, err := ParseImageReference(r.RedisImage)
 		if err != nil {
-			klog.Errorf("Failed to parse RedisImage for cleanup: %v", err)
+			klog.Errorf("Failed to parse RedisImage for uninstall: %v", err)
 			return
 		}
 
@@ -239,7 +239,7 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 		// Parse the agent image
 		agentImage, agentTag, err := ParseImageReference(r.ArgoCDAgentImage)
 		if err != nil {
-			klog.Errorf("Failed to parse ArgoCDAgentImage for cleanup: %v", err)
+			klog.Errorf("Failed to parse ArgoCDAgentImage for uninstall: %v", err)
 			return
 		}
 
@@ -279,13 +279,13 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 
 	valuesToRender, err := chartutil.ToRenderValues(chart, values, options, nil)
 	if err != nil {
-		klog.Errorf("Failed to prepare chart values for cleanup: %v", err)
+		klog.Errorf("Failed to prepare chart values for uninstall: %v", err)
 		return
 	}
 
 	files, err := engine.Engine{}.Render(chart, valuesToRender)
 	if err != nil {
-		klog.Errorf("Failed to render chart templates for cleanup: %v", err)
+		klog.Errorf("Failed to render chart templates for uninstall: %v", err)
 		return
 	}
 
@@ -307,7 +307,7 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 			// Parse the YAML into an unstructured object
 			var obj unstructured.Unstructured
 			if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
-				klog.Warningf("Failed to parse YAML document in %s for cleanup: %v", name, err)
+				klog.Warningf("Failed to parse YAML document in %s for uninstall: %v", name, err)
 				continue
 			}
 
