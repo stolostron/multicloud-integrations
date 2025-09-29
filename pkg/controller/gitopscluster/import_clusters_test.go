@@ -15,6 +15,7 @@ limitations under the License.
 package gitopscluster
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -551,18 +552,18 @@ func TestGetManagedClusterToken(t *testing.T) {
 		description   string
 	}{
 		{
-			name:          "valid JSON config with access_token",
-			dataConfig:    []byte(`{"access_token": "test-token-123"}`),
+			name:          "valid JSON config with bearerToken",
+			dataConfig:    []byte(`{"bearerToken": "test-token-123", "tlsClientConfig": {"insecure": true}}`),
 			expectedToken: "test-token-123",
 			expectedError: false,
 			description:   "Should extract token from valid JSON config",
 		},
 		{
-			name:          "valid JSON config without access_token",
+			name:          "valid JSON config without bearerToken",
 			dataConfig:    []byte(`{"other_field": "value"}`),
 			expectedToken: "",
 			expectedError: true,
-			description:   "Should return error when no access_token present",
+			description:   "Should return error when no bearerToken present",
 		},
 		{
 			name:          "invalid JSON",
@@ -583,35 +584,35 @@ func TestGetManagedClusterToken(t *testing.T) {
 			dataConfig:    []byte(`{}`),
 			expectedToken: "",
 			expectedError: true,
-			description:   "Should return error for empty JSON object without access_token",
+			description:   "Should return error for empty JSON object without bearerToken",
 		},
 		{
-			name:          "config with null access_token",
-			dataConfig:    []byte(`{"access_token": null}`),
+			name:          "config with null bearerToken",
+			dataConfig:    []byte(`{"bearerToken": null}`),
 			expectedToken: "",
 			expectedError: true,
-			description:   "Should return error for null access_token",
+			description:   "Should return error for null bearerToken",
 		},
 		{
-			name:          "config with empty string access_token",
-			dataConfig:    []byte(`{"access_token": ""}`),
+			name:          "config with empty string bearerToken",
+			dataConfig:    []byte(`{"bearerToken": "", "tlsClientConfig": {"insecure": true}}`),
 			expectedToken: "",
-			expectedError: false,
-			description:   "Should return empty string for empty access_token",
+			expectedError: true,
+			description:   "Should return error for empty bearerToken",
 		},
 		{
-			name:          "config with whitespace access_token",
-			dataConfig:    []byte(`{"access_token": "   "}`),
+			name:          "config with whitespace bearerToken",
+			dataConfig:    []byte(`{"bearerToken": "   ", "tlsClientConfig": {"insecure": true}}`),
 			expectedToken: "   ",
 			expectedError: false,
 			description:   "Should return whitespace token as-is",
 		},
 		{
-			name:          "config with numeric access_token",
-			dataConfig:    []byte(`{"access_token": 123}`),
+			name:          "config with numeric bearerToken",
+			dataConfig:    []byte(`{"bearerToken": 123}`),
 			expectedToken: "",
 			expectedError: true,
-			description:   "Should return error for non-string access_token",
+			description:   "Should return error for numeric bearerToken (JSON unmarshal fails)",
 		},
 	}
 
@@ -754,9 +755,9 @@ func TestGetManagedClusterURL(t *testing.T) {
 				},
 			},
 			token:         "test-token",
-			expectedURL:   "https://   https://api.test-cluster.example.com:6443   ",
+			expectedURL:   "   https://api.test-cluster.example.com:6443   ",
 			expectedError: false,
-			description:   "Should add https prefix when URL starts with whitespace (doesn't detect existing https)",
+			description:   "Should return URL as-is when it already has https prefix (even with whitespace)",
 		},
 		{
 			name: "managed cluster with URL without https prefix",
@@ -823,6 +824,23 @@ func TestCreateManagedClusterSecretInArgoAdvanced(t *testing.T) {
 		},
 	}
 
+	// Create test cluster secret with proper config format for non-blank tests
+	testClusterSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-cluster-secret",
+			Namespace: "test-cluster",
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/cluster-name":   "test-cluster",
+				"apps.open-cluster-management.io/cluster-server": "api.test-cluster.example.com",
+			},
+		},
+		Data: map[string][]byte{
+			"config": []byte(`{"bearerToken":"test-token-123","tlsClientConfig":{"insecure":true}}`),
+			"name":   []byte("test-cluster"),
+			"server": []byte("https://api.test-cluster.example.com:6443"),
+		},
+	}
+
 	tests := []struct {
 		name                      string
 		argoNamespace             string
@@ -869,7 +887,7 @@ func TestCreateManagedClusterSecretInArgoAdvanced(t *testing.T) {
 			managedServiceAccountRef:  "application-manager",
 			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
-				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
+				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testClusterSecret).Build()
 			},
 			expectedError:      false,
 			expectedSecretName: "test-cluster-cluster-secret",
@@ -902,9 +920,15 @@ func TestCreateManagedClusterSecretInArgoAdvanced(t *testing.T) {
 				scheme: scheme,
 			}
 
+			// Use the appropriate secret based on the test case
+			secretToUse := testMSASecret
+			if tt.name == "create real cluster secret when createBlankClusterSecrets is false" {
+				secretToUse = testClusterSecret
+			}
+
 			secret, err := reconciler.CreateManagedClusterSecretInArgo(
 				tt.argoNamespace,
-				testMSASecret,
+				secretToUse,
 				tt.managedCluster,
 				tt.createBlankClusterSecrets,
 			)
@@ -915,7 +939,7 @@ func TestCreateManagedClusterSecretInArgoAdvanced(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 				assert.NotNil(t, secret, "Secret should not be nil when successful")
-				if tt.expectedSecretName != "" {
+				if secret != nil && tt.expectedSecretName != "" {
 					assert.Equal(t, tt.expectedSecretName, secret.Name, "Secret name should match expected")
 					assert.Equal(t, tt.argoNamespace, secret.Namespace, "Secret namespace should match ArgoCD namespace")
 					assert.Equal(t, "cluster", secret.Labels["argocd.argoproj.io/secret-type"], "Should have correct ArgoCD label")
@@ -1418,7 +1442,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			Namespace: "test-cluster",
 		},
 		Data: map[string][]byte{
-			"token":  []byte(`{"access_token": "test-token-123"}`),
+			"token":  []byte("test-token-123"),
 			"ca.crt": []byte("test-ca-data"),
 		},
 	}
@@ -1442,7 +1466,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 		argoNamespace  string
 		managedCluster *spokeclusterv1.ManagedCluster
 		msaName        string
-		useHostAsValue bool
+		enableTLS      bool
 		setupClient    func() client.Client
 		expectedError  bool
 		expectedName   string
@@ -1454,7 +1478,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).Build()
 			},
@@ -1466,7 +1490,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "non-existent-msa",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).Build()
 			},
@@ -1478,7 +1502,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "test-msa-no-token",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				msaNoToken := &authv1beta1.ManagedServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1497,7 +1521,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "test-msa",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				// Only include MSA but not the secret
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA).Build()
@@ -1506,11 +1530,11 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when ManagedServiceAccount secret is not found",
 		},
 		{
-			name:           "invalid token in secret - should return error",
+			name:           "token as plain string - should succeed",
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "test-msa",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				invalidSecret := &v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1518,14 +1542,16 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 						Namespace: "test-cluster",
 					},
 					Data: map[string][]byte{
-						"token":  []byte(`invalid json`),
+						"token":  []byte("test-token-123"),
 						"ca.crt": []byte("test-ca-data"),
 					},
 				}
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, invalidSecret).Build()
 			},
-			expectedError: true,
-			description:   "Should return error when token in secret is invalid JSON",
+			expectedError:  false,
+			expectedName:   "test-cluster-test-msa-cluster-secret",
+			expectedServer: "https://api.test-cluster.example.com:6443",
+			description:    "Should succeed when token in secret is plain string",
 		},
 		{
 			name:          "managed cluster without client configs - should return error",
@@ -1536,8 +1562,8 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				},
 				// No ManagedClusterClientConfigs
 			},
-			msaName:        "test-msa",
-			useHostAsValue: false,
+			msaName:   "test-msa",
+			enableTLS: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
@@ -1545,11 +1571,11 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when managed cluster has no client configs",
 		},
 		{
-			name:           "successful secret creation with useHostAsValue=false",
+			name:           "successful secret creation with enableTLS=false",
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "test-msa",
-			useHostAsValue: false,
+			enableTLS:      false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
@@ -1559,18 +1585,18 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:    "Should successfully create secret with MSA name in secret name",
 		},
 		{
-			name:           "successful secret creation with useHostAsValue=true",
+			name:           "successful secret creation with enableTLS=true",
 			argoNamespace:  "argocd",
 			managedCluster: testManagedCluster,
 			msaName:        "test-msa",
-			useHostAsValue: true,
+			enableTLS:      true,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
 			expectedError:  false,
-			expectedName:   "test-cluster-cluster-secret",
+			expectedName:   "test-cluster-test-msa-cluster-secret",
 			expectedServer: "https://api.test-cluster.example.com:6443",
-			description:    "Should successfully create secret with host as cluster name",
+			description:    "Should successfully create secret with TLS enabled",
 		},
 	}
 
@@ -1586,7 +1612,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				tt.argoNamespace,
 				tt.managedCluster,
 				tt.msaName,
-				tt.useHostAsValue,
+				tt.enableTLS,
 			)
 
 			if tt.expectedError {
@@ -1605,7 +1631,15 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 
 				if tt.expectedServer != "" {
 					assert.Equal(t, tt.expectedServer, secret.StringData["server"], "Server URL should match expected")
-					assert.Equal(t, tt.expectedServer, secret.Labels["apps.open-cluster-management.io/cluster-server"], "Server label should match expected")
+					// Label contains stripped URL (no protocol/port for label compatibility)
+					expectedLabel := tt.expectedServer
+					if idx := strings.Index(expectedLabel, "://"); idx > 0 {
+						expectedLabel = expectedLabel[idx+3:]
+					}
+					if idx := strings.Index(expectedLabel, ":"); idx > 0 {
+						expectedLabel = expectedLabel[:idx]
+					}
+					assert.Equal(t, expectedLabel, secret.Labels["apps.open-cluster-management.io/cluster-server"], "Server label should match expected")
 				}
 
 				// Verify common secret properties
@@ -1617,7 +1651,13 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				// Verify secret contains proper config
 				assert.Contains(t, secret.StringData["config"], "bearerToken", "Config should contain bearer token")
 				assert.Contains(t, secret.StringData["config"], "test-token-123", "Config should contain actual token")
-				assert.Contains(t, secret.StringData["config"], "caData", "Config should contain CA data")
+
+				if tt.enableTLS {
+					assert.Contains(t, secret.StringData["config"], "caData", "Config should contain CA data when TLS enabled")
+					assert.Contains(t, secret.StringData["config"], `"insecure":false`, "Config should set insecure to false when TLS enabled")
+				} else {
+					assert.Contains(t, secret.StringData["config"], `"insecure":true`, "Config should set insecure to true when TLS disabled")
+				}
 			}
 		})
 	}

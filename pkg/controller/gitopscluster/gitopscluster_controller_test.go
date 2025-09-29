@@ -1171,6 +1171,9 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 						Namespace: "argocd",
 						Labels: map[string]string{
 							argoCDTypeLabel: argoCDSecretTypeClusterValue,
+							"apps.open-cluster-management.io/acm-cluster":    "true",
+							"apps.open-cluster-management.io/cluster-name":   "cluster1",
+							"apps.open-cluster-management.io/cluster-server": "cluster1-server",
 						},
 					},
 					Data: map[string][]byte{
