@@ -50,7 +50,7 @@ type GitopsAddonReconciler struct {
 	HTTP_PROXY               string
 	HTTPS_PROXY              string
 	NO_PROXY                 string
-	Cleanup                  string
+	Uninstall                string
 	ArgoCDAgentEnabled       string
 	ArgoCDAgentImage         string
 	ArgoCDAgentServerAddress string
@@ -60,7 +60,7 @@ type GitopsAddonReconciler struct {
 
 func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
 	gitopsImage, gitopsNS, redisImage, reconcileScope,
-	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, cleanup, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
+	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, uninstall, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
 	dsRS := &GitopsAddonReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
@@ -75,7 +75,7 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		HTTP_PROXY:               HTTP_PROXY,
 		HTTPS_PROXY:              HTTPS_PROXY,
 		NO_PROXY:                 NO_PROXY,
-		Cleanup:                  cleanup,
+		Uninstall:                uninstall,
 		ArgoCDAgentEnabled:       argoCDAgentEnabled,
 		ArgoCDAgentImage:         argoCDAgentImage,
 		ArgoCDAgentServerAddress: argoCDAgentServerAddress,
@@ -100,8 +100,8 @@ func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
 }
 
 func (r *GitopsAddonReconciler) houseKeeping() {
-	if r.Cleanup == "true" {
-		r.PerformCleanupOperations()
+	if r.Uninstall == "true" {
+		r.performUninstallOperations()
 	} else {
 		r.installOrUpdateOpenshiftGitops()
 	}

@@ -617,7 +617,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 				"GITOPS_OPERATOR_NAMESPACE":   "gitops-operator-ns",
 				"GITOPS_NAMESPACE":            "gitops-ns",
 				"RECONCILE_SCOPE":             "All-Namespaces",
-				"CLEANUP":                     "false",
+				"UNINSTALL":                   "false",
 				"ARGOCD_AGENT_IMAGE":          "agent-image:v1.0",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
 				"ARGOCD_AGENT_SERVER_PORT":    "443",
@@ -644,7 +644,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 			expectedVars: map[string]string{
 				"ARGOCD_AGENT_ENABLED":        "true",
 				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
-				"CLEANUP":                     "false",
+				"UNINSTALL":                   "false",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
 			},
 		},

@@ -43,7 +43,7 @@ func TestSetupWithManager(t *testing.T) {
 		httpProxy             string
 		httpsProxy            string
 		noProxy               string
-		cleanup               string
+		uninstall             string
 		argoCDAgentEnabled    string
 		argoCDAgentImage      string
 		argoCDAgentServerAddr string
@@ -63,7 +63,7 @@ func TestSetupWithManager(t *testing.T) {
 			httpProxy:             "",
 			httpsProxy:            "",
 			noProxy:               "",
-			cleanup:               "false",
+			uninstall:             "false",
 			argoCDAgentEnabled:    "false",
 			argoCDAgentImage:      "test-agent:latest",
 			argoCDAgentServerAddr: "",
@@ -83,7 +83,7 @@ func TestSetupWithManager(t *testing.T) {
 			httpProxy:             "http://proxy:8080",
 			httpsProxy:            "https://proxy:8080",
 			noProxy:               "localhost,127.0.0.1",
-			cleanup:               "true",
+			uninstall:             "true",
 			argoCDAgentEnabled:    "true",
 			argoCDAgentImage:      "test-agent:v1.0.0",
 			argoCDAgentServerAddr: "argocd.example.com",
@@ -113,7 +113,7 @@ func TestSetupWithManager(t *testing.T) {
 			// Test SetupWithManager
 			err = SetupWithManager(mgr, tt.interval, tt.gitopsOperatorImage, tt.gitopsOperatorNS,
 				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.reconcileScope,
-				tt.httpProxy, tt.httpsProxy, tt.noProxy, tt.cleanup,
+				tt.httpProxy, tt.httpsProxy, tt.noProxy, tt.uninstall,
 				tt.argoCDAgentEnabled, tt.argoCDAgentImage, tt.argoCDAgentServerAddr,
 				tt.argoCDAgentServerPort, tt.argoCDAgentMode)
 
@@ -163,7 +163,7 @@ func TestGitopsAddonReconciler_Start(t *testing.T) {
 				GitopsNS:            "openshift-gitops",
 				RedisImage:          "test-redis:latest",
 				ReconcileScope:      "Single-Namespace",
-				Cleanup:             "false",
+				Uninstall:           "false",
 				ArgoCDAgentEnabled:  "false",
 			}
 
@@ -232,7 +232,7 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 				GitopsNS:            tt.gitopsNS,
 				RedisImage:          "test-redis:latest",
 				ReconcileScope:      "Single-Namespace",
-				Cleanup:             "false",
+				Uninstall:           "false",
 				ArgoCDAgentEnabled:  tt.argoCDAgentEnabled,
 			}
 
@@ -259,7 +259,7 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 		HTTP_PROXY:               "http://proxy:8080",
 		HTTPS_PROXY:              "https://proxy:8080",
 		NO_PROXY:                 "localhost,127.0.0.1",
-		Cleanup:                  "false",
+		Uninstall:                "false",
 		ArgoCDAgentEnabled:       "true",
 		ArgoCDAgentImage:         "test-agent:latest",
 		ArgoCDAgentServerAddress: "argocd.example.com",
@@ -278,7 +278,7 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 	g.Expect(reconciler.HTTP_PROXY).To(gomega.Equal("http://proxy:8080"))
 	g.Expect(reconciler.HTTPS_PROXY).To(gomega.Equal("https://proxy:8080"))
 	g.Expect(reconciler.NO_PROXY).To(gomega.Equal("localhost,127.0.0.1"))
-	g.Expect(reconciler.Cleanup).To(gomega.Equal("false"))
+	g.Expect(reconciler.Uninstall).To(gomega.Equal("false"))
 	g.Expect(reconciler.ArgoCDAgentEnabled).To(gomega.Equal("true"))
 	g.Expect(reconciler.ArgoCDAgentImage).To(gomega.Equal("test-agent:latest"))
 	g.Expect(reconciler.ArgoCDAgentServerAddress).To(gomega.Equal("argocd.example.com"))

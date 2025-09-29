@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestPerformCleanupOperations(t *testing.T) {
+func TestPerformUninstallOperations(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
@@ -59,18 +59,18 @@ func TestPerformCleanupOperations(t *testing.T) {
 
 			if tt.expectPanic {
 				g.Expect(func() {
-					reconciler.PerformCleanupOperations()
+					reconciler.performUninstallOperations()
 				}).To(gomega.Panic())
 			} else {
 				g.Expect(func() {
-					reconciler.PerformCleanupOperations()
+					reconciler.performUninstallOperations()
 				}).ToNot(gomega.Panic())
 			}
 		})
 	}
 }
 
-func TestCleanupArgoCDAgent(t *testing.T) {
+func TestUninstallArgoCDAgent(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
@@ -81,11 +81,11 @@ func TestCleanupArgoCDAgent(t *testing.T) {
 	// This test mainly verifies the function doesn't panic
 	// The actual chart deletion functionality is tested in deleteChartResources
 	g.Expect(func() {
-		reconciler.cleanupArgoCDAgent()
+		reconciler.uninstallArgoCDAgent()
 	}).ToNot(gomega.Panic())
 }
 
-func TestCleanupArgoCDRedisSecret(t *testing.T) {
+func TestUninstallArgoCDRedisSecret(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
@@ -140,7 +140,7 @@ func TestCleanupArgoCDRedisSecret(t *testing.T) {
 			}
 
 			// Run cleanup
-			reconciler.cleanupArgoCDRedisSecret()
+			reconciler.uninstallArgoCDRedisSecret()
 
 			// Verify result
 			secret := &corev1.Secret{}
@@ -159,7 +159,7 @@ func TestCleanupArgoCDRedisSecret(t *testing.T) {
 	}
 }
 
-func TestCleanupArgoCDCR(t *testing.T) {
+func TestUninstallArgoCDCR(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
@@ -203,7 +203,7 @@ func TestCleanupArgoCDCR(t *testing.T) {
 			}
 
 			// Run cleanup
-			reconciler.cleanupArgoCDCR()
+			reconciler.uninstallArgoCDCR()
 
 			// Verify result
 			argoCD := &unstructured.Unstructured{}
@@ -226,7 +226,7 @@ func TestCleanupArgoCDCR(t *testing.T) {
 	}
 }
 
-func TestCleanupGitOpsDependency(t *testing.T) {
+func TestUninstallGitOpsDependency(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
@@ -236,11 +236,11 @@ func TestCleanupGitOpsDependency(t *testing.T) {
 
 	// This test mainly verifies the function doesn't panic
 	g.Expect(func() {
-		reconciler.cleanupGitOpsDependency()
+		reconciler.uninstallGitOpsDependency()
 	}).ToNot(gomega.Panic())
 }
 
-func TestCleanupGitOpsOperator(t *testing.T) {
+func TestUninstallGitOpsOperator(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
@@ -250,11 +250,11 @@ func TestCleanupGitOpsOperator(t *testing.T) {
 
 	// This test mainly verifies the function doesn't panic
 	g.Expect(func() {
-		reconciler.cleanupGitOpsOperator()
+		reconciler.uninstallGitOpsOperator()
 	}).ToNot(gomega.Panic())
 }
 
-func TestCleanupCRDs(t *testing.T) {
+func TestUninstallCRDs(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
@@ -263,7 +263,7 @@ func TestCleanupCRDs(t *testing.T) {
 
 	// This test mainly verifies the function doesn't panic
 	g.Expect(func() {
-		reconciler.cleanupCRDs()
+		reconciler.uninstallCRDs()
 	}).ToNot(gomega.Panic())
 }
 
@@ -389,6 +389,9 @@ func TestDeleteManifest(t *testing.T) {
 				Client: getTestEnv().Client,
 			}
 
+			// Clean up any existing resource before setup to ensure test isolation
+			_ = reconciler.Delete(context.TODO(), tt.obj)
+
 			// Setup object if needed
 			if tt.setupObject {
 				err := reconciler.Create(context.TODO(), tt.obj)
@@ -414,6 +417,9 @@ func TestDeleteManifest(t *testing.T) {
 			} else if tt.setupObject {
 				g.Expect(err).ToNot(gomega.HaveOccurred()) // Should still exist
 			}
+
+			// Clean up after test to ensure test isolation
+			_ = reconciler.Delete(context.TODO(), tt.obj)
 		})
 	}
 }

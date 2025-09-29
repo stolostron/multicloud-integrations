@@ -71,7 +71,7 @@ var (
 	HTTP_PROXY                  = ""
 	HTTPS_PROXY                 = ""
 	NO_PROXY                    = ""
-	CLEANUP                     = "false"
+	UNINSTALL                   = "false"
 	ARGOCD_AGENT_ENABLED        = "false"
 	ARGOCD_AGENT_IMAGE          = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a"
 	ARGOCD_AGENT_SERVER_ADDRESS = ""
@@ -190,9 +190,9 @@ func main() {
 		ReconcileScope = newReconcileScope
 	}
 
-	newCLEANUP, found := os.LookupEnv("CLEANUP")
-	if found && newCLEANUP > "" {
-		CLEANUP = newCLEANUP
+	newUNINSTALL, found := os.LookupEnv("UNINSTALL")
+	if found && newUNINSTALL > "" {
+		UNINSTALL = newUNINSTALL
 	}
 
 	newArgoCDAgentEnabled, found := os.LookupEnv("ARGOCD_AGENT_ENABLED")
@@ -234,7 +234,7 @@ func main() {
 		"HTTP_PROXY", HTTP_PROXY,
 		"HTTPS_PROXY", HTTPS_PROXY,
 		"NO_PROXY", NO_PROXY,
-		"CLEANUP", CLEANUP,
+		"UNINSTALL", UNINSTALL,
 		"ARGOCD_AGENT_ENABLED", ARGOCD_AGENT_ENABLED,
 		"ARGOCD_AGENT_IMAGE", ARGOCD_AGENT_IMAGE,
 		"ARGOCD_AGENT_SERVER_ADDRESS", ARGOCD_AGENT_SERVER_ADDRESS,
@@ -260,7 +260,7 @@ func main() {
 	}
 
 	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, CLEANUP, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
+		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}
