@@ -20,11 +20,10 @@ spec:
       containers:
       - args:
         - --leader-elect
-        {{- if contains "argoprojlabs" .Values.global.openshift_gitops_operator.image }}
         command:
+        {{- if contains "argoprojlabs" .Values.global.openshift_gitops_operator.image }}
         - /manager
         {{- else }}
-        command:
         - /usr/local/bin/manager
         {{- end }}
         env:

@@ -119,32 +119,12 @@ func TestValidateGitOpsAddonSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "valid Install action",
-			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Action: "Install",
-			},
-		},
-		{
-			name: "valid Delete-Operator action",
-			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Action: "Delete-Operator",
-			},
-		},
-		{
 			name: "invalid reconcile scope",
 			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 				ReconcileScope: "Invalid-Scope",
 			},
 			expectedError: true,
 			errorContains: "invalid ReconcileScope 'Invalid-Scope'",
-		},
-		{
-			name: "invalid action",
-			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Action: "Invalid-Action",
-			},
-			expectedError: true,
-			errorContains: "invalid Action 'Invalid-Action'",
 		},
 		{
 			name: "invalid nested ArgoCDAgent",

@@ -136,8 +136,9 @@ type GitOpsAddonSpec struct {
 	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
 	ReconcileScope string `json:"reconcileScope,omitempty"`
 
-	// Action specifies the action to be performed by the GitOps operator. Default is empty.
-	Action string `json:"action,omitempty"`
+	// Cleanup indicates whether to perform cleanup when the addon is deleted. Default is false.
+	// +kubebuilder:default=false
+	Cleanup *bool `json:"cleanup,omitempty"`
 
 	// ArgoCDAgent defines the configuration for the ArgoCD agent.
 	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
