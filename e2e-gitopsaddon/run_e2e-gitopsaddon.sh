@@ -92,6 +92,7 @@ fi
 
 # Validate uninstall
 kubectl config use-context kind-hub
+kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"overrideExistingConfigs":true}}}'
 kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"uninstall":true}}}'
 sleep 120s
 kubectl config use-context kind-cluster1
