@@ -115,7 +115,7 @@ func TestSetupWithManager(t *testing.T) {
 				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.reconcileScope,
 				tt.httpProxy, tt.httpsProxy, tt.noProxy, tt.uninstall,
 				tt.argoCDAgentEnabled, tt.argoCDAgentImage, tt.argoCDAgentServerAddr,
-				tt.argoCDAgentServerPort, tt.argoCDAgentMode)
+				tt.argoCDAgentServerPort, tt.argoCDAgentMode, "false")
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -199,22 +199,49 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name               string
-		gitopsOperatorNS   string
-		gitopsNS           string
-		argoCDAgentEnabled string
+		name                 string
+		gitopsOperatorNS     string
+		gitopsNS             string
+		argoCDAgentEnabled   string
+		uninstall            string
+		argoCDAgentUninstall string
+		description          string
 	}{
 		{
-			name:               "housekeeping_with_agent_disabled",
-			gitopsOperatorNS:   "openshift-gitops-operator",
-			gitopsNS:           "openshift-gitops",
-			argoCDAgentEnabled: "false",
+			name:                 "housekeeping_install_with_agent_disabled",
+			gitopsOperatorNS:     "openshift-gitops-operator",
+			gitopsNS:             "openshift-gitops",
+			argoCDAgentEnabled:   "false",
+			uninstall:            "false",
+			argoCDAgentUninstall: "false",
+			description:          "Normal install flow",
 		},
 		{
-			name:               "housekeeping_with_agent_enabled",
-			gitopsOperatorNS:   "custom-operator-ns",
-			gitopsNS:           "custom-gitops-ns",
-			argoCDAgentEnabled: "true",
+			name:                 "housekeeping_install_with_agent_enabled",
+			gitopsOperatorNS:     "custom-operator-ns",
+			gitopsNS:             "custom-gitops-ns",
+			argoCDAgentEnabled:   "true",
+			uninstall:            "false",
+			argoCDAgentUninstall: "false",
+			description:          "Install flow with agent enabled",
+		},
+		{
+			name:                 "housekeeping_full_uninstall",
+			gitopsOperatorNS:     "openshift-gitops-operator",
+			gitopsNS:             "openshift-gitops",
+			argoCDAgentEnabled:   "true",
+			uninstall:            "true",
+			argoCDAgentUninstall: "false",
+			description:          "Full uninstall including agent",
+		},
+		{
+			name:                 "housekeeping_agent_only_uninstall",
+			gitopsOperatorNS:     "openshift-gitops-operator",
+			gitopsNS:             "openshift-gitops",
+			argoCDAgentEnabled:   "true",
+			uninstall:            "false",
+			argoCDAgentUninstall: "true",
+			description:          "Agent-only uninstall",
 		},
 	}
 
@@ -222,22 +249,23 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test reconciler with mock client
 			reconciler := &GitopsAddonReconciler{
-				Client:              getTestEnv().Client,
-				Scheme:              getTestEnv().Scheme,
-				Config:              getTestEnv().Config,
-				Interval:            30,
-				GitopsOperatorImage: "test-operator:latest",
-				GitopsOperatorNS:    tt.gitopsOperatorNS,
-				GitopsImage:         "test-gitops:latest",
-				GitopsNS:            tt.gitopsNS,
-				RedisImage:          "test-redis:latest",
-				ReconcileScope:      "Single-Namespace",
-				Uninstall:           "false",
-				ArgoCDAgentEnabled:  tt.argoCDAgentEnabled,
+				Client:               getTestEnv().Client,
+				Scheme:               getTestEnv().Scheme,
+				Config:               getTestEnv().Config,
+				Interval:             30,
+				GitopsOperatorImage:  "test-operator:latest",
+				GitopsOperatorNS:     tt.gitopsOperatorNS,
+				GitopsImage:          "test-gitops:latest",
+				GitopsNS:             tt.gitopsNS,
+				RedisImage:           "test-redis:latest",
+				ReconcileScope:       "Single-Namespace",
+				Uninstall:            tt.uninstall,
+				ArgoCDAgentEnabled:   tt.argoCDAgentEnabled,
+				ArgoCDAgentUninstall: tt.argoCDAgentUninstall,
 			}
 
 			// This test verifies that houseKeeping doesn't panic
-			// The actual functionality is tested in install tests
+			// The actual functionality is tested in install/uninstall tests
 			g.Expect(func() {
 				reconciler.houseKeeping()
 			}).ToNot(gomega.Panic())

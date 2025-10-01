@@ -77,6 +77,7 @@ var (
 	ARGOCD_AGENT_SERVER_ADDRESS = ""
 	ARGOCD_AGENT_SERVER_PORT    = ""
 	ARGOCD_AGENT_MODE           = "managed"
+	ARGOCD_AGENT_UNINSTALL      = "false"
 )
 
 func init() {
@@ -220,6 +221,11 @@ func main() {
 		ARGOCD_AGENT_MODE = newArgoCDAgentMode
 	}
 
+	newArgoCDAgentUninstall, found := os.LookupEnv("ARGOCD_AGENT_UNINSTALL")
+	if found && newArgoCDAgentUninstall > "" {
+		ARGOCD_AGENT_UNINSTALL = newArgoCDAgentUninstall
+	}
+
 	setupLog.Info("Leader election settings",
 		"leaseDuration", options.LeaderElectionLeaseDuration,
 		"renewDeadline", options.LeaderElectionRenewDeadline,
@@ -240,6 +246,7 @@ func main() {
 		"ARGOCD_AGENT_SERVER_ADDRESS", ARGOCD_AGENT_SERVER_ADDRESS,
 		"ARGOCD_AGENT_SERVER_PORT", ARGOCD_AGENT_SERVER_PORT,
 		"ARGOCD_AGENT_MODE", ARGOCD_AGENT_MODE,
+		"ARGOCD_AGENT_UNINSTALL", ARGOCD_AGENT_UNINSTALL,
 	)
 
 	// Create a new Cmd to provide shared dependencies and start components
@@ -260,7 +267,7 @@ func main() {
 	}
 
 	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
+		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE, ARGOCD_AGENT_UNINSTALL); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}

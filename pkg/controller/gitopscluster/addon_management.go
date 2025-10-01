@@ -374,4 +374,10 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 	if argoCDAgent.Mode != "" {
 		managedVariables["ARGOCD_AGENT_MODE"] = argoCDAgent.Mode
 	}
+
+	if argoCDAgent.Uninstall != nil && *argoCDAgent.Uninstall {
+		managedVariables["ARGOCD_AGENT_UNINSTALL"] = "true"
+	} else {
+		managedVariables["ARGOCD_AGENT_UNINSTALL"] = "false"
+	}
 }

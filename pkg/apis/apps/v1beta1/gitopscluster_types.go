@@ -173,6 +173,12 @@ type ArgoCDAgentSpec struct {
 
 	// Mode specifies the ArgoCD agent mode. Default is empty.
 	Mode string `json:"mode,omitempty"`
+
+	// Uninstall indicates whether to uninstall only the ArgoCD agent component. Default is false.
+	// When set to true, only the agent component is uninstalled while keeping the gitopsAddon.
+	// This is different from GitOpsAddonSpec.Uninstall which removes everything.
+	// +kubebuilder:default=false
+	Uninstall *bool `json:"uninstall,omitempty"`
 }
 
 // GitOpsClusterStatus defines the observed state of GitOpsCluster.

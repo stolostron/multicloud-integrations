@@ -56,11 +56,12 @@ type GitopsAddonReconciler struct {
 	ArgoCDAgentServerAddress string
 	ArgoCDAgentServerPort    string
 	ArgoCDAgentMode          string
+	ArgoCDAgentUninstall     string
 }
 
 func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
 	gitopsImage, gitopsNS, redisImage, reconcileScope,
-	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, uninstall, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
+	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, uninstall, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode, argoCDAgentUninstall string) error {
 	dsRS := &GitopsAddonReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
@@ -81,6 +82,7 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		ArgoCDAgentServerAddress: argoCDAgentServerAddress,
 		ArgoCDAgentServerPort:    argoCDAgentServerPort,
 		ArgoCDAgentMode:          argoCDAgentMode,
+		ArgoCDAgentUninstall:     argoCDAgentUninstall,
 	}
 
 	// Setup the secret controller to watch and copy ArgoCD agent client cert secrets
@@ -102,6 +104,8 @@ func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
 func (r *GitopsAddonReconciler) houseKeeping() {
 	if r.Uninstall == "true" {
 		r.performUninstallOperations()
+	} else if r.ArgoCDAgentUninstall == "true" {
+		r.performAgentUninstallOperations()
 	} else {
 		r.installOrUpdateOpenshiftGitops()
 	}

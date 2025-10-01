@@ -90,11 +90,24 @@ if ! kubectl wait -n openshift-gitops \
     exit 1
 fi
 
-# Validate uninstall
+# Validate agent uninstall
 kubectl config use-context kind-hub
 kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"overrideExistingConfigs":true}}}'
+kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"argoCDAgent":{"uninstall":true}}}}'
+sleep 60s
+kubectl config use-context kind-cluster1
+if kubectl -n openshift-gitops get deploy | grep -q agent; then
+    echo "Uninstall failed: agent deployment still exists."
+    exit 1
+else
+    echo "Uninstall successful: agent deployment not found."
+fi
+
+
+# Validate uninstall
+kubectl config use-context kind-hub
 kubectl patch gitopscluster gitopscluster -n openshift-gitops --type='merge' -p '{"spec":{"gitopsAddon":{"uninstall":true}}}'
-sleep 120s
+sleep 60s
 kubectl config use-context kind-cluster1
 if [ -z "$(kubectl -n openshift-gitops get all --no-headers 2>/dev/null)" ]; then
   echo "No resources found in openshift-gitops namespace"
