@@ -70,6 +70,47 @@ func TestPerformUninstallOperations(t *testing.T) {
 	}
 }
 
+func TestPerformAgentUninstallOperations(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name               string
+		argoCDAgentEnabled string
+		expectPanic        bool
+	}{
+		{
+			name:               "agent_uninstall_with_agent_disabled",
+			argoCDAgentEnabled: "false",
+			expectPanic:        false,
+		},
+		{
+			name:               "agent_uninstall_with_agent_enabled",
+			argoCDAgentEnabled: "true",
+			expectPanic:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := &GitopsAddonReconciler{
+				Client:             getTestEnv().Client,
+				GitopsNS:           "test-gitops-ns",
+				ArgoCDAgentEnabled: tt.argoCDAgentEnabled,
+			}
+
+			if tt.expectPanic {
+				g.Expect(func() {
+					reconciler.performAgentUninstallOperations()
+				}).To(gomega.Panic())
+			} else {
+				g.Expect(func() {
+					reconciler.performAgentUninstallOperations()
+				}).ToNot(gomega.Panic())
+			}
+		})
+	}
+}
+
 func TestUninstallArgoCDAgent(t *testing.T) {
 	g := gomega.NewWithT(t)
 

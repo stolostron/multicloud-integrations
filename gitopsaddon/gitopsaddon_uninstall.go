@@ -62,6 +62,20 @@ func (r *GitopsAddonReconciler) performUninstallOperations() {
 	klog.Info("Uninstall requests sent - exiting")
 }
 
+// performAgentUninstallOperations performs uninstall of only ArgoCD agent resources
+func (r *GitopsAddonReconciler) performAgentUninstallOperations() {
+	klog.Info("Starting ArgoCD agent uninstall (agent-only)...")
+
+	// Only delete argocd-agent resources (if enabled)
+	if r.ArgoCDAgentEnabled == "true" {
+		r.uninstallArgoCDAgent()
+	} else {
+		klog.Info("ArgoCD agent is not enabled, nothing to uninstall")
+	}
+
+	klog.Info("ArgoCD agent uninstall requests sent - exiting")
+}
+
 // uninstallArgoCDAgent deletes all resources created by argocd-agent chart
 func (r *GitopsAddonReconciler) uninstallArgoCDAgent() {
 	klog.Info("Uninstall: Deleting argocd-agent resources...")

@@ -21,9 +21,11 @@ spec:
     gitOpsOperatorNamespace: openshift-gitops-operator
     gitOpsNamespace: openshift-gitops
     reconcileScope: Single-Namespace
-    action: Install
     argoCDAgent:
       enabled: true
+      uninstall: false
+      serverAddress: ""
+      serverPort: ""
       mode: managed
       propagateHubCA: true
       image: "registry.redhat.io/openshift-gitops-1/argocd-agent@sha256:..."
