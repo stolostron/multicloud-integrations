@@ -70,6 +70,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
 					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
+					},
 				},
 			},
 			managedClusters: []*spokeclusterv1.ManagedCluster{
@@ -117,6 +120,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
 					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
+					},
 				},
 			},
 			managedClusters: []*spokeclusterv1.ManagedCluster{
@@ -155,6 +161,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
 					},
 				},
 			},
@@ -197,6 +206,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
 					},
 				},
 			},
@@ -253,6 +265,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
 					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
+					},
 				},
 			},
 			managedClusters: []*spokeclusterv1.ManagedCluster{
@@ -306,6 +321,9 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
 					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "openshift-gitops",
+					},
 				},
 			},
 			managedClusters: []*spokeclusterv1.ManagedCluster{
@@ -317,6 +335,44 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 			},
 			existingObjects: []client.Object{},
 			expectedError:   true,
+		},
+		{
+			name: "use custom GitOpsNamespace for managed clusters",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsNamespace: "custom-gitops-namespace",
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-cluster",
+					},
+				},
+			},
+			existingObjects: []client.Object{caSecret},
+			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
+				mw := &workv1.ManifestWork{}
+				err := c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca-mw",
+					Namespace: "test-cluster",
+				}, mw)
+				assert.NoError(t, err)
+
+				// Verify the secret will be created in the custom namespace on managed cluster
+				manifest := mw.Spec.Workload.Manifests[0]
+				secret := &v1.Secret{}
+				err = json.Unmarshal(manifest.RawExtension.Raw, secret)
+				assert.NoError(t, err)
+				assert.Equal(t, "argocd-agent-ca", secret.Name)
+				assert.Equal(t, "custom-gitops-namespace", secret.Namespace)
+				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
+			},
 		},
 	}
 
