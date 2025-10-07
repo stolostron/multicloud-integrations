@@ -33,13 +33,23 @@ import (
 // CreateArgoCDAgentManifestWorks creates ManifestWorks for ArgoCD agent CA certificates on managed clusters
 func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
-	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
-	if argoNamespace == "" {
-		argoNamespace = "openshift-gitops"
+	// Hub namespace - where we read the CA cert from
+	hubNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
+	if hubNamespace == "" {
+		hubNamespace = "openshift-gitops"
 	}
 
-	// Get the CA certificate from the argocd-agent-ca secret
-	caCert, err := r.getArgoCDAgentCACert(argoNamespace)
+	// Managed cluster namespace - where the secret will be created on managed clusters
+	managedNamespace := ""
+	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace != "" {
+		managedNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace
+	}
+	if managedNamespace == "" {
+		managedNamespace = "openshift-gitops"
+	}
+
+	// Get the CA certificate from the argocd-agent-ca secret on the hub
+	caCert, err := r.getArgoCDAgentCACert(hubNamespace)
 	if err != nil {
 		return fmt.Errorf("failed to get ArgoCD agent CA certificate: %w", err)
 	}
@@ -59,7 +69,7 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 			}
 		}
 
-		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, argoNamespace, caCert)
+		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, managedNamespace, caCert)
 
 		// Check if ManifestWork already exists
 		existingMW := &workv1.ManifestWork{}
