@@ -524,16 +524,21 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			}
 		}
 
-		// 3b. Ensure addon-manager-controller RBAC resources exist in GitOps namespace
-		if err := r.ensureAddonManagerRBAC(instance.Namespace); err != nil {
-			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", instance.Namespace, err)
+		// 3b. Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
+		argoNamespace := instance.Spec.ArgoServer.ArgoNamespace
+		if argoNamespace == "" {
+			argoNamespace = "openshift-gitops"
+		}
+
+		if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
+			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
 				map[string]ConditionUpdate{
 					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
-						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources: %v", err),
+						Reason:  gitopsclusterV1beta1.ReasonRBACSetupFailed,
+						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources in ArgoCD namespace: %v", err),
 					},
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
@@ -544,16 +549,16 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			return 3, err
 		}
 
-		// 3c. Ensure argocd-agent-ca secret exists in GitOps namespace
-		if err := r.ensureArgoCDAgentCASecret(instance.Namespace); err != nil {
-			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", instance.Namespace, err)
+		// 3c. Ensure argocd-agent-ca secret exists in ArgoCD namespace
+		if err := r.ensureArgoCDAgentCASecret(argoNamespace); err != nil {
+			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", argoNamespace, err)
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
 				map[string]ConditionUpdate{
 					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
 						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonArgoCDAgentFailed,
-						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret: %v", err),
+						Reason:  gitopsclusterV1beta1.ReasonCASecretSetupFailed,
+						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret in ArgoCD namespace: %v", err),
 					},
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
@@ -564,7 +569,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			return 3, err
 		}
 
-		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) for GitOpsCluster %s/%s in ArgoCD namespace %s", instance.Namespace, instance.Name, argoNamespace)
 	}
 
 	// Check if Hub CA propagation is enabled (default true)
@@ -590,6 +595,12 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	// Create AddOnDeploymentConfig and ManagedClusterAddon for each managed cluster namespace if GitOps addon is enabled
 	if gitopsAddonEnabled {
 		for _, managedCluster := range managedClusters {
+			// Skip local-cluster - addon not needed for hub cluster
+			if IsLocalCluster(managedCluster) {
+				klog.Infof("skipping addon creation for local-cluster: %s", managedCluster.Name)
+				continue
+			}
+
 			err = r.CreateAddOnDeploymentConfig(instance, managedCluster.Name)
 			if err != nil {
 				klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
@@ -911,6 +922,28 @@ func (r *ReconcileGitOpsCluster) GetAllGitOpsClusters() (gitopsclusterV1beta1.Gi
 	}
 
 	return *gitOpsClusterList, nil
+}
+
+// IsLocalCluster checks if a managed cluster is the local cluster (hub cluster)
+// Returns true if the cluster name is "local-cluster" or has the label "local-cluster=true"
+func IsLocalCluster(managedCluster *spokeclusterv1.ManagedCluster) bool {
+	if managedCluster == nil {
+		return false
+	}
+
+	// Check by name
+	if managedCluster.Name == "local-cluster" {
+		return true
+	}
+
+	// Check by label
+	if managedCluster.Labels != nil {
+		if localClusterLabel, exists := managedCluster.Labels["local-cluster"]; exists && localClusterLabel == "true" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // updateGitOpsClusterConditions updates conditions based on the current state while maintaining

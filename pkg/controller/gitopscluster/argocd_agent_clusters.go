@@ -92,6 +92,12 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 	}
 
 	for _, managedCluster := range managedClusters {
+		// Skip local-cluster - ArgoCD agent not needed for hub cluster
+		if IsLocalCluster(managedCluster) {
+			klog.Infof("skipping ArgoCD agent cluster creation for local-cluster: %s", managedCluster.Name)
+			continue
+		}
+
 		clusterName := managedCluster.Name
 
 		// Validate cluster name

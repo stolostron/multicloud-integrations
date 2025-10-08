@@ -194,6 +194,8 @@ func TestGitOpsClusterConditionMethods(t *testing.T) {
 		g.Expect(ReasonCertificateSigningFailed).To(gomega.Equal("CertificateSigningFailed"))
 		g.Expect(ReasonManifestWorkFailed).To(gomega.Equal("ManifestWorkFailed"))
 		g.Expect(ReasonArgoCDAgentFailed).To(gomega.Equal("ArgoCDAgentFailed"))
+		g.Expect(ReasonRBACSetupFailed).To(gomega.Equal("RBACSetupFailed"))
+		g.Expect(ReasonCASecretSetupFailed).To(gomega.Equal("CASecretSetupFailed"))
 	})
 
 	t.Run("DeepCopy works correctly with conditions", func(t *testing.T) {
