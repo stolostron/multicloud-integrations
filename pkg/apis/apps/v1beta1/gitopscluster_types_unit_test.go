@@ -383,6 +383,8 @@ func TestGitOpsClusterConstants(t *testing.T) {
 	assert.Equal(t, "CertificateSigningFailed", ReasonCertificateSigningFailed)
 	assert.Equal(t, "ManifestWorkFailed", ReasonManifestWorkFailed)
 	assert.Equal(t, "ArgoCDAgentFailed", ReasonArgoCDAgentFailed)
+	assert.Equal(t, "RBACSetupFailed", ReasonRBACSetupFailed)
+	assert.Equal(t, "CASecretSetupFailed", ReasonCASecretSetupFailed)
 }
 
 func TestGitOpsClusterSpec_DefaultValues(t *testing.T) {

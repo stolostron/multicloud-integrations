@@ -56,17 +56,9 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 
 	for _, managedCluster := range managedClusters {
 		// Skip local-cluster - don't create ManifestWork for local cluster
-		if managedCluster.Name == "local-cluster" {
+		if IsLocalCluster(managedCluster) {
 			klog.Infof("skipping ManifestWork creation for local-cluster: %s", managedCluster.Name)
 			continue
-		}
-
-		// Skip clusters with local-cluster: "true" label
-		if managedCluster.Labels != nil {
-			if localClusterLabel, exists := managedCluster.Labels["local-cluster"]; exists && localClusterLabel == "true" {
-				klog.Infof("skipping ManifestWork creation for cluster with local-cluster=true label: %s", managedCluster.Name)
-				continue
-			}
 		}
 
 		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, managedNamespace, caCert)
@@ -270,15 +262,8 @@ func (r *ReconcileGitOpsCluster) MarkArgoCDAgentManifestWorksAsOutdated(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
 	for _, managedCluster := range managedClusters {
 		// Skip local-cluster - same logic as in CreateArgoCDAgentManifestWorks
-		if managedCluster.Name == "local-cluster" {
+		if IsLocalCluster(managedCluster) {
 			continue
-		}
-
-		// Skip clusters with local-cluster: "true" label
-		if managedCluster.Labels != nil {
-			if localClusterLabel, exists := managedCluster.Labels["local-cluster"]; exists && localClusterLabel == "true" {
-				continue
-			}
 		}
 
 		// Check if ManifestWork exists

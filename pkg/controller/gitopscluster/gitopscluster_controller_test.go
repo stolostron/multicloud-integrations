@@ -1484,3 +1484,91 @@ func createTestArgoCDAgentPrincipalService(namespace string) *v1.Service {
 		},
 	}
 }
+
+func TestIsLocalCluster(t *testing.T) {
+	tests := []struct {
+		name           string
+		managedCluster *spokeclusterv1.ManagedCluster
+		expected       bool
+	}{
+		{
+			name:           "nil cluster",
+			managedCluster: nil,
+			expected:       false,
+		},
+		{
+			name: "cluster named local-cluster",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "local-cluster",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "cluster with local-cluster label set to true",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-hub-cluster",
+					Labels: map[string]string{
+						"local-cluster": "true",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "cluster with local-cluster label set to false",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "regular-cluster",
+					Labels: map[string]string{
+						"local-cluster": "false",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "regular remote cluster",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "remote-cluster",
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "cluster with other labels",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "cluster-with-labels",
+					Labels: map[string]string{
+						"environment": "production",
+						"region":      "us-east-1",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "local-cluster name takes precedence over label",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "local-cluster",
+					Labels: map[string]string{
+						"local-cluster": "false",
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsLocalCluster(tt.managedCluster)
+			assert.Equal(t, tt.expected, result, "IsLocalCluster result mismatch")
+		})
+	}
+}

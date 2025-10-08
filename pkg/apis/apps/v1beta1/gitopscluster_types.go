@@ -68,6 +68,8 @@ const (
 	ReasonCertificateSigningFailed  = "CertificateSigningFailed"
 	ReasonManifestWorkFailed        = "ManifestWorkFailed"
 	ReasonArgoCDAgentFailed         = "ArgoCDAgentFailed"
+	ReasonRBACSetupFailed           = "RBACSetupFailed"
+	ReasonCASecretSetupFailed       = "CASecretSetupFailed"
 )
 
 // +kubebuilder:object:root=true
