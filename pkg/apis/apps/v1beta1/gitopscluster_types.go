@@ -43,6 +43,10 @@ const (
 	// (like JWT secrets and configuration) are properly set up.
 	GitOpsClusterArgoCDAgentPrereqsReady = "ArgoCDAgentPrereqsReady"
 
+	// GitOpsClusterGitOpsAddonPrereqsReady indicates whether the GitOps addon prerequisites
+	// (like RBAC resources and CA secrets) are properly set up.
+	GitOpsClusterGitOpsAddonPrereqsReady = "GitOpsAddonPrereqsReady"
+
 	// GitOpsClusterCertificatesReady indicates whether ArgoCD agent certificates are properly
 	// signed and ready for use.
 	GitOpsClusterCertificatesReady = "CertificatesReady"
