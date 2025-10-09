@@ -31,6 +31,7 @@ import (
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1183,6 +1184,7 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 				},
 				createTestArgoCDServerService("argocd"),
 				createTestArgoCDServerPod("argocd"),
+				createTestSourceCASecret(), // Source CA secret needed for ensureArgoCDAgentCASecret
 			},
 			expectedCondition: string(metav1.ConditionTrue),
 			expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
@@ -1409,6 +1411,20 @@ func createTestArgoCDJWTSecret(namespace string) *v1.Secret {
 		},
 		Data: map[string][]byte{
 			"signing-key": []byte("test-jwt-key"),
+		},
+	}
+}
+
+func createTestSourceCASecret() *v1.Secret {
+	return &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "multicluster-operators-application-svc-ca",
+			Namespace: utils.GetComponentNamespace("open-cluster-management"),
+		},
+		Type: v1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("test-ca-certificate"),
+			"tls.key": []byte("test-ca-key"),
 		},
 	}
 }

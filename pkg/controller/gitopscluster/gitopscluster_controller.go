@@ -523,53 +523,6 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				klog.Infof("updated GitOpsCluster %s/%s with auto-discovered server address/port", instance.Namespace, instance.Name)
 			}
 		}
-
-		// 3b. Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
-		argoNamespace := instance.Spec.ArgoServer.ArgoNamespace
-		if argoNamespace == "" {
-			argoNamespace = "openshift-gitops"
-		}
-
-		if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
-			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
-			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonRBACSetupFailed,
-						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources in ArgoCD namespace: %v", err),
-					},
-				})
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after RBAC setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
-			}
-			return 3, err
-		}
-
-		// 3c. Ensure argocd-agent-ca secret exists in ArgoCD namespace
-		if err := r.ensureArgoCDAgentCASecret(argoNamespace); err != nil {
-			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", argoNamespace, err)
-			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonCASecretSetupFailed,
-						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret in ArgoCD namespace: %v", err),
-					},
-				})
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after CA secret setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
-			}
-			return 3, err
-		}
-
-		klog.Infof("Successfully ensured ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) for GitOpsCluster %s/%s in ArgoCD namespace %s", instance.Namespace, instance.Name, argoNamespace)
 	}
 
 	// Check if Hub CA propagation is enabled (default true)
@@ -594,6 +547,53 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// Create AddOnDeploymentConfig and ManagedClusterAddon for each managed cluster namespace if GitOps addon is enabled
 	if gitopsAddonEnabled {
+		// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
+		argoNamespace := instance.Spec.ArgoServer.ArgoNamespace
+		if argoNamespace == "" {
+			argoNamespace = "openshift-gitops"
+		}
+
+		if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
+			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
+			r.updateGitOpsClusterConditions(instance, "failed",
+				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterGitOpsAddonPrereqsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonRBACSetupFailed,
+						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources in ArgoCD namespace: %v", err),
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after RBAC setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+			return 3, err
+		}
+
+		// Ensure argocd-agent-ca secret exists in ArgoCD namespace
+		if err := r.ensureArgoCDAgentCASecret(argoNamespace); err != nil {
+			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", argoNamespace, err)
+			r.updateGitOpsClusterConditions(instance, "failed",
+				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterGitOpsAddonPrereqsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCASecretSetupFailed,
+						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret in ArgoCD namespace: %v", err),
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after CA secret setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+			return 3, err
+		}
+
+		klog.Infof("Successfully ensured GitOps addon prerequisites (RBAC and CA secret) for GitOpsCluster %s/%s in ArgoCD namespace %s", instance.Namespace, instance.Name, argoNamespace)
+
 		for _, managedCluster := range managedClusters {
 			// Skip local-cluster - addon not needed for hub cluster
 			if IsLocalCluster(managedCluster) {
