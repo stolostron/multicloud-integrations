@@ -19,15 +19,17 @@ package application
 import (
 	"crypto/sha1" // #nosec G505 not used for encryption
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog"
 
+	coreV1 "k8s.io/api/core/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 )
 
@@ -138,7 +140,7 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 		Version: "v1alpha1",
 		Kind:    "Application",
 	})
-	newApp.SetNamespace(generateAppNamespace(application.GetNamespace(), application.GetAnnotations()))
+	newApp.SetNamespace(application.GetNamespace())
 	newApp.SetName(application.GetName())
 	newApp.SetFinalizers(application.GetFinalizers())
 
@@ -152,6 +154,8 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 		if destination, ok := newSpec["destination"].(map[string]interface{}); ok {
 			// empty the name
 			destination["name"] = ""
+			// always deploy resources to the app namespace
+			destination["namespace"] = application.GetNamespace()
 			// always set for in-cluster destination
 			destination["server"] = KubernetesInternalAPIServerAddr
 		}
@@ -195,77 +199,32 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 	return *newApp
 }
 
-// generateManifestWork creates the ManifestWork that wraps the Application as payload
-// With the status sync feedback of Application's health status and sync status.
-// The Application payload Spec Destination values are modified so that the Application is always performing in-cluster resource deployments.
-// If the Application is generated from an ApplicationSet, custom label and annotation are inserted.
-func generateManifestWork(name, namespace string, app *unstructured.Unstructured) (*workv1.ManifestWork, error) {
-	workLabels := map[string]string{
-		LabelKeyPull: strconv.FormatBool(true),
-	}
+func prepareManifestWorkNS(appsubNS string) (string, error) {
+	var err error
 
-	workAnnos := map[string]string{
-		AnnotationKeyHubApplicationNamespace: app.GetNamespace(),
-		AnnotationKeyHubApplicationName:      app.GetName(),
-	}
-
-	appSetOwnerName := getAppSetOwnerName(app.GetOwnerReferences())
-	if appSetOwnerName != "" {
-		appSetHash, err := GenerateManifestWorkAppSetHashLabelValue(app.GetNamespace(), appSetOwnerName)
-		if err != nil {
-			return nil, err
-		}
-
-		workLabels = map[string]string{
-			LabelKeyAppSet:     strconv.FormatBool(true),
-			LabelKeyAppSetHash: appSetHash}
-		workAnnos[AnnotationKeyAppSet] = app.GetNamespace() + "/" + appSetOwnerName
-	}
-
-	application := prepareApplicationForWorkPayload(app)
-
-	return &workv1.ManifestWork{
-		TypeMeta: metav1.TypeMeta{},
+	endpointNS := &coreV1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Namespace",
+			APIVersion: "v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   namespace,
-			Labels:      workLabels,
-			Annotations: workAnnos,
-		},
-		Spec: workv1.ManifestWorkSpec{
-			Workload: workv1.ManifestsTemplate{
-				Manifests: []workv1.Manifest{{RawExtension: runtime.RawExtension{Object: &application}}},
+			Name: appsubNS,
+			Annotations: map[string]string{
+				"argocd.argoproj.io/sync-options": "Delete=false",
 			},
-			ManifestConfigs: []workv1.ManifestConfigOption{
-				{
-					ResourceIdentifier: workv1.ResourceIdentifier{
-						Group:     "argoproj.io",
-						Resource:  "applications",
-						Namespace: application.GetNamespace(),
-						Name:      application.GetName(),
-					},
-					FeedbackRules: []workv1.FeedbackRule{
-						{Type: workv1.JSONPathsType, JsonPaths: []workv1.JsonPath{{Name: "healthStatus", Path: ".status.health.status"}}},
-						{Type: workv1.JSONPathsType, JsonPaths: []workv1.JsonPath{{Name: "syncStatus", Path: ".status.sync.status"}}},
-						{Type: workv1.JSONPathsType, JsonPaths: []workv1.JsonPath{{Name: "operationStateStartedAt", Path: ".status.operationState.startedAt"}}},
-						{Type: workv1.JSONPathsType, JsonPaths: []workv1.JsonPath{{Name: "operationStatePhase", Path: ".status.operationState.phase"}}},
-						{Type: workv1.JSONPathsType, JsonPaths: []workv1.JsonPath{{Name: "syncRevision", Path: ".status.sync.revision"}}},
-					},
-					UpdateStrategy: &workv1.UpdateStrategy{
-						Type: workv1.UpdateStrategyTypeServerSideApply,
-						ServerSideApply: &workv1.ServerSideApplyConfig{
-							Force: true,
-							IgnoreFields: []workv1.IgnoreField{
-								{
-									Condition: workv1.IgnoreFieldsConditionOnSpokeChange,
-									// Ignore changes to operation field and refresh annotation (handles all values: normal, hard, etc.)
-									JSONPaths: []string{".operation", ".metadata.annotations[\"argocd.argoproj.io/refresh\"]"},
-								},
-							},
-						},
-					},
-				},
+			Labels: map[string]string{
+				"argocd.argoproj.io/managed-by": "openshift-gitops",
 			},
 		},
-	}, nil
+	}
+
+	klog.V(1).Infof("new local endpointNS: %#v", endpointNS)
+
+	manifestNSByte, err := json.Marshal(endpointNS)
+	if err != nil {
+		klog.Info("Error in mashalling endpointNS obj ", err)
+		return "", err
+	}
+
+	return string(manifestNSByte), nil
 }

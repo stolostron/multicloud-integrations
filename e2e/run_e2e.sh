@@ -171,13 +171,13 @@ else
     echo "Propagation FAILED: application does not contain operation RollingSync"
     exit 1
 fi
-if kubectl get namespace guestbook; then
-    echo "Propagation: guestbook namespace created"
+if kubectl get namespace argocd; then
+    echo "Propagation: argocd namespace created"
 else
-    echo "Propagation FAILED: guestbook namespace not created"
+    echo "Propagation FAILED: argocd namespace not created"
     exit 1
 fi
-if kubectl -n guestbook get deploy guestbook-ui; then
+if kubectl -n argocd get deploy guestbook-ui; then
     echo "Propagation: guestbook-ui deploy created"
 else
     echo "Propagation FAILED: guestbook-ui deploy not created"

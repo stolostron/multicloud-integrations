@@ -29,6 +29,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+var (
+	boolTrue    = true
+	boolTruePtr = &boolTrue
+)
+
 func TestCreateAddOnDeploymentConfig(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := addonv1alpha1.AddToScheme(scheme)
@@ -89,7 +94,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 
 				// Verify expected variables are set
 				expectedVars := map[string]string{
-					"ARGOCD_AGENT_ENABLED":        "true",
+					"ARGOCD_AGENT_ENABLED":        "false",
 					"GITOPS_OPERATOR_IMAGE":       "test-operator-image:latest",
 					"GITOPS_IMAGE":                "test-gitops-image:latest",
 					"REDIS_IMAGE":                 "test-redis-image:latest",
@@ -121,6 +126,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						GitOpsOperatorImage: "updated-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled:       boolTruePtr,
 							Image:         "updated-agent-image:latest",
 							ServerAddress: "updated-server.com",
 						},
@@ -218,7 +224,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				assert.Equal(t, "new-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Managed variable should be overridden")
 				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "Managed variable should be overridden")
 				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
-				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be present")
+				assert.Equal(t, "false", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be be false")
 			},
 		},
 		{
@@ -234,6 +240,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 						OverrideExistingConfigs: func(b bool) *bool { return &b }(false),
 						GitOpsOperatorImage:     "new-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled:       boolTruePtr,
 							Image:         "new-agent-image:latest",
 							ServerAddress: "new-server.com",
 						},
@@ -598,6 +605,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 						GitOpsNamespace:         "gitops-ns",
 						ReconcileScope:          "All-Namespaces",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled:       boolTruePtr,
 							Image:         "agent-image:v1.0",
 							ServerAddress: "server.example.com",
 							ServerPort:    "443",
@@ -633,6 +641,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 						GitOpsOperatorImage: "operator-image:v1.0",
 						// Other fields are empty/nil
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled:       boolTruePtr,
 							ServerAddress: "server.example.com",
 							// Other fields are empty
 						},

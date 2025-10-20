@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	yaml "gopkg.in/yaml.v3"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/engine"
@@ -85,38 +84,6 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 			},
 		}
 		values["global"] = global
-
-	case "charts/openshift-gitops-dependency":
-		// Parse the gitops and redis images
-		gitopsImage, gitopsTag, err := ParseImageReference(r.GitopsImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse GitopsImage: %w", err)
-		}
-
-		redisImage, redisTag, err := ParseImageReference(r.RedisImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse RedisImage: %w", err)
-		}
-
-		// Set up global values for openshift-gitops-dependency chart
-		global := map[string]interface{}{
-			"application_controller": map[string]interface{}{
-				"image": gitopsImage,
-				"tag":   gitopsTag,
-			},
-			"redis": map[string]interface{}{
-				"image": redisImage,
-				"tag":   redisTag,
-			},
-			"reconcile_scope": r.ReconcileScope,
-			"proxyConfig": map[string]interface{}{
-				"HTTP_PROXY":  r.HTTP_PROXY,
-				"HTTPS_PROXY": r.HTTPS_PROXY,
-				"NO_PROXY":    r.NO_PROXY,
-			},
-		}
-		values["global"] = global
-
 	case "charts/argocd-agent":
 		// Parse the agent image
 		agentImage, agentTag, err := ParseImageReference(r.ArgoCDAgentImage)
@@ -242,21 +209,7 @@ func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPat
 				return err
 			}
 
-			// Handle special value files that need updates
-			if strings.HasSuffix(entry.Name(), "values.yaml") {
-				switch {
-				case strings.Contains(srcPath, "openshift-gitops-operator"):
-					err = r.updateOperatorValueYaml(fs, srcEntryPath, destEntryPath)
-				case strings.Contains(srcPath, "openshift-gitops-dependency"):
-					err = r.updateDependencyValueYaml(fs, srcEntryPath, destEntryPath)
-				case strings.Contains(srcPath, "argocd-agent"):
-					err = r.updateArgoCDAgentValueYaml(fs, srcEntryPath, destEntryPath)
-				default:
-					err = os.WriteFile(destEntryPath, data, 0600)
-				}
-			} else {
-				err = os.WriteFile(destEntryPath, data, 0600)
-			}
+			err = os.WriteFile(destEntryPath, data, 0600)
 
 			if err != nil {
 				return err
@@ -288,7 +241,39 @@ func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, nam
 		return fmt.Errorf("failed to load chart: %v", err)
 	}
 
+	// Prepare values for templating
 	values := map[string]interface{}{}
+
+	// Parse the gitops and redis images
+	gitopsImage, gitopsTag, err := ParseImageReference(r.GitopsImage)
+	if err != nil {
+		return fmt.Errorf("failed to parse GitopsImage: %w", err)
+	}
+
+	redisImage, redisTag, err := ParseImageReference(r.RedisImage)
+	if err != nil {
+		return fmt.Errorf("failed to parse RedisImage: %w", err)
+	}
+
+	// Set up global values for openshift-gitops-dependency chart
+	global := map[string]interface{}{
+		"application_controller": map[string]interface{}{
+			"image": gitopsImage,
+			"tag":   gitopsTag,
+		},
+		"redis": map[string]interface{}{
+			"image": redisImage,
+			"tag":   redisTag,
+		},
+		"reconcile_scope": r.ReconcileScope,
+		"proxyConfig": map[string]interface{}{
+			"HTTP_PROXY":  r.HTTP_PROXY,
+			"HTTPS_PROXY": r.HTTPS_PROXY,
+			"NO_PROXY":    r.NO_PROXY,
+		},
+	}
+	values["global"] = global
+
 	options := chartutil.ReleaseOptions{
 		Name:      "openshift-gitops-dependency",
 		Namespace: namespace,
@@ -446,161 +431,6 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	klog.Infof("Updating %s/%s %s", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 	return r.Update(context.TODO(), obj)
-}
-
-// updateOperatorValueYaml updates the operator chart values.yaml with current configuration
-func (r *GitopsAddonReconciler) updateOperatorValueYaml(fs embed.FS, sourcePath, destFilePath string) error {
-	file, err := fs.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var values map[string]interface{}
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&values); err != nil {
-		return err
-	}
-
-	// Update operator values
-	if values["operator"] == nil {
-		values["operator"] = make(map[string]interface{})
-	}
-	operator := values["operator"].(map[string]interface{})
-	operator["image"] = r.GitopsOperatorImage
-
-	// Set proxy settings if provided
-	if r.HTTP_PROXY != "" || r.HTTPS_PROXY != "" || r.NO_PROXY != "" {
-		if operator["env"] == nil {
-			operator["env"] = make([]map[string]interface{}, 0)
-		}
-		envList := operator["env"].([]map[string]interface{})
-
-		if r.HTTP_PROXY != "" {
-			envList = append(envList, map[string]interface{}{"name": "HTTP_PROXY", "value": r.HTTP_PROXY})
-		}
-		if r.HTTPS_PROXY != "" {
-			envList = append(envList, map[string]interface{}{"name": "HTTPS_PROXY", "value": r.HTTPS_PROXY})
-		}
-		if r.NO_PROXY != "" {
-			envList = append(envList, map[string]interface{}{"name": "NO_PROXY", "value": r.NO_PROXY})
-		}
-		operator["env"] = envList
-	}
-
-	// Write updated values to destination
-	outFile, err := os.Create(filepath.Clean(destFilePath))
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	encoder := yaml.NewEncoder(outFile)
-	defer encoder.Close()
-	return encoder.Encode(values)
-}
-
-// updateDependencyValueYaml updates the dependency chart values.yaml
-func (r *GitopsAddonReconciler) updateDependencyValueYaml(fs embed.FS, sourcePath, destFilePath string) error {
-	file, err := fs.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var values map[string]interface{}
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&values); err != nil {
-		return err
-	}
-
-	// Update ArgoCD values
-	if values["argocd"] == nil {
-		values["argocd"] = make(map[string]interface{})
-	}
-	argocd := values["argocd"].(map[string]interface{})
-
-	if argocd["image"] == nil {
-		argocd["image"] = make(map[string]interface{})
-	}
-	image := argocd["image"].(map[string]interface{})
-	image["repository"], image["tag"] = parseImageComponents(r.GitopsImage)
-
-	// Update Redis values
-	if values["redis"] == nil {
-		values["redis"] = make(map[string]interface{})
-	}
-	redis := values["redis"].(map[string]interface{})
-
-	if redis["image"] == nil {
-		redis["image"] = make(map[string]interface{})
-	}
-	redisImage := redis["image"].(map[string]interface{})
-	redisImage["repository"], redisImage["tag"] = parseImageComponents(r.RedisImage)
-
-	// Set reconcile scope
-	if values["global"] == nil {
-		values["global"] = make(map[string]interface{})
-	}
-	global := values["global"].(map[string]interface{})
-	global["reconcileScope"] = r.ReconcileScope
-
-	// Write updated values to destination
-	outFile, err := os.Create(filepath.Clean(destFilePath))
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	encoder := yaml.NewEncoder(outFile)
-	defer encoder.Close()
-	return encoder.Encode(values)
-}
-
-// updateArgoCDAgentValueYaml updates the ArgoCD agent chart values.yaml
-func (r *GitopsAddonReconciler) updateArgoCDAgentValueYaml(fs embed.FS, sourcePath, destFilePath string) error {
-	file, err := fs.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var values map[string]interface{}
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&values); err != nil {
-		return err
-	}
-
-	// Update agent values
-	if values["agent"] == nil {
-		values["agent"] = make(map[string]interface{})
-	}
-	agent := values["agent"].(map[string]interface{})
-
-	// Set agent image
-	agent["image"] = r.ArgoCDAgentImage
-
-	// Set server connection details
-	if r.ArgoCDAgentServerAddress != "" {
-		agent["serverAddress"] = r.ArgoCDAgentServerAddress
-	}
-	if r.ArgoCDAgentServerPort != "" {
-		agent["serverPort"] = r.ArgoCDAgentServerPort
-	}
-
-	// Set agent mode
-	agent["mode"] = r.ArgoCDAgentMode
-
-	// Write updated values to destination
-	outFile, err := os.Create(filepath.Clean(destFilePath))
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	encoder := yaml.NewEncoder(outFile)
-	defer encoder.Close()
-	return encoder.Encode(values)
 }
 
 // applyCRDIfNotExists applies a CRD only if it doesn't already exist

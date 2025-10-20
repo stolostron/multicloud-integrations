@@ -43,6 +43,7 @@ kubectl apply -f e2e/hub/dummy-application-svc-ca-secret.yaml
 kubectl apply -f gitopsaddon/addonTemplates/clusterManagementAddon.yaml
 kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml
 kubectl apply -f deploy/crds/apps.open-cluster-management.io_gitopsclusters.yaml
+kubectl apply -f deploy/crds/apps.open-cluster-management.io_multiclusterapplicationsetreports.yaml
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
 kubectl apply -f deploy/controller/
 kubectl apply -f e2e-gitopsaddon/gitopscluster

@@ -28,6 +28,7 @@ import (
 
 	"github.com/openshift-online/maestro/pkg/api/openapi"
 	"github.com/openshift-online/maestro/pkg/client/cloudevents/grpcsource"
+	"github.com/openshift-online/ocm-sdk-go/logging"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -125,12 +126,18 @@ func BuildWorkClient(ctx context.Context, maestroServerAddr, grpcServerAddr stri
 		},
 	})
 
+	logger, err := logging.NewStdLoggerBuilder().Debug(true).Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build logger, err: %w", err)
+	}
+
 	grpcOptions := grpc.NewGRPCOptions()
 	grpcOptions.Dialer = &grpc.GRPCDialer{}
 	grpcOptions.Dialer.URL = grpcServerAddr
 
 	workClient, err := grpcsource.NewMaestroGRPCSourceWorkClient(
 		ctx,
+		logger,
 		maestroAPIClient,
 		grpcOptions,
 		"app-work-client",
