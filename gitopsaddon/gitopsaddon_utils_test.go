@@ -20,7 +20,6 @@ import (
 	"context"
 	"embed"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/onsi/gomega"
@@ -317,96 +316,6 @@ func TestApplyManifestSelectively(t *testing.T) {
 			} else {
 				g.Expect(err).ToNot(gomega.HaveOccurred())
 			}
-		})
-	}
-}
-
-func TestUpdateValueYamlFiles(t *testing.T) {
-	t.Skip("Skipping due to file system conflicts in test environment")
-	g := gomega.NewWithT(t)
-
-	// Create test reconciler with sample values
-	reconciler := &GitopsAddonReconciler{
-		GitopsOperatorImage:      "test-operator:v1.0.0",
-		GitopsImage:              "test-gitops:v1.0.0",
-		RedisImage:               "test-redis:v1.0.0",
-		ReconcileScope:           "Single-Namespace",
-		HTTP_PROXY:               "http://proxy:8080",
-		HTTPS_PROXY:              "https://proxy:8080",
-		NO_PROXY:                 "localhost",
-		ArgoCDAgentImage:         "test-agent:v1.0.0",
-		ArgoCDAgentServerAddress: "server.example.com",
-		ArgoCDAgentServerPort:    "443",
-		ArgoCDAgentMode:          "managed",
-	}
-
-	tests := []struct {
-		name       string
-		testFunc   func(embed.FS, string, string) error
-		sourceData string
-	}{
-		{
-			name: "update_operator_values",
-			testFunc: func(fs embed.FS, source, dest string) error {
-				return reconciler.updateOperatorValueYaml(fs, source, dest)
-			},
-			sourceData: `operator:
-  image: ""
-`,
-		},
-		{
-			name: "update_dependency_values",
-			testFunc: func(fs embed.FS, source, dest string) error {
-				return reconciler.updateDependencyValueYaml(fs, source, dest)
-			},
-			sourceData: `argocd:
-  image:
-    repository: ""
-    tag: ""
-redis:
-  image:
-    repository: ""
-    tag: ""
-global:
-  reconcileScope: ""
-`,
-		},
-		{
-			name: "update_agent_values",
-			testFunc: func(fs embed.FS, source, dest string) error {
-				return reconciler.updateArgoCDAgentValueYaml(fs, source, dest)
-			},
-			sourceData: `agent:
-  image: ""
-  serverAddress: ""
-  serverPort: ""
-  mode: ""
-`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create temp directory
-			tempDir, err := os.MkdirTemp("", "values-test-*")
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-			defer os.RemoveAll(tempDir)
-
-			// Create source file
-			sourceFile := filepath.Join(tempDir, "values.yaml")
-			err = os.WriteFile(sourceFile, []byte(tt.sourceData), 0644)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// Create destination file path
-			destFile := filepath.Join(tempDir, "dest-values.yaml")
-
-			// Create a simple embed.FS mock
-			err = tt.testFunc(testFS, sourceFile, destFile)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// Verify destination file was created
-			_, err = os.Stat(destFile)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	}
 }

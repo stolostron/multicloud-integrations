@@ -22,9 +22,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func Test_containsValidPullLabel(t *testing.T) {
@@ -358,8 +360,9 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 				expectedApp.SetAnnotations(map[string]string{})
 				expectedApp.Object["spec"] = map[string]interface{}{
 					"destination": map[string]interface{}{
-						"name":   "",
-						"server": KubernetesInternalAPIServerAddr,
+						"name":      "",
+						"server":    KubernetesInternalAPIServerAddr,
+						"namespace": "argocd",
 					},
 				}
 				expectedApp.Object["operation"] = map[string]interface{}{
@@ -429,7 +432,7 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 					"kind":       "Application",
 					"metadata": map[string]interface{}{
 						"name":      "app1",
-						"namespace": "test-ns", // Uses custom namespace from annotation
+						"namespace": "argocd", // the application ns remains regardless of custom namespace from annotation
 						"annotations": map[string]interface{}{
 							AnnotationKeyAppRefresh: "normal",
 							"other.annotation":      "preserve-me",
@@ -445,7 +448,7 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 						"destination": map[string]interface{}{
 							"name":      "",
 							"server":    KubernetesInternalAPIServerAddr,
-							"namespace": "test",
+							"namespace": "argocd",
 						},
 					},
 					"operation": map[string]interface{}{
@@ -515,8 +518,38 @@ func Test_generateManifestWork(t *testing.T) {
 		},
 	})
 	app.SetFinalizers([]string{ResourcesFinalizerName})
+	app.Object["spec"] = map[string]interface{}{
+		"project": "default",
+	}
+
+	// Create a fake AppProject for testing
+	appProject := &unstructured.Unstructured{}
+	appProject.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "argoproj.io",
+		Version: "v1alpha1",
+		Kind:    "AppProject",
+	})
+	appProject.SetName("default")
+	appProject.SetNamespace("openshift-gitops")
+	appProject.Object["spec"] = map[string]interface{}{
+		"sourceRepos": []interface{}{"*"},
+		"destinations": []interface{}{
+			map[string]interface{}{
+				"namespace": "*",
+				"server":    "*",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(appProject).Build()
+	reconciler := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
 
 	type args struct {
+		reconciler  *ApplicationReconciler
 		name        string
 		namespace   string
 		application *unstructured.Unstructured
@@ -534,6 +567,7 @@ func Test_generateManifestWork(t *testing.T) {
 		{
 			name: "sunny",
 			args: args{
+				reconciler:  reconciler,
 				name:        "app1-abcde",
 				namespace:   "cluster1",
 				application: app,
@@ -554,7 +588,7 @@ func Test_generateManifestWork(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := generateManifestWork(tt.args.name, tt.args.namespace, tt.args.application)
+			got, err := tt.args.reconciler.generateManifestWork(tt.args.name, tt.args.namespace, tt.args.application)
 			if err != nil {
 				t.Errorf("generateManifestWork() = got err %v", err)
 			}

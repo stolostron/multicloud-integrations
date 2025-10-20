@@ -37,7 +37,7 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 
 	// Define variables managed by GitOpsCluster controller - only ArgoCD agent related variables
 	managedVariables := map[string]string{
-		"ARGOCD_AGENT_ENABLED": "true", // Only default we set
+		"ARGOCD_AGENT_ENABLED": "false", // Only default we set
 	}
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
@@ -357,6 +357,10 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitopsclusterV1beta1.ArgoCDAgentSpec, managedVariables map[string]string) {
 	if argoCDAgent == nil {
 		return
+	}
+
+	if argoCDAgent.Enabled != nil && *argoCDAgent.Enabled {
+		managedVariables["ARGOCD_AGENT_ENABLED"] = "true"
 	}
 
 	if argoCDAgent.Image != "" {
