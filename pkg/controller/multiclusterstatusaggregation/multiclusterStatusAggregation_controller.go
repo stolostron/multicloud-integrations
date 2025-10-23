@@ -135,6 +135,7 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 	var (
 		limit         int64 = 500
 		continueToken string
+		usePagination = true
 	)
 
 	appSetRequirement, err := labels.NewRequirement(propagation.LabelKeyAppSet, selection.Exists, []string{})
@@ -153,12 +154,23 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 
 		listopts := &client.ListOptions{
 			LabelSelector: appSetSelector,
-			Limit:         limit,
-			Continue:      continueToken,
+		}
+
+		if usePagination {
+			listopts.Limit = limit
+			listopts.Continue = continueToken
 		}
 
 		err = r.List(context.TODO(), appSetClusterList, listopts) // list upto limit # of manifestworks
 		if err != nil {
+			// Check if the error is due to pagination not being supported (e.g., in test environments)
+			if strings.Contains(err.Error(), "continue list option is not supported") && usePagination {
+				klog.Info("Pagination not supported, retrying without pagination")
+				usePagination = false
+
+				continue
+			}
+
 			klog.Errorf("Failed to list Argo Application manifestWorks, err: %v", err)
 
 			return err
@@ -231,6 +243,11 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 		}
 
 		klog.V(1).Infof("AppSet Map: %v", appSetClusterStatusMap)
+
+		// If pagination is not being used, break after first iteration
+		if !usePagination {
+			break
+		}
 
 		if continueToken = appSetClusterList.GetContinue(); continueToken == "" {
 			break

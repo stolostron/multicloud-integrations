@@ -591,6 +591,9 @@ func TestReconcilePullModel(t *testing.T) {
 		{Name: "healthStatus", Value: v1.FieldValue{Type: v1.String, String: &healthy}},
 		{Name: "syncStatus", Value: v1.FieldValue{Type: v1.String, String: &synced}}}))
 
+	// wait for controller to process the long-resource-name manifestwork
+	time.Sleep(6 * time.Second)
+
 	// verify truncating label is working properly
 	appsetReport := &appsetreportV1alpha1.MulticlusterApplicationSetReport{}
 	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops",
