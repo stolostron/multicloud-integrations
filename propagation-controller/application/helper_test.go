@@ -312,8 +312,9 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 	})
 	app.Object["spec"] = map[string]interface{}{
 		"destination": map[string]interface{}{
-			"name":   "originalName",
-			"server": "originalServer",
+			"name":      "originalName",
+			"server":    "originalServer",
+			"namespace": "argocd",
 		},
 	}
 	app.Object["operation"] = map[string]interface{}{
@@ -415,7 +416,7 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 							"destination": map[string]interface{}{
 								"name":      "in-cluster",
 								"server":    "https://external.server.com",
-								"namespace": "test",
+								"namespace": "test-ns",
 							},
 						},
 						"operation": map[string]interface{}{
@@ -448,7 +449,7 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 						"destination": map[string]interface{}{
 							"name":      "",
 							"server":    KubernetesInternalAPIServerAddr,
-							"namespace": "argocd",
+							"namespace": "test-ns",
 						},
 					},
 					"operation": map[string]interface{}{

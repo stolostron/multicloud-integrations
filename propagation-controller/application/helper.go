@@ -154,8 +154,11 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 		if destination, ok := newSpec["destination"].(map[string]interface{}); ok {
 			// empty the name
 			destination["name"] = ""
-			// always deploy resources to the app namespace
-			destination["namespace"] = application.GetNamespace()
+			// the user defined destination namespace is respected.
+			// set the resources destination namespace to the app namespace only if the destination namespace is not set
+			if namespace, ok := destination["namespace"].(string); ok && len(namespace) == 0 {
+				destination["namespace"] = application.GetNamespace()
+			}
 			// always set for in-cluster destination
 			destination["server"] = KubernetesInternalAPIServerAddr
 		}
