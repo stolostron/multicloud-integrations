@@ -16,6 +16,7 @@ linters:
     - cyclop
     - depguard
     - dupl
+    - fatcontext
     - forbidigo
     - funlen
     - errchkjson
@@ -37,6 +38,7 @@ linters:
     - gomnd
     - gomoddirectives
     - gosec
+    - gosimple
     - ineffassign
     - interfacebloat
     - ireturn
@@ -62,6 +64,7 @@ linters:
     - testpackage
     - thelper
     - usestdlibvars
+    - usetesting
     - varnamelen
     - wastedassign
     - wrapcheck
