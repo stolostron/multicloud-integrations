@@ -32,10 +32,12 @@ func TestEnvironmentVariables(t *testing.T) {
 		g.Expect(GitopsImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel8"))
 		g.Expect(GitopsNS).To(gomega.Equal("openshift-gitops"))
 		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
+		g.Expect(GitOpsServiceImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
+		g.Expect(GitOpsConsolePluginImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Single-Namespace"))
 		g.Expect(UNINSTALL).To(gomega.Equal("false"))
 		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("false"))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a"))
+		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8"))
 		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal(""))
 		g.Expect(ARGOCD_AGENT_SERVER_PORT).To(gomega.Equal(""))
 		g.Expect(ARGOCD_AGENT_MODE).To(gomega.Equal("managed"))
@@ -389,6 +391,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"GitopsImage":                 GitopsImage,
 			"GitopsNS":                    GitopsNS,
 			"RedisImage":                  RedisImage,
+			"GitOpsServiceImage":          GitOpsServiceImage,
+			"GitOpsConsolePluginImage":    GitOpsConsolePluginImage,
 			"HTTP_PROXY":                  HTTP_PROXY,
 			"HTTPS_PROXY":                 HTTPS_PROXY,
 			"NO_PROXY":                    NO_PROXY,
@@ -408,6 +412,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"GITOPS_IMAGE":                "test.registry.io/argocd:test",
 			"GITOPS_NAMESPACE":            "test-gitops",
 			"REDIS_IMAGE":                 "test.registry.io/redis:test",
+			"GitOpsServiceImage":          "test.registry.io/gitops-service:test",
+			"GitOpsConsolePluginImage":    "test.registry.io/gitops-console-plugin:test",
 			"HTTP_PROXY":                  "http://test-proxy:8080",
 			"HTTPS_PROXY":                 "https://test-proxy:8443",
 			"NO_PROXY":                    "test.local",
@@ -439,6 +445,12 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		}
 		if val, found := os.LookupEnv("REDIS_IMAGE"); found && val > "" {
 			RedisImage = val
+		}
+		if val, found := os.LookupEnv("GitOpsServiceImage"); found && val > "" {
+			GitOpsServiceImage = val
+		}
+		if val, found := os.LookupEnv("GitOpsConsolePluginImage"); found && val > "" {
+			GitOpsConsolePluginImage = val
 		}
 		if val, found := os.LookupEnv("HTTP_PROXY"); found && val > "" {
 			HTTP_PROXY = val
@@ -477,6 +489,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		g.Expect(GitopsImage).To(gomega.Equal("test.registry.io/argocd:test"))
 		g.Expect(GitopsNS).To(gomega.Equal("test-gitops"))
 		g.Expect(RedisImage).To(gomega.Equal("test.registry.io/redis:test"))
+		g.Expect(GitOpsServiceImage).To(gomega.Equal("test.registry.io/gitops-service:test"))
+		g.Expect(GitOpsConsolePluginImage).To(gomega.Equal("test.registry.io/gitops-console-plugin:test"))
 		g.Expect(HTTP_PROXY).To(gomega.Equal("http://test-proxy:8080"))
 		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://test-proxy:8443"))
 		g.Expect(NO_PROXY).To(gomega.Equal("test.local"))
@@ -494,6 +508,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		GitopsImage = originalValues["GitopsImage"]
 		GitopsNS = originalValues["GitopsNS"]
 		RedisImage = originalValues["RedisImage"]
+		GitOpsServiceImage = originalValues["GitOpsServiceImage"]
+		GitOpsConsolePluginImage = originalValues["GitOpsConsolePluginImage"]
 		HTTP_PROXY = originalValues["HTTP_PROXY"]
 		HTTPS_PROXY = originalValues["HTTPS_PROXY"]
 		NO_PROXY = originalValues["NO_PROXY"]

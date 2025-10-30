@@ -31,6 +31,10 @@ spec:
           value: ""
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: '*'
+        - name: BACKEND_IMAGE
+          value: {{ printf "%s@%s" .Values.global.gitops_service.image .Values.global.gitops_service.tag }}
+        - name: GITOPS_CONSOLE_PLUGIN_IMAGE
+          value: {{ printf "%s@%s" .Values.global.gitops_console_plugin.image .Values.global.gitops_console_plugin.tag }}
         {{- if .Values.global.proxyConfig.HTTP_PROXY }}
         - name: HTTP_PROXY
           value: {{ .Values.global.proxyConfig.HTTP_PROXY }}

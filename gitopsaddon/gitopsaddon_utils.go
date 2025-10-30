@@ -71,11 +71,31 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 			return fmt.Errorf("failed to parse GitopsOperatorImage: %w", err)
 		}
 
+		// Parse the gitops service image
+		gitOpsServiceImage, gitOpsServiceTag, err := ParseImageReference(r.GitOpsServiceImage)
+		if err != nil {
+			return fmt.Errorf("failed to parse GitOpsServiceImage: %w", err)
+		}
+
+		// Parse the gitops console plugin image
+		gitOpsConsolePluginImage, gitOpsConsolePluginTag, err := ParseImageReference(r.GitOpsConsolePluginImage)
+		if err != nil {
+			return fmt.Errorf("failed to parse GitOpsConsolePluginImage: %w", err)
+		}
+
 		// Set up global values for openshift-gitops-operator chart
 		global := map[string]interface{}{
 			"openshift_gitops_operator": map[string]interface{}{
 				"image": image,
 				"tag":   tag,
+			},
+			"gitops_service": map[string]interface{}{
+				"image": gitOpsServiceImage,
+				"tag":   gitOpsServiceTag,
+			},
+			"gitops_console_plugin": map[string]interface{}{
+				"image": gitOpsConsolePluginImage,
+				"tag":   gitOpsConsolePluginTag,
 			},
 			"proxyConfig": map[string]interface{}{
 				"HTTP_PROXY":  r.HTTP_PROXY,

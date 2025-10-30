@@ -32,64 +32,70 @@ func TestSetupWithManager(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name                  string
-		interval              int
-		gitopsOperatorImage   string
-		gitopsOperatorNS      string
-		gitopsImage           string
-		gitopsNS              string
-		redisImage            string
-		reconcileScope        string
-		httpProxy             string
-		httpsProxy            string
-		noProxy               string
-		uninstall             string
-		argoCDAgentEnabled    string
-		argoCDAgentImage      string
-		argoCDAgentServerAddr string
-		argoCDAgentServerPort string
-		argoCDAgentMode       string
-		expectError           bool
+		name                     string
+		interval                 int
+		gitopsOperatorImage      string
+		gitopsOperatorNS         string
+		gitopsImage              string
+		gitopsNS                 string
+		redisImage               string
+		gitOpsServiceImage       string
+		gitOpsConsolePluginImage string
+		reconcileScope           string
+		httpProxy                string
+		httpsProxy               string
+		noProxy                  string
+		uninstall                string
+		argoCDAgentEnabled       string
+		argoCDAgentImage         string
+		argoCDAgentServerAddr    string
+		argoCDAgentServerPort    string
+		argoCDAgentMode          string
+		expectError              bool
 	}{
 		{
-			name:                  "successful_setup_with_defaults",
-			interval:              30,
-			gitopsOperatorImage:   "test-operator:latest",
-			gitopsOperatorNS:      "openshift-gitops-operator",
-			gitopsImage:           "test-gitops:latest",
-			gitopsNS:              "openshift-gitops",
-			redisImage:            "test-redis:latest",
-			reconcileScope:        "Single-Namespace",
-			httpProxy:             "",
-			httpsProxy:            "",
-			noProxy:               "",
-			uninstall:             "false",
-			argoCDAgentEnabled:    "false",
-			argoCDAgentImage:      "test-agent:latest",
-			argoCDAgentServerAddr: "",
-			argoCDAgentServerPort: "",
-			argoCDAgentMode:       "managed",
-			expectError:           false,
+			name:                     "successful_setup_with_defaults",
+			interval:                 30,
+			gitopsOperatorImage:      "test-operator:latest",
+			gitopsOperatorNS:         "openshift-gitops-operator",
+			gitopsImage:              "test-gitops:latest",
+			gitopsNS:                 "openshift-gitops",
+			redisImage:               "test-redis:latest",
+			gitOpsServiceImage:       "test-gitops-service:latest",
+			gitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
+			reconcileScope:           "Single-Namespace",
+			httpProxy:                "",
+			httpsProxy:               "",
+			noProxy:                  "",
+			uninstall:                "false",
+			argoCDAgentEnabled:       "false",
+			argoCDAgentImage:         "test-agent:latest",
+			argoCDAgentServerAddr:    "",
+			argoCDAgentServerPort:    "",
+			argoCDAgentMode:          "managed",
+			expectError:              false,
 		},
 		{
-			name:                  "setup_with_proxy_settings",
-			interval:              60,
-			gitopsOperatorImage:   "test-operator:v1.0.0",
-			gitopsOperatorNS:      "custom-operator-ns",
-			gitopsImage:           "test-gitops:v1.0.0",
-			gitopsNS:              "custom-gitops-ns",
-			redisImage:            "test-redis:v1.0.0",
-			reconcileScope:        "All-Namespaces",
-			httpProxy:             "http://proxy:8080",
-			httpsProxy:            "https://proxy:8080",
-			noProxy:               "localhost,127.0.0.1",
-			uninstall:             "true",
-			argoCDAgentEnabled:    "true",
-			argoCDAgentImage:      "test-agent:v1.0.0",
-			argoCDAgentServerAddr: "argocd.example.com",
-			argoCDAgentServerPort: "443",
-			argoCDAgentMode:       "autonomous",
-			expectError:           false,
+			name:                     "setup_with_proxy_settings",
+			interval:                 60,
+			gitopsOperatorImage:      "test-operator:v1.0.0",
+			gitopsOperatorNS:         "custom-operator-ns",
+			gitopsImage:              "test-gitops:v1.0.0",
+			gitopsNS:                 "custom-gitops-ns",
+			redisImage:               "test-redis:v1.0.0",
+			gitOpsServiceImage:       "test-gitops-service:v1.0.0",
+			gitOpsConsolePluginImage: "test-gitops-console-plugin:v1.0.0",
+			reconcileScope:           "All-Namespaces",
+			httpProxy:                "http://proxy:8080",
+			httpsProxy:               "https://proxy:8080",
+			noProxy:                  "localhost,127.0.0.1",
+			uninstall:                "true",
+			argoCDAgentEnabled:       "true",
+			argoCDAgentImage:         "test-agent:v1.0.0",
+			argoCDAgentServerAddr:    "argocd.example.com",
+			argoCDAgentServerPort:    "443",
+			argoCDAgentMode:          "autonomous",
+			expectError:              false,
 		},
 	}
 
@@ -112,7 +118,7 @@ func TestSetupWithManager(t *testing.T) {
 
 			// Test SetupWithManager
 			err = SetupWithManager(mgr, tt.interval, tt.gitopsOperatorImage, tt.gitopsOperatorNS,
-				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.reconcileScope,
+				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.gitOpsServiceImage, tt.gitOpsConsolePluginImage, tt.reconcileScope,
 				tt.httpProxy, tt.httpsProxy, tt.noProxy, tt.uninstall,
 				tt.argoCDAgentEnabled, tt.argoCDAgentImage, tt.argoCDAgentServerAddr,
 				tt.argoCDAgentServerPort, tt.argoCDAgentMode, "false")
@@ -249,19 +255,21 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test reconciler with mock client
 			reconciler := &GitopsAddonReconciler{
-				Client:               getTestEnv().Client,
-				Scheme:               getTestEnv().Scheme,
-				Config:               getTestEnv().Config,
-				Interval:             30,
-				GitopsOperatorImage:  "test-operator:latest",
-				GitopsOperatorNS:     tt.gitopsOperatorNS,
-				GitopsImage:          "test-gitops:latest",
-				GitopsNS:             tt.gitopsNS,
-				RedisImage:           "test-redis:latest",
-				ReconcileScope:       "Single-Namespace",
-				Uninstall:            tt.uninstall,
-				ArgoCDAgentEnabled:   tt.argoCDAgentEnabled,
-				ArgoCDAgentUninstall: tt.argoCDAgentUninstall,
+				Client:                   getTestEnv().Client,
+				Scheme:                   getTestEnv().Scheme,
+				Config:                   getTestEnv().Config,
+				Interval:                 30,
+				GitopsOperatorImage:      "test-operator:latest",
+				GitopsOperatorNS:         tt.gitopsOperatorNS,
+				GitopsImage:              "test-gitops:latest",
+				GitopsNS:                 tt.gitopsNS,
+				RedisImage:               "test-redis:latest",
+				GitOpsServiceImage:       "test-gitops-service:latest",
+				GitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
+				ReconcileScope:           "Single-Namespace",
+				Uninstall:                tt.uninstall,
+				ArgoCDAgentEnabled:       tt.argoCDAgentEnabled,
+				ArgoCDAgentUninstall:     tt.argoCDAgentUninstall,
 			}
 
 			// This test verifies that houseKeeping doesn't panic
@@ -283,6 +291,8 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 		GitopsImage:              "test-gitops:latest",
 		GitopsNS:                 "openshift-gitops",
 		RedisImage:               "test-redis:latest",
+		GitOpsServiceImage:       "test-gitops-service:latest",
+		GitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
 		ReconcileScope:           "Single-Namespace",
 		HTTP_PROXY:               "http://proxy:8080",
 		HTTPS_PROXY:              "https://proxy:8080",
@@ -302,6 +312,8 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 	g.Expect(reconciler.GitopsImage).To(gomega.Equal("test-gitops:latest"))
 	g.Expect(reconciler.GitopsNS).To(gomega.Equal("openshift-gitops"))
 	g.Expect(reconciler.RedisImage).To(gomega.Equal("test-redis:latest"))
+	g.Expect(reconciler.GitOpsServiceImage).To(gomega.Equal("test-gitops-service:latest"))
+	g.Expect(reconciler.GitOpsConsolePluginImage).To(gomega.Equal("test-gitops-console-plugin:latest"))
 	g.Expect(reconciler.ReconcileScope).To(gomega.Equal("Single-Namespace"))
 	g.Expect(reconciler.HTTP_PROXY).To(gomega.Equal("http://proxy:8080"))
 	g.Expect(reconciler.HTTPS_PROXY).To(gomega.Equal("https://proxy:8080"))

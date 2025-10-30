@@ -202,11 +202,33 @@ func (r *GitopsAddonReconciler) deleteChartResources(chartPath, namespace, relea
 			return
 		}
 
+		// Parse the gitops service image
+		gitOpsServiceImage, gitOpsServiceTag, err := ParseImageReference(r.GitOpsServiceImage)
+		if err != nil {
+			klog.Errorf("Failed to parse GitOpsServiceImage for uninstall: %v", err)
+			return
+		}
+
+		// Parse the gitops console plugin image
+		gitOpsConsolePluginImage, gitOpsConsolePluginTag, err := ParseImageReference(r.GitOpsConsolePluginImage)
+		if err != nil {
+			klog.Errorf("Failed to parse GitOpsConsolePluginImage for uninstall: %v", err)
+			return
+		}
+
 		// Set up global values for openshift-gitops-operator chart
 		global := map[string]interface{}{
 			"openshift_gitops_operator": map[string]interface{}{
 				"image": image,
 				"tag":   tag,
+			},
+			"gitops_service": map[string]interface{}{
+				"image": gitOpsServiceImage,
+				"tag":   gitOpsServiceTag,
+			},
+			"gitops_console_plugin": map[string]interface{}{
+				"image": gitOpsConsolePluginImage,
+				"tag":   gitOpsConsolePluginTag,
 			},
 			"proxyConfig": map[string]interface{}{
 				"HTTP_PROXY":  r.HTTP_PROXY,
