@@ -67,6 +67,8 @@ var (
 	GitopsImage                 = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
 	GitopsNS                    = "openshift-gitops"
 	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
+	GitOpsServiceImage          = "registry.redhat.io/openshift-gitops-1/gitops-rhel8@sha256:01883ebbe93f97a8196204adcd1749280b697e4c81f80658fdba507301f033aa"
+	GitOpsConsolePluginImage    = "registry.redhat.io/openshift-gitops-1/console-plugin-rhel8@sha256:fe57b69fc1570f7ea28530a67ceb44a58537dec419e7d5aa77e8e13fa61cccfc"
 	ReconcileScope              = "Single-Namespace"
 	HTTP_PROXY                  = ""
 	HTTPS_PROXY                 = ""
@@ -171,6 +173,16 @@ func main() {
 		RedisImage = newRedisImage
 	}
 
+	newGitOpsServiceImage, found := os.LookupEnv("BACKEND_IMAGE")
+	if found && newGitOpsServiceImage > "" {
+		GitOpsServiceImage = newGitOpsServiceImage
+	}
+
+	newGitOpsConsolePluginImage, found := os.LookupEnv("GITOPS_CONSOLE_PLUGIN_IMAGE")
+	if found && newGitOpsConsolePluginImage > "" {
+		GitOpsConsolePluginImage = newGitOpsConsolePluginImage
+	}
+
 	newHTTP_PROXY, found := os.LookupEnv("HTTP_PROXY")
 	if found && newHTTP_PROXY > "" {
 		HTTP_PROXY = newHTTP_PROXY
@@ -236,6 +248,8 @@ func main() {
 		"GitopsImage", GitopsImage,
 		"GitopsNS", GitopsNS,
 		"RedisImage", RedisImage,
+		"GitOpsServiceImage", GitOpsServiceImage,
+		"GitOpsConsolePluginImage", GitOpsConsolePluginImage,
 		"ReconcileScope", ReconcileScope,
 		"HTTP_PROXY", HTTP_PROXY,
 		"HTTPS_PROXY", HTTPS_PROXY,
@@ -267,7 +281,7 @@ func main() {
 	}
 
 	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE, ARGOCD_AGENT_UNINSTALL); err != nil {
+		GitopsImage, GitopsNS, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE, ARGOCD_AGENT_UNINSTALL); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}

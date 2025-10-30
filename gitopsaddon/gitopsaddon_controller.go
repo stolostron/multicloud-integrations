@@ -46,6 +46,8 @@ type GitopsAddonReconciler struct {
 	GitopsImage              string
 	GitopsNS                 string
 	RedisImage               string
+	GitOpsServiceImage       string
+	GitOpsConsolePluginImage string
 	ReconcileScope           string
 	HTTP_PROXY               string
 	HTTPS_PROXY              string
@@ -60,7 +62,7 @@ type GitopsAddonReconciler struct {
 }
 
 func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
-	gitopsImage, gitopsNS, redisImage, reconcileScope,
+	gitopsImage, gitopsNS, redisImage, gitOpsServiceImage, gitOpsConsolePluginImage, reconcileScope,
 	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, uninstall, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode, argoCDAgentUninstall string) error {
 	dsRS := &GitopsAddonReconciler{
 		Client:                   mgr.GetClient(),
@@ -72,6 +74,8 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		GitopsImage:              gitopsImage,
 		GitopsNS:                 gitopsNS,
 		RedisImage:               redisImage,
+		GitOpsServiceImage:       gitOpsServiceImage,
+		GitOpsConsolePluginImage: gitOpsConsolePluginImage,
 		ReconcileScope:           reconcileScope,
 		HTTP_PROXY:               HTTP_PROXY,
 		HTTPS_PROXY:              HTTPS_PROXY,

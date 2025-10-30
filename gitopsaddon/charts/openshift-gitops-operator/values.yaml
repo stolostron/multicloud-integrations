@@ -4,7 +4,13 @@ nameOverride: openshift-gitops-operator
 fullnameOverride: openshift-gitops-operator
 
 global: 
-  openshift_gitops_operator: 
+  openshift_gitops_operator:
+    image: ""
+    tag: ""
+  gitops_service:
+    image: ""
+    tag: ""
+  gitops_console_plugin:
     image: ""
     tag: ""
   proxyConfig:
