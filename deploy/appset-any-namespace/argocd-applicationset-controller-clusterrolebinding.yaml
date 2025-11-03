@@ -5,6 +5,7 @@ metadata:
     app.kubernetes.io/name: argocd-applicationset-controller
     app.kubernetes.io/part-of: argocd-applicationset
     app.kubernetes.io/component: controller
+    cluster.open-cluster-management.io/backup: ""
   name: openshift-gitops-applicationset-controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
