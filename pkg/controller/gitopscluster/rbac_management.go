@@ -291,8 +291,9 @@ func (r *ReconcileGitOpsCluster) ensureAddonManagerRoleBinding(gitopsNamespace s
 
 	klog.Info("Creating addon-manager-controller-rolebinding in namespace", gitopsNamespace)
 
-	// Use the correct addon manager namespace
-	addonManagerNamespace := utils.GetComponentNamespace("open-cluster-management") + "-hub"
+	// The addon-manager-controller-sa is always in the open-cluster-management-hub namespace
+	// regardless of where the GitOpsCluster controller is running
+	addonManagerNamespace := "open-cluster-management-hub"
 
 	newRoleBinding := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{

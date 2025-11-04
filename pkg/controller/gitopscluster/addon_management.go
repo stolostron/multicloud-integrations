@@ -17,6 +17,7 @@ package gitopscluster
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -215,10 +216,13 @@ func (r *ReconcileGitOpsCluster) UpdateManagedClusterAddonConfig(namespace strin
 }
 
 // EnsureManagedClusterAddon creates the ManagedClusterAddon if it doesn't exist, or updates its config if it does
-func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) error {
+func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	if namespace == "" {
 		return errors.New("no namespace provided")
 	}
+
+	// Get the AddOnTemplate name for this GitOpsCluster
+	templateName := fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 
 	// Check if ManagedClusterAddOn already exists
 	existing := &addonv1alpha1.ManagedClusterAddOn{}
@@ -227,28 +231,44 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) err
 		Namespace: namespace,
 	}, existing)
 
-	expectedConfig := addonv1alpha1.AddOnConfig{
-		ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
-			Group:    "addon.open-cluster-management.io",
-			Resource: "addondeploymentconfigs",
+	// Expected configs: AddOnTemplate and AddOnDeploymentConfig
+	expectedConfigs := []addonv1alpha1.AddOnConfig{
+		{
+			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+				Group:    "addon.open-cluster-management.io",
+				Resource: "addontemplates",
+			},
+			ConfigReferent: addonv1alpha1.ConfigReferent{
+				Name: templateName,
+			},
 		},
-		ConfigReferent: addonv1alpha1.ConfigReferent{
-			Name:      "gitops-addon-config",
-			Namespace: namespace,
+		{
+			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+				Group:    "addon.open-cluster-management.io",
+				Resource: "addondeploymentconfigs",
+			},
+			ConfigReferent: addonv1alpha1.ConfigReferent{
+				Name:      "gitops-addon-config",
+				Namespace: namespace,
+			},
 		},
 	}
 
 	if k8errors.IsNotFound(err) {
-		// Create new ManagedClusterAddOn with config reference
-		klog.Infof("Creating ManagedClusterAddOn gitops-addon in namespace %s", namespace)
+		// Create new ManagedClusterAddOn with both config references
+		klog.Infof("Creating ManagedClusterAddOn gitops-addon in namespace %s with AddOnTemplate %s", namespace, templateName)
 
 		managedClusterAddOn := &addonv1alpha1.ManagedClusterAddOn{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "gitops-addon",
 				Namespace: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "multicloud-integrations",
+					"app.kubernetes.io/component":  "addon",
+				},
 			},
 			Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-				Configs: []addonv1alpha1.AddOnConfig{expectedConfig},
+				Configs: expectedConfigs,
 			},
 		}
 
@@ -265,31 +285,40 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string) err
 		return err
 	}
 
-	// ManagedClusterAddOn exists, ensure it has the correct config reference
-	configExists := false
-	for _, config := range existing.Spec.Configs {
-		if config.Group == expectedConfig.Group &&
-			config.Resource == expectedConfig.Resource &&
-			config.Name == expectedConfig.Name {
-			configExists = true
-			break
+	// ManagedClusterAddOn exists, ensure it has all correct config references
+	needsUpdate := false
+	for _, expectedConfig := range expectedConfigs {
+		configExists := false
+		for _, config := range existing.Spec.Configs {
+			if config.Group == expectedConfig.Group &&
+				config.Resource == expectedConfig.Resource &&
+				config.Name == expectedConfig.Name {
+				// Check namespace only if it's set in expected config (AddOnTemplate doesn't have namespace)
+				if expectedConfig.Namespace == "" || config.Namespace == expectedConfig.Namespace {
+					configExists = true
+					break
+				}
+			}
+		}
+
+		if !configExists {
+			// Add the config reference if it doesn't exist
+			klog.Infof("Adding %s config reference to ManagedClusterAddOn gitops-addon in namespace %s", expectedConfig.Resource, namespace)
+			existing.Spec.Configs = append(existing.Spec.Configs, expectedConfig)
+			needsUpdate = true
 		}
 	}
 
-	if !configExists {
-		// Add the config reference if it doesn't exist
-		klog.Infof("Adding config reference to existing ManagedClusterAddOn gitops-addon in namespace %s", namespace)
-		existing.Spec.Configs = append(existing.Spec.Configs, expectedConfig)
-
+	if needsUpdate {
 		err = r.Update(context.Background(), existing)
 		if err != nil {
 			klog.Errorf("Failed to update ManagedClusterAddOn gitops-addon: %v", err)
 			return err
 		}
 
-		klog.Infof("Updated ManagedClusterAddOn gitops-addon config reference in namespace %s", namespace)
+		klog.Infof("Updated ManagedClusterAddOn gitops-addon config references in namespace %s", namespace)
 	} else {
-		klog.V(2).Infof("ManagedClusterAddOn gitops-addon already has correct config reference in namespace %s", namespace)
+		klog.V(2).Infof("ManagedClusterAddOn gitops-addon already has correct config references in namespace %s", namespace)
 	}
 
 	return nil
@@ -328,22 +357,22 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 			managedVariables["REDIS_IMAGE"] = gitOpsCluster.Spec.GitOpsAddon.RedisImage
 		}
 
+		// Always set namespace variables to ensure OCM substitution works
+		// Empty string allows main.go defaults to apply
+		gitOpsOperatorNamespace := ""
 		if gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace != "" {
-			managedVariables["GITOPS_OPERATOR_NAMESPACE"] = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace
+			gitOpsOperatorNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace
 		}
+		managedVariables["GITOPS_OPERATOR_NAMESPACE"] = gitOpsOperatorNamespace
 
+		gitOpsNamespace := ""
 		if gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace != "" {
-			managedVariables["GITOPS_NAMESPACE"] = gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace
+			gitOpsNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace
 		}
+		managedVariables["GITOPS_NAMESPACE"] = gitOpsNamespace
 
 		if gitOpsCluster.Spec.GitOpsAddon.ReconcileScope != "" {
 			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope
-		}
-
-		if gitOpsCluster.Spec.GitOpsAddon.Uninstall != nil && *gitOpsCluster.Spec.GitOpsAddon.Uninstall {
-			managedVariables["UNINSTALL"] = "true"
-		} else {
-			managedVariables["UNINSTALL"] = "false"
 		}
 
 		// Extract ArgoCD agent values from the nested structure
@@ -377,11 +406,5 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 
 	if argoCDAgent.Mode != "" {
 		managedVariables["ARGOCD_AGENT_MODE"] = argoCDAgent.Mode
-	}
-
-	if argoCDAgent.Uninstall != nil && *argoCDAgent.Uninstall {
-		managedVariables["ARGOCD_AGENT_UNINSTALL"] = "true"
-	} else {
-		managedVariables["ARGOCD_AGENT_UNINSTALL"] = "false"
 	}
 }

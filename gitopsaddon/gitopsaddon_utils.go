@@ -48,7 +48,7 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 	defer os.RemoveAll(tempDir)
 
 	// Copy embedded chart files to temp directory
-	err = r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir, releaseName)
+	err = r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir)
 	if err != nil {
 		return fmt.Errorf("failed to copy files: %v", err)
 	}
@@ -204,7 +204,7 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 }
 
 // copyEmbeddedToTemp copies embedded chart files to a temporary directory
-func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPath, releaseName string) error {
+func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPath string) error {
 	entries, err := fs.ReadDir(srcPath)
 	if err != nil {
 		return err
@@ -219,7 +219,7 @@ func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPat
 			if err := os.MkdirAll(destEntryPath, 0750); err != nil {
 				return err
 			}
-			if err := r.copyEmbeddedToTemp(fs, srcEntryPath, destEntryPath, releaseName); err != nil {
+			if err := r.copyEmbeddedToTemp(fs, srcEntryPath, destEntryPath); err != nil {
 				return err
 			}
 		} else {
@@ -251,7 +251,7 @@ func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, nam
 	defer os.RemoveAll(tempDir)
 
 	// Copy chart files to temp directory
-	if err := r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir, "openshift-gitops-dependency"); err != nil {
+	if err := r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir); err != nil {
 		return fmt.Errorf("failed to copy chart files: %v", err)
 	}
 
@@ -348,6 +348,12 @@ func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, nam
 
 // applyManifestSelectively applies manifests with special handling for certain resource types
 func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstructured) error {
+	// Check if the addon is paused before applying anything
+	if IsPaused(context.TODO(), r.Client, r.GitopsOperatorNS) {
+		klog.Infof("GitOps addon is paused, skipping selective apply of %s/%s", obj.GetKind(), obj.GetName())
+		return nil
+	}
+
 	kind := obj.GetKind()
 	name := obj.GetName()
 
@@ -376,7 +382,7 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	obj.SetLabels(labels)
 
 	switch kind {
@@ -409,6 +415,12 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 
 // applyManifest applies a Kubernetes manifest
 func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) error {
+	// Check if the addon is paused before applying anything
+	if IsPaused(context.TODO(), r.Client, r.GitopsOperatorNS) {
+		klog.Infof("GitOps addon is paused, skipping apply of %s/%s", obj.GetKind(), obj.GetName())
+		return nil
+	}
+
 	// Check if the resource already exists
 	existing := &unstructured.Unstructured{}
 	existing.SetAPIVersion(obj.GetAPIVersion())
@@ -438,7 +450,7 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	obj.SetLabels(labels)
 
 	if err != nil && errors.IsNotFound(err) {
@@ -497,7 +509,7 @@ func (r *GitopsAddonReconciler) applyCRDIfNotExists(resource, apiVersion, yamlFi
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	crd.SetLabels(labels)
 
 	err = r.Create(context.TODO(), &crd)
@@ -528,17 +540,18 @@ func ParseImageReference(imageRef string) (string, string, error) {
 			repository := imageRef[:lastColonIndex]
 			tag := imageRef[lastColonIndex+1:]
 
-			// Check if this might be a port number instead of a tag
-			// Port numbers are typically numeric and shorter
-			if !strings.Contains(tag, "/") && len(tag) < 10 {
-				// This looks like it could be a tag
+			// Check if this is a tag or a port number
+			// If there's a "/" after the colon, it's a port (e.g., registry:5000/image)
+			// If there's no "/", it's a tag (e.g., image:v1.0.0)
+			if !strings.Contains(tag, "/") {
+				// This is a tag
 				return repository, tag, nil
 			}
 		}
 	}
 
-	// If no tag or digest found, assume "latest"
-	return imageRef, "latest", nil
+	// If no tag or digest found, return error
+	return "", "", fmt.Errorf("image reference %q has no tag or digest specified", imageRef)
 }
 
 // parseImageComponents is a helper function that parses image components

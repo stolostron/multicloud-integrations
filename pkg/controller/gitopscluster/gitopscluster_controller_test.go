@@ -16,6 +16,7 @@ package gitopscluster
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,7 +32,6 @@ import (
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
-	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1184,7 +1184,7 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 				},
 				createTestArgoCDServerService("argocd"),
 				createTestArgoCDServerPod("argocd"),
-				createTestSourceCASecret(), // Source CA secret needed for ensureArgoCDAgentCASecret
+				// Note: CA secret is now self-generated via certrotation, no source secret needed
 			},
 			expectedCondition: string(metav1.ConditionTrue),
 			expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
@@ -1204,6 +1204,10 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Set controller image for test
+			os.Setenv("CONTROLLER_IMAGE", "test-controller:v1")
+			defer os.Unsetenv("CONTROLLER_IMAGE")
+
 			// Skip tests that require CA infrastructure
 			if tt.name == "agent mode successfully creates cluster secrets" {
 				t.Skip("Skipping test that requires CA infrastructure")
@@ -1233,7 +1237,7 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 			}, gitOpsClusterFromClient)
 			require.NoError(t, err, "Should be able to get GitOpsCluster from fake client")
 
-			_, err = reconciler.reconcileGitOpsCluster(*gitOpsClusterFromClient, orphanSecretsList)
+			_, err = reconciler.reconcileGitOpsCluster(context.TODO(), *gitOpsClusterFromClient, orphanSecretsList)
 
 			// For successful cases, we expect no error
 			// For failed cases, we expect an error but the condition should be set
@@ -1372,7 +1376,7 @@ func TestAgentModeOverridesAllOptions(t *testing.T) {
 	}, gitOpsClusterFromClient)
 	require.NoError(t, err, "Should be able to get GitOpsCluster from fake client")
 
-	_, err = reconciler.reconcileGitOpsCluster(*gitOpsClusterFromClient, orphanSecretsList)
+	_, err = reconciler.reconcileGitOpsCluster(context.TODO(), *gitOpsClusterFromClient, orphanSecretsList)
 	assert.NoError(t, err)
 
 	// Verify traditional secret was overridden with agent configuration
@@ -1415,19 +1419,8 @@ func createTestArgoCDJWTSecret(namespace string) *v1.Secret {
 	}
 }
 
-func createTestSourceCASecret() *v1.Secret {
-	return &v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "multicluster-operators-application-svc-ca",
-			Namespace: utils.GetComponentNamespace("open-cluster-management"),
-		},
-		Type: v1.SecretTypeTLS,
-		Data: map[string][]byte{
-			"tls.crt": []byte("test-ca-certificate"),
-			"tls.key": []byte("test-ca-key"),
-		},
-	}
-}
+// createTestSourceCASecret removed - CA certificates are now self-generated
+// via certrotation, not copied from multicluster-operators-application-svc-ca
 
 func createTestArgoCDServerService(namespace string) *v1.Service {
 	return &v1.Service{
