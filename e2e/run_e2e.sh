@@ -6,20 +6,23 @@
 set -o nounset
 set -o pipefail
 
+echo "SETUP install OCM"
+deploy/ocm/install.sh
+
 echo "SETUP install multicloud-integrations"
 kubectl config use-context kind-hub
+kubectl create namespace openshift-gitops || true
 kubectl apply -f deploy/crds/
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
 kubectl apply -f deploy/controller/
-kubectl apply -f e2e/hub/dummy-application-svc-ca-secret.yaml
 
-kubectl -n open-cluster-management rollout status deployment multicloud-integrations-gitops --timeout=120s
-kubectl -n open-cluster-management rollout status deployment multicloud-integrations --timeout=120s
+kubectl -n openshift-gitops rollout status deployment multicloud-integrations-gitops --timeout=120s
+kubectl -n openshift-gitops rollout status deployment multicloud-integrations --timeout=120s
 
 echo "TEST Propgation controller startup (expecting error)"
-POD_NAME=$(kubectl -n open-cluster-management get deploy multicloud-integrations -o yaml  | grep ReplicaSet | grep successful | cut -d'"' -f2)
-POD_NAME=$(kubectl -n open-cluster-management get pod | grep $POD_NAME | cut -d' ' -f1)
-if kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager | grep "failed to find CRD applications.argoproj.io"; then
+POD_NAME=$(kubectl -n openshift-gitops get deploy multicloud-integrations -o yaml  | grep ReplicaSet | grep successful | cut -d'"' -f2)
+POD_NAME=$(kubectl -n openshift-gitops get pod | grep $POD_NAME | cut -d' ' -f1)
+if kubectl -n openshift-gitops logs $POD_NAME argocd-pull-integration-controller-manager | grep "failed to find CRD applications.argoproj.io"; then
     echo "Propgation controller failed to startup"
 else
     echo "Propgation controller startup successfully"
@@ -53,7 +56,7 @@ kubectl -n argocd rollout restart deployment argocd-applicationset-controller
 kubectl -n argocd rollout status deployment argocd-applicationset-controller --timeout=60s
 
 echo "TEST Propgation controller startup"
-if kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager | grep "Starting Controller" | grep "Application"; then
+if kubectl -n openshift-gitops logs $POD_NAME argocd-pull-integration-controller-manager | grep "Starting Controller" | grep "Application"; then
     echo "Propgation controller startup successfully"
 else
     echo "Propgation controller failed to startup"
@@ -69,7 +72,7 @@ echo "SETUP print hub setup"
 kubectl config use-context kind-hub
 kubectl -n argocd get deploy
 kubectl -n argocd get statefulset
-kubectl -n open-cluster-management get deploy
+kubectl -n openshift-gitops get deploy
 
 ### GitOpsCluster
 echo "TEST GitOpsCluster"
@@ -85,7 +88,7 @@ else
 
     kubectl -n argocd get gitopsclusters argo-ocm-importer -o yaml
 
-    kubectl logs -n open-cluster-management deployment/multicloud-integrations-gitops
+    kubectl logs -n openshift-gitops deployment/multicloud-integrations-gitops
     
     exit 1
 fi
@@ -218,7 +221,7 @@ sleep 60s
 if kubectl -n argocd get app cluster1-guestbook-app-only -o yaml | grep "argocd.argoproj.io/refresh"; then
     echo "Refresh Annotation FAILED: annotation still exists after 60 seconds"
     kubectl -n argocd get app cluster1-guestbook-app-only -o yaml
-    kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager
+    kubectl -n openshift-gitops logs $POD_NAME argocd-pull-integration-controller-manager
     exit 1
 else
     echo "Refresh Annotation: annotation deleted successfully after 60 seconds"

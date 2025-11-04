@@ -13,7 +13,6 @@ spec:
     namespace: openshift-gitops
   gitopsAddon:
     enabled: true
-    uninstall: false
     overrideExistingConfigs: true
     gitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-operator@sha256:..."
     gitOpsImage: "registry.redhat.io/openshift-gitops-1/argocd@sha256:..."
@@ -23,7 +22,6 @@ spec:
     reconcileScope: Single-Namespace
     argoCDAgent:
       enabled: true
-      uninstall: false
       serverAddress: ""
       serverPort: ""
       mode: managed

@@ -35,7 +35,6 @@ func TestEnvironmentVariables(t *testing.T) {
 		g.Expect(GitOpsServiceImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
 		g.Expect(GitOpsConsolePluginImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Single-Namespace"))
-		g.Expect(UNINSTALL).To(gomega.Equal("false"))
 		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("false"))
 		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8"))
 		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal(""))
@@ -54,6 +53,7 @@ func TestGitopsAddonAgentOptions(t *testing.T) {
 			LeaderElectionRenewDeadline: 10 * time.Second,
 			LeaderElectionRetryPeriod:   2 * time.Second,
 			SyncInterval:                60,
+			Cleanup:                     false,
 		}
 
 		g.Expect(opts.MetricsAddr).To(gomega.Equal(""))
@@ -61,6 +61,20 @@ func TestGitopsAddonAgentOptions(t *testing.T) {
 		g.Expect(opts.LeaderElectionRenewDeadline).To(gomega.Equal(10 * time.Second))
 		g.Expect(opts.LeaderElectionRetryPeriod).To(gomega.Equal(2 * time.Second))
 		g.Expect(opts.SyncInterval).To(gomega.Equal(60))
+		g.Expect(opts.Cleanup).To(gomega.BeFalse())
+	})
+
+	t.Run("CleanupModeEnabled", func(t *testing.T) {
+		opts := GitopsAddonAgentOptions{
+			MetricsAddr:                 "",
+			LeaderElectionLeaseDuration: 15 * time.Second,
+			LeaderElectionRenewDeadline: 10 * time.Second,
+			LeaderElectionRetryPeriod:   2 * time.Second,
+			SyncInterval:                60,
+			Cleanup:                     true,
+		}
+
+		g.Expect(opts.Cleanup).To(gomega.BeTrue())
 	})
 }
 
@@ -266,14 +280,12 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		originalHTTPS_PROXY := HTTPS_PROXY
 		originalNO_PROXY := NO_PROXY
 		originalReconcileScope := ReconcileScope
-		originalUNINSTALL := UNINSTALL
 
 		// Set environment variables
 		t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
 		t.Setenv("HTTPS_PROXY", "https://proxy.example.com:8443")
 		t.Setenv("NO_PROXY", "localhost,127.0.0.1,.example.com")
 		t.Setenv("RECONCILE_SCOPE", "Multi-Namespace")
-		t.Setenv("UNINSTALL", "true")
 
 		// Simulate the environment variable processing logic from main()
 		if val, found := os.LookupEnv("HTTP_PROXY"); found && val > "" {
@@ -289,7 +301,6 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 			ReconcileScope = val
 		}
 		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
-			UNINSTALL = val
 		}
 
 		// Verify the values were updated
@@ -297,13 +308,11 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://proxy.example.com:8443"))
 		g.Expect(NO_PROXY).To(gomega.Equal("localhost,127.0.0.1,.example.com"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Multi-Namespace"))
-		g.Expect(UNINSTALL).To(gomega.Equal("true"))
 		// Restore original values
 		HTTP_PROXY = originalHTTP_PROXY
 		HTTPS_PROXY = originalHTTPS_PROXY
 		NO_PROXY = originalNO_PROXY
 		ReconcileScope = originalReconcileScope
-		UNINSTALL = originalUNINSTALL
 	})
 }
 
@@ -348,6 +357,7 @@ func TestOptionsValidation(t *testing.T) {
 		g.Expect(options.LeaderElectionRenewDeadline).To(gomega.BeNumerically(">", 0))
 		g.Expect(options.LeaderElectionRetryPeriod).To(gomega.BeNumerically(">", 0))
 		g.Expect(options.SyncInterval).To(gomega.BeNumerically(">", 0))
+		g.Expect(options.Cleanup).To(gomega.BeFalse())
 
 		// Test leader election timing relationships
 		g.Expect(options.LeaderElectionRenewDeadline).To(gomega.BeNumerically("<", options.LeaderElectionLeaseDuration))
@@ -397,7 +407,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"HTTPS_PROXY":                 HTTPS_PROXY,
 			"NO_PROXY":                    NO_PROXY,
 			"ReconcileScope":              ReconcileScope,
-			"UNINSTALL":                   UNINSTALL,
 			"ARGOCD_AGENT_ENABLED":        ARGOCD_AGENT_ENABLED,
 			"ARGOCD_AGENT_IMAGE":          ARGOCD_AGENT_IMAGE,
 			"ARGOCD_AGENT_SERVER_ADDRESS": ARGOCD_AGENT_SERVER_ADDRESS,
@@ -465,7 +474,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			ReconcileScope = val
 		}
 		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
-			UNINSTALL = val
 		}
 		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
 			ARGOCD_AGENT_ENABLED = val
@@ -495,7 +503,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://test-proxy:8443"))
 		g.Expect(NO_PROXY).To(gomega.Equal("test.local"))
 		g.Expect(ReconcileScope).To(gomega.Equal("Test-Scope"))
-		g.Expect(UNINSTALL).To(gomega.Equal("true"))
 		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("true"))
 		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.Equal("test.registry.io/argocd-agent:test"))
 		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal("test.argocd.local"))
@@ -514,7 +521,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		HTTPS_PROXY = originalValues["HTTPS_PROXY"]
 		NO_PROXY = originalValues["NO_PROXY"]
 		ReconcileScope = originalValues["ReconcileScope"]
-		UNINSTALL = originalValues["UNINSTALL"]
 		ARGOCD_AGENT_ENABLED = originalValues["ARGOCD_AGENT_ENABLED"]
 		ARGOCD_AGENT_IMAGE = originalValues["ARGOCD_AGENT_IMAGE"]
 		ARGOCD_AGENT_SERVER_ADDRESS = originalValues["ARGOCD_AGENT_SERVER_ADDRESS"]

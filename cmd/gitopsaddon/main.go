@@ -45,6 +45,7 @@ type GitopsAddonAgentOptions struct {
 	LeaderElectionRenewDeadline time.Duration
 	LeaderElectionRetryPeriod   time.Duration
 	SyncInterval                int
+	Cleanup                     bool
 }
 
 var options = GitopsAddonAgentOptions{
@@ -53,6 +54,7 @@ var options = GitopsAddonAgentOptions{
 	LeaderElectionRenewDeadline: 10 * time.Second,
 	LeaderElectionRetryPeriod:   2 * time.Second,
 	SyncInterval:                60,
+	Cleanup:                     false,
 }
 
 var (
@@ -73,13 +75,11 @@ var (
 	HTTP_PROXY                  = ""
 	HTTPS_PROXY                 = ""
 	NO_PROXY                    = ""
-	UNINSTALL                   = "false"
 	ARGOCD_AGENT_ENABLED        = "false"
-	ARGOCD_AGENT_IMAGE          = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:2f5f997bce924445de735ae0508dca1a7bba561bc4acdacf659928488233cb8a"
+	ARGOCD_AGENT_IMAGE          = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:d17069d475959a5fca31dc4cd2c2dce4f3d895f2c2b97906261791674a889079"
 	ARGOCD_AGENT_SERVER_ADDRESS = ""
 	ARGOCD_AGENT_SERVER_PORT    = ""
 	ARGOCD_AGENT_MODE           = "managed"
-	ARGOCD_AGENT_UNINSTALL      = "false"
 )
 
 func init() {
@@ -138,6 +138,13 @@ func main() {
 		"sync-interval",
 		options.SyncInterval,
 		"The interval of housekeeping in seconds.",
+	)
+
+	flag.BoolVar(
+		&options.Cleanup,
+		"cleanup",
+		options.Cleanup,
+		"Run in cleanup mode (pre-delete hook).",
 	)
 
 	opts := zap.Options{
@@ -203,11 +210,6 @@ func main() {
 		ReconcileScope = newReconcileScope
 	}
 
-	newUNINSTALL, found := os.LookupEnv("UNINSTALL")
-	if found && newUNINSTALL > "" {
-		UNINSTALL = newUNINSTALL
-	}
-
 	newArgoCDAgentEnabled, found := os.LookupEnv("ARGOCD_AGENT_ENABLED")
 	if found && newArgoCDAgentEnabled > "" {
 		ARGOCD_AGENT_ENABLED = newArgoCDAgentEnabled
@@ -233,9 +235,11 @@ func main() {
 		ARGOCD_AGENT_MODE = newArgoCDAgentMode
 	}
 
-	newArgoCDAgentUninstall, found := os.LookupEnv("ARGOCD_AGENT_UNINSTALL")
-	if found && newArgoCDAgentUninstall > "" {
-		ARGOCD_AGENT_UNINSTALL = newArgoCDAgentUninstall
+	// If cleanup mode is enabled, run cleanup and exit
+	if options.Cleanup {
+		setupLog.Info("Starting in cleanup mode")
+		runCleanupMode()
+		return
 	}
 
 	setupLog.Info("Leader election settings",
@@ -254,13 +258,11 @@ func main() {
 		"HTTP_PROXY", HTTP_PROXY,
 		"HTTPS_PROXY", HTTPS_PROXY,
 		"NO_PROXY", NO_PROXY,
-		"UNINSTALL", UNINSTALL,
 		"ARGOCD_AGENT_ENABLED", ARGOCD_AGENT_ENABLED,
 		"ARGOCD_AGENT_IMAGE", ARGOCD_AGENT_IMAGE,
 		"ARGOCD_AGENT_SERVER_ADDRESS", ARGOCD_AGENT_SERVER_ADDRESS,
 		"ARGOCD_AGENT_SERVER_PORT", ARGOCD_AGENT_SERVER_PORT,
 		"ARGOCD_AGENT_MODE", ARGOCD_AGENT_MODE,
-		"ARGOCD_AGENT_UNINSTALL", ARGOCD_AGENT_UNINSTALL,
 	)
 
 	// Create a new Cmd to provide shared dependencies and start components
@@ -281,7 +283,7 @@ func main() {
 	}
 
 	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, UNINSTALL, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE, ARGOCD_AGENT_UNINSTALL); err != nil {
+		GitopsImage, GitopsNS, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}
@@ -290,6 +292,37 @@ func main() {
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+
+// runCleanupMode runs the application in cleanup mode for pre-delete hook
+func runCleanupMode() {
+	setupLog.Info("Running cleanup mode")
+
+	// Create a manager for cleanup mode (no leader election for cleanup job)
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics in cleanup mode
+		},
+		LeaderElection: false, // Cleanup job doesn't need leader election
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to start cleanup manager")
+		os.Exit(1)
+	}
+
+	// Setup the cleanup with the manager
+	if err = gitopsaddon.SetupCleanupWithManager(mgr, GitopsOperatorImage, GitopsOperatorNS,
+		GitopsImage, GitopsNS, ARGOCD_AGENT_IMAGE); err != nil {
+		setupLog.Error(err, "unable to create cleanup controller")
+		os.Exit(1)
+	}
+
+	setupLog.Info("starting cleanup manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "problem running cleanup manager")
 		os.Exit(1)
 	}
 }

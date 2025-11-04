@@ -162,10 +162,10 @@ func TestResourceManagement(t *testing.T) {
 					err := reconciler.Client.Get(context.TODO(), key, result)
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 
-					// Check that management label was added
-					labels := result.GetLabels()
-					g.Expect(labels).ToNot(gomega.BeNil())
-					g.Expect(labels["app.kubernetes.io/managed-by"]).To(gomega.Equal("gitops-addon"))
+				// Check that management label was added
+				labels := result.GetLabels()
+				g.Expect(labels).ToNot(gomega.BeNil())
+				g.Expect(labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 				}
 			}
 
@@ -263,10 +263,10 @@ func TestApplyManifestSelectivelyWithManagement(t *testing.T) {
 					err := reconciler.Client.Get(context.TODO(), key, result)
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 
-					// Check that management label was added
-					labels := result.GetLabels()
-					g.Expect(labels).ToNot(gomega.BeNil())
-					g.Expect(labels["app.kubernetes.io/managed-by"]).To(gomega.Equal("gitops-addon"))
+				// Check that management label was added
+				labels := result.GetLabels()
+				g.Expect(labels).ToNot(gomega.BeNil())
+				g.Expect(labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 				}
 			}
 

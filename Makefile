@@ -149,10 +149,81 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 deploy-ocm:
 	deploy/ocm/install.sh
 
+# E2E Test Configuration
+HUB_CLUSTER ?= hub
+SPOKE_CLUSTER ?= cluster1
+E2E_IMG ?= quay.io/stolostron/multicloud-integrations:latest
+KIND ?= kind
+KUBECTL ?= kubectl
+gitOpsNamespace ?= openshift-gitops
+
+# E2E Test Configuration
+HUB_CLUSTER ?= hub
+SPOKE_CLUSTER ?= cluster1
+E2E_IMG ?= quay.io/stolostron/multicloud-integrations:latest
+KIND ?= kind
+gitOpsNamespace ?= openshift-gitops
+
+# test-e2e: For CI - assumes clusters and images exist, runs legacy e2e script
 .PHONY: test-e2e
-test-e2e: deploy-ocm
+test-e2e:
 	e2e/run_e2e.sh
 
-.PHONY: test-e2e
-test-e2e-gitopsaddon: deploy-ocm
-	e2e-gitopsaddon/run_e2e-gitopsaddon.sh
+# test-e2e-full: For local - creates clusters, builds images, runs legacy e2e script
+.PHONY: test-e2e-full
+test-e2e-full:
+	@echo "===== E2E Full Test (Local mode) ====="
+	@$(KIND) delete clusters --all || true
+	@$(KIND) create cluster --name $(HUB_CLUSTER)
+	@$(KIND) create cluster --name $(SPOKE_CLUSTER)
+	@$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-full.log
+	@E2E_IMG=$(E2E_IMG) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-full.log
+	@echo "✓ E2E Full Test Complete - Logs: /tmp/e2e-full.log"
+
+# test-e2e-gitopsaddon-full: For local - creates clusters, builds images, verifies GitOps addon with app sync
+.PHONY: test-e2e-gitopsaddon-full
+test-e2e-gitopsaddon-full:
+	@echo "===== E2E GitOps Addon Full Test (Local mode) ====="
+	@$(KIND) delete clusters --all || true
+	@$(KIND) create cluster --name $(HUB_CLUSTER)
+	@$(KIND) create cluster --name $(SPOKE_CLUSTER)
+	@$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-gitopsaddon-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log
+	@E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log
+	@echo "✓ E2E GitOps Addon Full Test Complete - Logs: /tmp/e2e-gitopsaddon-full.log"
+
+# test-e2e-gitopsaddon: For CI - assumes clusters and images exist, verifies GitOps addon (no app sync)
+.PHONY: test-e2e-gitopsaddon
+test-e2e-gitopsaddon: manifests
+	@echo "===== E2E GitOps Addon Test (CI mode) ====="
+	@E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon.sh 2>&1 | tee /tmp/e2e-gitopsaddon.log
+	@echo "✓ E2E GitOps Addon Test Complete - Logs: /tmp/e2e-gitopsaddon.log"
+
+# test-e2e-gitopsaddon-cleanup: For CI - assumes clusters and images exist, verifies GitOps addon cleanup
+.PHONY: test-e2e-gitopsaddon-cleanup
+test-e2e-gitopsaddon-cleanup: manifests
+	@echo "===== E2E GitOps Addon Cleanup Test (CI mode) ====="
+	@E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-cleanup.sh 2>&1 | tee /tmp/e2e-gitopsaddon-cleanup.log
+	@echo "✓ E2E GitOps Addon Cleanup Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup.log"
+
+# test-e2e-gitopsaddon-cleanup-full: For local - creates clusters, builds images, verifies GitOps addon cleanup
+.PHONY: test-e2e-gitopsaddon-cleanup-full
+test-e2e-gitopsaddon-cleanup-full:
+	@echo "===== E2E GitOps Addon Cleanup Full Test (Local mode) ====="
+	@$(KIND) delete clusters --all || true
+	@$(KIND) create cluster --name $(HUB_CLUSTER)
+	@$(KIND) create cluster --name $(SPOKE_CLUSTER)
+	@$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-gitopsaddon-cleanup-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log
+	@$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log
+	@E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log
+	@echo "✓ E2E GitOps Addon Cleanup Full Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup-full.log"
+
+.PHONY: clean-full
+clean-full:
+	@echo "===== Cleaning up all KinD clusters ====="
+	@$(KIND) delete clusters --all || true
+	@echo "===== Cleanup complete ====="

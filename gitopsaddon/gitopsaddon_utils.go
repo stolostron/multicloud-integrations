@@ -376,7 +376,7 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	obj.SetLabels(labels)
 
 	switch kind {
@@ -438,7 +438,7 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	obj.SetLabels(labels)
 
 	if err != nil && errors.IsNotFound(err) {
@@ -497,7 +497,7 @@ func (r *GitopsAddonReconciler) applyCRDIfNotExists(resource, apiVersion, yamlFi
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["app.kubernetes.io/managed-by"] = "gitops-addon"
+	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	crd.SetLabels(labels)
 
 	err = r.Create(context.TODO(), &crd)
@@ -528,17 +528,18 @@ func ParseImageReference(imageRef string) (string, string, error) {
 			repository := imageRef[:lastColonIndex]
 			tag := imageRef[lastColonIndex+1:]
 
-			// Check if this might be a port number instead of a tag
-			// Port numbers are typically numeric and shorter
-			if !strings.Contains(tag, "/") && len(tag) < 10 {
-				// This looks like it could be a tag
+			// Check if this is a tag or a port number
+			// If there's a "/" after the colon, it's a port (e.g., registry:5000/image)
+			// If there's no "/", it's a tag (e.g., image:v1.0.0)
+			if !strings.Contains(tag, "/") {
+				// This is a tag
 				return repository, tag, nil
 			}
 		}
 	}
 
-	// If no tag or digest found, assume "latest"
-	return imageRef, "latest", nil
+	// If no tag or digest found, return error
+	return "", "", fmt.Errorf("image reference %q has no tag or digest specified", imageRef)
 }
 
 // parseImageComponents is a helper function that parses image components

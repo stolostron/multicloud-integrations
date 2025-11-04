@@ -45,7 +45,6 @@ func TestSetupWithManager(t *testing.T) {
 		httpProxy                string
 		httpsProxy               string
 		noProxy                  string
-		uninstall                string
 		argoCDAgentEnabled       string
 		argoCDAgentImage         string
 		argoCDAgentServerAddr    string
@@ -67,7 +66,6 @@ func TestSetupWithManager(t *testing.T) {
 			httpProxy:                "",
 			httpsProxy:               "",
 			noProxy:                  "",
-			uninstall:                "false",
 			argoCDAgentEnabled:       "false",
 			argoCDAgentImage:         "test-agent:latest",
 			argoCDAgentServerAddr:    "",
@@ -89,7 +87,6 @@ func TestSetupWithManager(t *testing.T) {
 			httpProxy:                "http://proxy:8080",
 			httpsProxy:               "https://proxy:8080",
 			noProxy:                  "localhost,127.0.0.1",
-			uninstall:                "true",
 			argoCDAgentEnabled:       "true",
 			argoCDAgentImage:         "test-agent:v1.0.0",
 			argoCDAgentServerAddr:    "argocd.example.com",
@@ -119,9 +116,9 @@ func TestSetupWithManager(t *testing.T) {
 			// Test SetupWithManager
 			err = SetupWithManager(mgr, tt.interval, tt.gitopsOperatorImage, tt.gitopsOperatorNS,
 				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.gitOpsServiceImage, tt.gitOpsConsolePluginImage, tt.reconcileScope,
-				tt.httpProxy, tt.httpsProxy, tt.noProxy, tt.uninstall,
+				tt.httpProxy, tt.httpsProxy, tt.noProxy,
 				tt.argoCDAgentEnabled, tt.argoCDAgentImage, tt.argoCDAgentServerAddr,
-				tt.argoCDAgentServerPort, tt.argoCDAgentMode, "false")
+				tt.argoCDAgentServerPort, tt.argoCDAgentMode)
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -169,7 +166,6 @@ func TestGitopsAddonReconciler_Start(t *testing.T) {
 				GitopsNS:            "openshift-gitops",
 				RedisImage:          "test-redis:latest",
 				ReconcileScope:      "Single-Namespace",
-				Uninstall:           "false",
 				ArgoCDAgentEnabled:  "false",
 			}
 
@@ -205,49 +201,25 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name                 string
-		gitopsOperatorNS     string
-		gitopsNS             string
-		argoCDAgentEnabled   string
-		uninstall            string
-		argoCDAgentUninstall string
-		description          string
+		name               string
+		gitopsOperatorNS   string
+		gitopsNS           string
+		argoCDAgentEnabled string
+		description        string
 	}{
 		{
-			name:                 "housekeeping_install_with_agent_disabled",
-			gitopsOperatorNS:     "openshift-gitops-operator",
-			gitopsNS:             "openshift-gitops",
-			argoCDAgentEnabled:   "false",
-			uninstall:            "false",
-			argoCDAgentUninstall: "false",
-			description:          "Normal install flow",
+			name:               "housekeeping_install_with_agent_disabled",
+			gitopsOperatorNS:   "openshift-gitops-operator",
+			gitopsNS:           "openshift-gitops",
+			argoCDAgentEnabled: "false",
+			description:        "Normal install flow",
 		},
 		{
-			name:                 "housekeeping_install_with_agent_enabled",
-			gitopsOperatorNS:     "custom-operator-ns",
-			gitopsNS:             "custom-gitops-ns",
-			argoCDAgentEnabled:   "true",
-			uninstall:            "false",
-			argoCDAgentUninstall: "false",
-			description:          "Install flow with agent enabled",
-		},
-		{
-			name:                 "housekeeping_full_uninstall",
-			gitopsOperatorNS:     "openshift-gitops-operator",
-			gitopsNS:             "openshift-gitops",
-			argoCDAgentEnabled:   "true",
-			uninstall:            "true",
-			argoCDAgentUninstall: "false",
-			description:          "Full uninstall including agent",
-		},
-		{
-			name:                 "housekeeping_agent_only_uninstall",
-			gitopsOperatorNS:     "openshift-gitops-operator",
-			gitopsNS:             "openshift-gitops",
-			argoCDAgentEnabled:   "true",
-			uninstall:            "false",
-			argoCDAgentUninstall: "true",
-			description:          "Agent-only uninstall",
+			name:               "housekeeping_install_with_agent_enabled",
+			gitopsOperatorNS:   "custom-operator-ns",
+			gitopsNS:           "custom-gitops-ns",
+			argoCDAgentEnabled: "true",
+			description:        "Install flow with agent enabled",
 		},
 	}
 
@@ -267,16 +239,14 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 				GitOpsServiceImage:       "test-gitops-service:latest",
 				GitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
 				ReconcileScope:           "Single-Namespace",
-				Uninstall:                tt.uninstall,
 				ArgoCDAgentEnabled:       tt.argoCDAgentEnabled,
-				ArgoCDAgentUninstall:     tt.argoCDAgentUninstall,
 			}
 
-			// This test verifies that houseKeeping doesn't panic
-			// The actual functionality is tested in install/uninstall tests
-			g.Expect(func() {
-				reconciler.houseKeeping()
-			}).ToNot(gomega.Panic())
+		// This test verifies that reconcile doesn't panic
+		// The actual functionality is tested in install/uninstall tests
+		g.Expect(func() {
+			reconciler.reconcile(context.TODO())
+		}).ToNot(gomega.Panic())
 		})
 	}
 }
@@ -297,7 +267,6 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 		HTTP_PROXY:               "http://proxy:8080",
 		HTTPS_PROXY:              "https://proxy:8080",
 		NO_PROXY:                 "localhost,127.0.0.1",
-		Uninstall:                "false",
 		ArgoCDAgentEnabled:       "true",
 		ArgoCDAgentImage:         "test-agent:latest",
 		ArgoCDAgentServerAddress: "argocd.example.com",
@@ -318,7 +287,6 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 	g.Expect(reconciler.HTTP_PROXY).To(gomega.Equal("http://proxy:8080"))
 	g.Expect(reconciler.HTTPS_PROXY).To(gomega.Equal("https://proxy:8080"))
 	g.Expect(reconciler.NO_PROXY).To(gomega.Equal("localhost,127.0.0.1"))
-	g.Expect(reconciler.Uninstall).To(gomega.Equal("false"))
 	g.Expect(reconciler.ArgoCDAgentEnabled).To(gomega.Equal("true"))
 	g.Expect(reconciler.ArgoCDAgentImage).To(gomega.Equal("test-agent:latest"))
 	g.Expect(reconciler.ArgoCDAgentServerAddress).To(gomega.Equal("argocd.example.com"))

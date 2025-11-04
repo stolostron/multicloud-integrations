@@ -69,16 +69,16 @@ func TestParseImageReference(t *testing.T) {
 		{
 			name:         "image_without_tag",
 			imageRef:     "registry.io/repo/image",
-			expectedRepo: "registry.io/repo/image",
-			expectedTag:  "latest",
-			expectError:  false,
+			expectedRepo: "",
+			expectedTag:  "",
+			expectError:  true,
 		},
 		{
 			name:         "simple_image_name",
 			imageRef:     "nginx",
-			expectedRepo: "nginx",
-			expectedTag:  "latest",
-			expectError:  false,
+			expectedRepo: "",
+			expectedTag:  "",
+			expectError:  true,
 		},
 		{
 			name:         "complex_registry_with_tag",
@@ -126,10 +126,10 @@ func TestParseImageComponents(t *testing.T) {
 			expectedTag:  "sha256:123456",
 		},
 		{
-			name:         "no_tag_defaults_to_latest",
-			imageRef:     "myapp",
-			expectedRepo: "myapp",
-			expectedTag:  "latest",
+			name:         "image_with_registry_and_port",
+			imageRef:     "localhost:8080/myapp:v1.0",
+			expectedRepo: "localhost:8080/myapp",
+			expectedTag:  "v1.0",
 		},
 	}
 

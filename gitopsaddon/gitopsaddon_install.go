@@ -34,7 +34,7 @@ import (
 )
 
 // installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process
-func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
+func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	klog.Info("Start templating and applying openshift gitops operator and its instance...")
 
 	// 1. Always template and apply the openshift gitops operator manifest
@@ -45,23 +45,24 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
 	// install dependency CRDs if it doesn't exist
 	err := r.applyCRDIfNotExists("gitopsservices", "pipelines.openshift.io/v1alpha1", "charts/dep-crds/gitopsservices.pipelines.openshift.io.crd.yaml")
 	if err != nil {
-		return
+		return err
 	}
 
 	err = r.applyCRDIfNotExists("routes", "route.openshift.io/v1", "charts/dep-crds/routes.route.openshift.io.crd.yaml")
 	if err != nil {
-		return
+		return err
 	}
 
 	err = r.applyCRDIfNotExists("clusterversions", "config.openshift.io/v1", "charts/dep-crds/clusterversions.config.openshift.io.crd.yaml")
 	if err != nil {
-		return
+		return err
 	}
 
 	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
 		err := r.templateAndApplyChart("charts/openshift-gitops-operator", r.GitopsOperatorNS, "openshift-gitops-operator")
 		if err != nil {
 			klog.Errorf("Failed to template and apply openshift-gitops-operator: %v", err)
+			return err
 		} else {
 			klog.Info("Successfully templated and applied openshift-gitops-operator")
 		}
@@ -73,7 +74,7 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
 	err = r.waitForArgoCDCR(timeout)
 	if err != nil {
 		klog.Errorf("Failed to find ArgoCD CR within %v: %v", timeout, err)
-		return
+		return err
 	}
 
 	// 3. Always render and apply openshift-gitops-dependency helm chart manifests
@@ -85,6 +86,7 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
 		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", r.GitopsNS)
 		if err != nil {
 			klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
+			return err
 		} else {
 			klog.Info("Successfully templated and applied openshift-gitops-dependency")
 		}
@@ -100,12 +102,13 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
 			err := r.ensureArgoCDRedisSecret()
 			if err != nil {
 				klog.Errorf("Failed to ensure argocd-redis secret: %v", err)
-				return
+				return err
 			}
 
 			err = r.templateAndApplyChart("charts/argocd-agent", r.GitopsNS, "argocd-agent")
 			if err != nil {
 				klog.Errorf("Failed to template and apply argocd-agent: %v", err)
+				return err
 			} else {
 				klog.Info("Successfully templated and applied argocd-agent")
 			}
@@ -113,6 +116,8 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() {
 	} else {
 		klog.Info("ArgoCD Agent not enabled, skipping installation")
 	}
+
+	return nil
 }
 
 // waitForArgoCDCR waits for the ArgoCD CR to be created by the operator
@@ -207,7 +212,6 @@ func (r *GitopsAddonReconciler) ensureArgoCDRedisSecret() error {
 			Namespace: r.GitopsNS,
 			Labels: map[string]string{
 				"apps.open-cluster-management.io/gitopsaddon": "true",
-				"app.kubernetes.io/managed-by":                "gitops-addon", // Add management label
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -243,7 +247,6 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 					Labels: map[string]string{
 						"addon.open-cluster-management.io/namespace":  "true", //enable copying the image pull secret to the NS
 						"apps.open-cluster-management.io/gitopsaddon": "true",
-						"app.kubernetes.io/managed-by":                "gitops-addon", // Add management label
 					},
 				},
 			}
@@ -270,7 +273,6 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	}
 	namespace.Labels["addon.open-cluster-management.io/namespace"] = "true"
 	namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
-	namespace.Labels["app.kubernetes.io/managed-by"] = "gitops-addon" // Add management label
 
 	if err := r.Update(context.TODO(), namespace); err != nil {
 		klog.Errorf("Failed to update the labels to the openshift-gitops-operator namespace, err: %v", err)

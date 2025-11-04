@@ -19,11 +19,13 @@ package gitopsaddon
 import (
 	"context"
 	"embed"
+	"os"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -52,19 +54,30 @@ type GitopsAddonReconciler struct {
 	HTTP_PROXY               string
 	HTTPS_PROXY              string
 	NO_PROXY                 string
-	Uninstall                string
 	ArgoCDAgentEnabled       string
 	ArgoCDAgentImage         string
 	ArgoCDAgentServerAddress string
 	ArgoCDAgentServerPort    string
 	ArgoCDAgentMode          string
-	ArgoCDAgentUninstall     string
 }
 
+// GitopsAddonCleanupReconciler handles cleanup/uninstall of Gitops agent addon
+type GitopsAddonCleanupReconciler struct {
+	client.Client
+	Scheme              *runtime.Scheme
+	Config              *rest.Config
+	GitopsOperatorImage string
+	GitopsOperatorNS    string
+	GitopsImage         string
+	GitopsNS            string
+	ArgoCDAgentImage    string
+}
+
+// SetupWithManager sets up the addon with the Manager
 func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
 	gitopsImage, gitopsNS, redisImage, gitOpsServiceImage, gitOpsConsolePluginImage, reconcileScope,
-	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, uninstall, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode, argoCDAgentUninstall string) error {
-	dsRS := &GitopsAddonReconciler{
+	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
+	reconciler := &GitopsAddonReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
 		Config:                   mgr.GetConfig(),
@@ -80,13 +93,11 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		HTTP_PROXY:               HTTP_PROXY,
 		HTTPS_PROXY:              HTTPS_PROXY,
 		NO_PROXY:                 NO_PROXY,
-		Uninstall:                uninstall,
 		ArgoCDAgentEnabled:       argoCDAgentEnabled,
 		ArgoCDAgentImage:         argoCDAgentImage,
 		ArgoCDAgentServerAddress: argoCDAgentServerAddress,
 		ArgoCDAgentServerPort:    argoCDAgentServerPort,
 		ArgoCDAgentMode:          argoCDAgentMode,
-		ArgoCDAgentUninstall:     argoCDAgentUninstall,
 	}
 
 	// Setup the secret controller to watch and copy ArgoCD agent client cert secrets
@@ -94,23 +105,68 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		return err
 	}
 
-	return mgr.Add(dsRS)
+	return mgr.Add(reconciler)
 }
 
-func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
-	go wait.Until(func() {
-		r.houseKeeping()
-	}, time.Duration(r.Interval)*time.Second, ctx.Done())
+// SetupCleanupWithManager sets up the cleanup reconciler with the Manager
+func SetupCleanupWithManager(mgr manager.Manager, gitopsOperatorImage, gitopsOperatorNS, gitopsImage, gitopsNS, argoCDAgentImage string) error {
+	reconciler := &GitopsAddonCleanupReconciler{
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		Config:              mgr.GetConfig(),
+		GitopsOperatorImage: gitopsOperatorImage,
+		GitopsOperatorNS:    gitopsOperatorNS,
+		GitopsImage:         gitopsImage,
+		GitopsNS:            gitopsNS,
+		ArgoCDAgentImage:    argoCDAgentImage,
+	}
 
+	return mgr.Add(reconciler)
+}
+
+// Start implements manager.Runnable and blocks until the context is cancelled
+func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
+	klog.Info("Starting Gitops Addon controller")
+
+	// Perform initial reconciliation
+	r.reconcile(ctx)
+
+	// Run periodic reconciliation until context is cancelled
+	wait.UntilWithContext(ctx, r.reconcile, time.Duration(r.Interval)*time.Second)
+
+	klog.Info("Gitops Addon controller stopped")
 	return nil
 }
 
-func (r *GitopsAddonReconciler) houseKeeping() {
-	if r.Uninstall == "true" {
-		r.performUninstallOperations()
-	} else if r.ArgoCDAgentUninstall == "true" {
-		r.performAgentUninstallOperations()
-	} else {
-		r.installOrUpdateOpenshiftGitops()
+// reconcile performs the addon reconciliation logic
+func (r *GitopsAddonReconciler) reconcile(ctx context.Context) {
+	klog.V(2).Info("Reconciling Gitops Addon")
+
+	// Perform install/update
+	if err := r.installOrUpdateOpenshiftGitops(); err != nil {
+		klog.Errorf("Failed to reconcile Gitops Addon: %v", err)
+		// Continue running - will retry on next interval
+		return
 	}
+	klog.V(2).Info("Successfully reconciled Gitops Addon")
+}
+
+// Start implements manager.Runnable for cleanup and runs once then exits
+func (r *GitopsAddonCleanupReconciler) Start(ctx context.Context) error {
+	klog.Info("Starting Gitops Addon cleanup")
+
+	// Perform cleanup (uninstall)
+	if err := r.uninstallGitopsAgent(ctx); err != nil {
+		klog.Errorf("Failed to cleanup Gitops Addon: %v", err)
+		// Exit with error code 1
+		os.Exit(1)
+	}
+
+	klog.Info("Successfully completed Gitops Addon cleanup")
+
+	// Exit successfully after cleanup is done
+	// This is needed for the cleanup job to complete properly
+	os.Exit(0)
+
+	return nil
 }

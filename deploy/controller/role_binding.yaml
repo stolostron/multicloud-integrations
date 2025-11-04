@@ -9,4 +9,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: multicloud-integrations-sa
-  namespace: open-cluster-management
+  namespace: openshift-gitops

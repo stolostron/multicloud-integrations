@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: multicloud-integrations-gitops
-  namespace: open-cluster-management
+  namespace: openshift-gitops
 spec:
   selector:
     matchLabels:
@@ -27,6 +27,15 @@ spec:
         image: quay.io/stolostron/multicloud-integrations:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

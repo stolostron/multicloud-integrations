@@ -8,14 +8,6 @@ spec:
   version: {{ .Values.global.application_controller.tag }}
   controller:
     enabled: true
-    processors: {}
-    resources:
-      limits:
-        cpu: "2"
-        memory: 2Gi
-      requests:
-        cpu: 250m
-        memory: 1Gi
     env:
       {{- if eq .Values.global.reconcile_scope "All-Namespaces"}}
       - name: ARGOCD_APPLICATION_NAMESPACES
@@ -34,27 +26,13 @@ spec:
         value: {{ .Values.global.proxyConfig.NO_PROXY }}
       {{- end }}
   redis:
+    enabled: true  
     image: {{ .Values.global.redis.image }}
     version: {{ .Values.global.redis.tag }}
-    enabled: true
-    resources:
-      limits:
-        cpu: 500m
-        memory: 256Mi
-      requests:
-        cpu: 250m
-        memory: 128Mi
   repo:
+    enabled: true
     image: {{ .Values.global.application_controller.image }}
     version: {{ .Values.global.application_controller.tag }}
-    enabled: true
-    resources:
-      limits:
-        cpu: "1"
-        memory: 1Gi
-      requests:
-        cpu: 250m
-        memory: 256Mi
     env:
       {{- if .Values.global.proxyConfig.HTTP_PROXY }}
       - name: HTTP_PROXY

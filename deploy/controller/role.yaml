@@ -24,6 +24,7 @@ rules:
       - policy.open-cluster-management.io
     resources:
       - addondeploymentconfigs
+      - addontemplates
       - channels
       - channels/status
       - channels/finalizers
@@ -99,6 +100,7 @@ rules:
       - endpoints
       - events
       - namespaces
+      - pods
       - secrets
       - serviceaccounts
       - services

@@ -15,6 +15,7 @@ limitations under the License.
 package gitopscluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -202,6 +203,10 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 		{
 			name: "server address and port already set - no update",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -220,6 +225,10 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 		{
 			name: "discover and set server address and port",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -260,11 +269,21 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 			},
 		},
 		{
-			name: "existing addon config has server settings - no update",
+			name: "server address partially set - should discover",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "partial-server.com",
+							// Port is missing - should discover
+						},
 					},
 				},
 			},
@@ -276,23 +295,38 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				},
 			},
 			existingObjects: []client.Object{
-				&addonv1alpha1.AddOnDeploymentConfig{
+				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "gitops-addon-config",
-						Namespace: "test-cluster",
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: "openshift-gitops",
 					},
-					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
-						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
-							{Name: "ARGOCD_AGENT_SERVER_ADDRESS", Value: "existing-server.com"},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "discovered-server.com"},
+							},
 						},
 					},
 				},
 			},
-			expectedUpdated: false,
+			expectedUpdated: true,
+			validateFunc: func(t *testing.T, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) {
+				assert.Equal(t, "discovered-server.com", gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress)
+				assert.Equal(t, "443", gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
+			},
 		},
 		{
 			name: "principal service not found - should return error",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -313,16 +347,18 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Add the GitOpsCluster to the existing objects so it can be updated
+			objects := append(tt.existingObjects, tt.gitOpsCluster)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
+				WithObjects(objects...).
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
 				Client: fakeClient,
 			}
 
-			updated, err := reconciler.EnsureServerAddressAndPort(tt.gitOpsCluster, tt.managedClusters)
+			updated, err := reconciler.EnsureServerAddressAndPort(context.TODO(), tt.gitOpsCluster, tt.managedClusters)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -464,18 +500,34 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := v1.AddToScheme(scheme)
 	require.NoError(t, err)
+	err = gitopsclusterV1beta1.AddToScheme(scheme)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name            string
-		argoNamespace   string
+		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
 		existingObjects []client.Object
 		expectedAddress string
 		expectedPort    string
 		expectedError   bool
+		skipDiscovery   bool // if true, server address/port already set
 	}{
 		{
-			name:          "discover from LoadBalancer hostname",
-			argoNamespace: "openshift-gitops",
+			name: "discover from LoadBalancer hostname",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -500,8 +552,21 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 			expectedPort:    "443",
 		},
 		{
-			name:          "discover from LoadBalancer IP",
-			argoNamespace: "openshift-gitops",
+			name: "discover from LoadBalancer IP",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -526,8 +591,44 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 			expectedPort:    "8443",
 		},
 		{
-			name:          "service without external LoadBalancer - should error",
-			argoNamespace: "openshift-gitops",
+			name: "skip discovery - values already set",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "existing-server.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			skipDiscovery:   true,
+			expectedAddress: "existing-server.com",
+			expectedPort:    "443",
+		},
+		{
+			name: "service without external LoadBalancer - should error",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
@@ -547,31 +648,45 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			name:          "service not found - should error",
-			argoNamespace: "openshift-gitops",
+			name: "service not found - should error",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "openshift-gitops",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
 			expectedError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			objects := append(tt.existingObjects, tt.gitOpsCluster)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
+				WithObjects(objects...).
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
 				Client: fakeClient,
 			}
 
-			address, port, err := reconciler.DiscoverServerAddressAndPort(tt.argoNamespace)
+			err := reconciler.DiscoverServerAddressAndPort(context.TODO(), tt.gitOpsCluster)
 
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedAddress, address)
-				assert.Equal(t, tt.expectedPort, port)
+				assert.Equal(t, tt.expectedAddress, tt.gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress)
+				assert.Equal(t, tt.expectedPort, tt.gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
 			}
 		})
 	}

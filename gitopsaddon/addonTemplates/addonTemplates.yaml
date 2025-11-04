@@ -5,13 +5,6 @@ metadata:
   name: gitops-addon
 spec:
   addonName: gitops-addon
-  registration:
-    - type: CustomSigner
-      customSigner:
-        signerName: open-cluster-management.io/argocd-agent-addon
-        signingCA:
-          name: argocd-agent-ca
-          namespace: openshift-gitops
   agentSpec:
       workload:
         manifests:
