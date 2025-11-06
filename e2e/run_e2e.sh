@@ -6,12 +6,15 @@
 set -o nounset
 set -o pipefail
 
+echo "SETUP install OCM"
+deploy/ocm/install.sh
+
 echo "SETUP install multicloud-integrations"
 kubectl config use-context kind-hub
+kubectl create namespace open-cluster-management || true
 kubectl apply -f deploy/crds/
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
 kubectl apply -f deploy/controller/
-kubectl apply -f e2e/hub/dummy-application-svc-ca-secret.yaml
 
 kubectl -n open-cluster-management rollout status deployment multicloud-integrations-gitops --timeout=120s
 kubectl -n open-cluster-management rollout status deployment multicloud-integrations --timeout=120s

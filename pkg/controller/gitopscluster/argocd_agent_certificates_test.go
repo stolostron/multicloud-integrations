@@ -16,541 +16,65 @@ package gitopscluster
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
-	"net"
-	"os"
 	"testing"
-	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestGetArgoCDAgentPrincipalTLSSecretName(t *testing.T) {
-	tests := []struct {
-		name     string
-		envValue string
-		expected string
-	}{
-		{
-			name:     "default name when env var not set",
-			envValue: "",
-			expected: "argocd-agent-principal-tls",
-		},
-		{
-			name:     "custom name from env var",
-			envValue: "custom-principal-tls",
-			expected: "custom-principal-tls",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Save original env var
-			originalValue := os.Getenv("ARGOCD_AGENT_PRINCIPAL_TLS_SECRET_NAME")
-			defer os.Setenv("ARGOCD_AGENT_PRINCIPAL_TLS_SECRET_NAME", originalValue)
-
-			if tt.envValue != "" {
-				os.Setenv("ARGOCD_AGENT_PRINCIPAL_TLS_SECRET_NAME", tt.envValue)
-			} else {
-				os.Unsetenv("ARGOCD_AGENT_PRINCIPAL_TLS_SECRET_NAME")
-			}
-
-			result := getArgoCDAgentPrincipalTLSSecretName()
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestGetArgoCDAgentResourceProxyTLSSecretName(t *testing.T) {
-	tests := []struct {
-		name     string
-		envValue string
-		expected string
-	}{
-		{
-			name:     "default name when env var not set",
-			envValue: "",
-			expected: "argocd-agent-resource-proxy-tls",
-		},
-		{
-			name:     "custom name from env var",
-			envValue: "custom-proxy-tls",
-			expected: "custom-proxy-tls",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Save original env var
-			originalValue := os.Getenv("ARGOCD_AGENT_RESOURCE_PROXY_TLS_SECRET_NAME")
-			defer os.Setenv("ARGOCD_AGENT_RESOURCE_PROXY_TLS_SECRET_NAME", originalValue)
-
-			if tt.envValue != "" {
-				os.Setenv("ARGOCD_AGENT_RESOURCE_PROXY_TLS_SECRET_NAME", tt.envValue)
-			} else {
-				os.Unsetenv("ARGOCD_AGENT_RESOURCE_PROXY_TLS_SECRET_NAME")
-			}
-
-			result := getArgoCDAgentResourceProxyTLSSecretName()
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestEnsureArgoCDAgentCertificates(t *testing.T) {
+func TestVerifyCACertificateExists(t *testing.T) {
 	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = gitopsclusterV1beta1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	// Create test CA certificate and key
-	caCert, caKey := createTestCA(t)
-	caCertPEM := pemEncodeCertificate(caCert)
-	caKeyPEM := pemEncodePrivateKey(caKey)
-
-	// Create test ArgoCD agent principal service
-	principalService := &v1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "openshift-gitops-agent-principal",
-			Namespace: "openshift-gitops",
-		},
-		Spec: v1.ServiceSpec{
-			ClusterIP: "10.0.0.100",
-			Ports: []v1.ServicePort{
-				{Name: "https", Port: 443},
-			},
-		},
-		Status: v1.ServiceStatus{
-			LoadBalancer: v1.LoadBalancerStatus{
-				Ingress: []v1.LoadBalancerIngress{
-					{Hostname: "test-server.example.com"},
-				},
-			},
-		},
-	}
-
-	// Create CA secret
-	caSecret := &v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-agent-ca",
-			Namespace: "openshift-gitops",
-		},
-		Type: v1.SecretTypeTLS,
-		Data: map[string][]byte{
-			"tls.crt": caCertPEM,
-			"tls.key": caKeyPEM,
-		},
-	}
+	_ = corev1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
 
 	tests := []struct {
-		name            string
-		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
-		existingObjects []client.Object
-		expectedError   bool
-		validateFunc    func(t *testing.T, c client.Client)
+		name        string
+		secretName  string
+		namespace   string
+		createSecret bool
+		expectError bool
 	}{
 		{
-			name: "create both principal and resource proxy certificates",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			existingObjects: []client.Object{principalService, caSecret},
-			validateFunc: func(t *testing.T, c client.Client) {
-				// Check principal TLS secret
-				principalSecret := &v1.Secret{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-principal-tls",
-					Namespace: "openshift-gitops",
-				}, principalSecret)
-				assert.NoError(t, err)
-				assert.Equal(t, v1.SecretTypeTLS, principalSecret.Type)
-				assert.NotEmpty(t, principalSecret.Data["tls.crt"])
-				assert.NotEmpty(t, principalSecret.Data["tls.key"])
-
-				// Check resource proxy TLS secret
-				proxySecret := &v1.Secret{}
-				err = c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-resource-proxy-tls",
-					Namespace: "openshift-gitops",
-				}, proxySecret)
-				assert.NoError(t, err)
-				assert.Equal(t, v1.SecretTypeTLS, proxySecret.Type)
-				assert.NotEmpty(t, proxySecret.Data["tls.crt"])
-				assert.NotEmpty(t, proxySecret.Data["tls.key"])
-			},
+			name:         "CA secret exists",
+			secretName:   ArgoCDAgentCASecretName,
+			namespace:    "test-namespace",
+			createSecret: true,
+			expectError:  false,
 		},
 		{
-			name: "certificates already exist - no error",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			existingObjects: []client.Object{
-				principalService,
-				caSecret,
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-principal-tls",
-						Namespace: "openshift-gitops",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": []byte("existing-cert"),
-						"tls.key": []byte("existing-key"),
-					},
-				},
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-resource-proxy-tls",
-						Namespace: "openshift-gitops",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": []byte("existing-cert"),
-						"tls.key": []byte("existing-key"),
-					},
-				},
-			},
-		},
-		{
-			name: "use default namespace when not specified",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{},
-				},
-			},
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-					Spec: v1.ServiceSpec{
-						Type:      v1.ServiceTypeLoadBalancer,
-						ClusterIP: "10.0.0.100",
-					},
-					Status: v1.ServiceStatus{
-						LoadBalancer: v1.LoadBalancerStatus{
-							Ingress: []v1.LoadBalancerIngress{
-								{
-									IP: "192.168.1.100",
-								},
-							},
-						},
-					},
-				},
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca",
-						Namespace: "openshift-gitops",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": caCertPEM,
-						"tls.key": caKeyPEM,
-					},
-				},
-			},
+			name:         "CA secret does not exist",
+			secretName:   ArgoCDAgentCASecretName,
+			namespace:    "test-namespace",
+			createSecret: false,
+			expectError:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
+			var objs []runtime.Object
+			if tt.createSecret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.secretName,
+						Namespace: tt.namespace,
+					},
+				}
+				objs = append(objs, secret)
+			}
 
-			reconciler := &ReconcileGitOpsCluster{
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+			r := &ReconcileGitOpsCluster{
 				Client: fakeClient,
 			}
 
-			err := reconciler.EnsureArgoCDAgentCertificates(tt.gitOpsCluster)
+			err := r.verifyCACertificateExists(context.Background(), tt.namespace)
 
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				if tt.validateFunc != nil {
-					tt.validateFunc(t, fakeClient)
-				}
-			}
-		})
-	}
-}
-
-func TestDiscoverPrincipalEndpoints(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name            string
-		existingObjects []client.Object
-		expectedError   bool
-		validateFunc    func(t *testing.T, endpoints *ServiceEndpoints)
-	}{
-		{
-			name: "discover endpoints from LoadBalancer service",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-					Status: v1.ServiceStatus{
-						LoadBalancer: v1.LoadBalancerStatus{
-							Ingress: []v1.LoadBalancerIngress{
-								{Hostname: "test-server.example.com"},
-								{IP: "192.168.1.100"},
-							},
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
-				assert.Contains(t, endpoints.DNSNames, "test-server.example.com")
-				assert.Contains(t, endpoints.DNSNames, "localhost")
-				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
-
-				// Verify both localhost IPs are included
-				localhostIPv4 := net.ParseIP("127.0.0.1")
-				localhostIPv6 := net.ParseIP("::1")
-				hasIPv4 := false
-				hasIPv6 := false
-
-				for _, ip := range endpoints.IPs {
-					if ip.Equal(localhostIPv4) {
-						hasIPv4 = true
-					}
-					if ip.Equal(localhostIPv6) {
-						hasIPv6 = true
-					}
-				}
-
-				assert.True(t, hasIPv4, "Expected 127.0.0.1 to be included in principal endpoints")
-				assert.True(t, hasIPv6, "Expected ::1 to be included in principal endpoints")
-
-				// IP addresses depend on DNS resolution which may not work in tests
-				assert.NotNil(t, endpoints.IPs)
-			},
-		},
-		{
-			name:          "service not found should return error",
-			expectedError: true,
-		},
-		{
-			name: "service with no external endpoints should still work with localhost",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-					Status: v1.ServiceStatus{
-						LoadBalancer: v1.LoadBalancerStatus{
-							Ingress: []v1.LoadBalancerIngress{},
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
-				// Should have localhost DNS names even when no external endpoints
-				assert.Contains(t, endpoints.DNSNames, "localhost")
-				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
-				assert.Len(t, endpoints.DNSNames, 2)
-
-				// Should have both localhost IPs
-				assert.Len(t, endpoints.IPs, 2)
-
-				localhostIPv4 := net.ParseIP("127.0.0.1")
-				localhostIPv6 := net.ParseIP("::1")
-				hasIPv4 := false
-				hasIPv6 := false
-
-				for _, ip := range endpoints.IPs {
-					if ip.Equal(localhostIPv4) {
-						hasIPv4 = true
-					}
-					if ip.Equal(localhostIPv6) {
-						hasIPv6 = true
-					}
-				}
-
-				assert.True(t, hasIPv4, "Expected localhost IPv4 127.0.0.1")
-				assert.True(t, hasIPv6, "Expected localhost IPv6 ::1")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
-
-			endpoints, err := reconciler.discoverPrincipalEndpoints("openshift-gitops")
-
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				if tt.validateFunc != nil {
-					tt.validateFunc(t, endpoints)
-				}
-			}
-		})
-	}
-}
-
-func TestDiscoverResourceProxyEndpoints(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name            string
-		existingObjects []client.Object
-		expectedError   bool
-		validateFunc    func(t *testing.T, endpoints *ServiceEndpoints)
-	}{
-		{
-			name: "discover endpoints from ClusterIP service",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-					Spec: v1.ServiceSpec{
-						ClusterIP: "10.0.0.100",
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
-				assert.Contains(t, endpoints.DNSNames, "openshift-gitops-agent-principal.openshift-gitops.svc.cluster.local")
-				assert.Contains(t, endpoints.DNSNames, "localhost")
-				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
-
-				// Should have ClusterIP and both localhost IPs (3 total)
-				assert.Len(t, endpoints.IPs, 3)
-
-				// Verify all IPs are present
-				clusterIP := net.ParseIP("10.0.0.100")
-				localhostIPv4 := net.ParseIP("127.0.0.1")
-				localhostIPv6 := net.ParseIP("::1")
-				hasClusterIP := false
-				hasLocalhostIPv4 := false
-				hasLocalhostIPv6 := false
-
-				for _, ip := range endpoints.IPs {
-					if ip.Equal(clusterIP) {
-						hasClusterIP = true
-					}
-					if ip.Equal(localhostIPv4) {
-						hasLocalhostIPv4 = true
-					}
-					if ip.Equal(localhostIPv6) {
-						hasLocalhostIPv6 = true
-					}
-				}
-
-				assert.True(t, hasClusterIP, "Expected ClusterIP 10.0.0.100 to be included")
-				assert.True(t, hasLocalhostIPv4, "Expected localhost IPv4 127.0.0.1 to be included")
-				assert.True(t, hasLocalhostIPv6, "Expected localhost IPv6 ::1 to be included")
-			},
-		},
-		{
-			name: "headless service - DNS only",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-					Spec: v1.ServiceSpec{
-						ClusterIP: "None",
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, endpoints *ServiceEndpoints) {
-				assert.Contains(t, endpoints.DNSNames, "openshift-gitops-agent-principal.openshift-gitops.svc.cluster.local")
-				assert.Contains(t, endpoints.DNSNames, "localhost")
-				assert.Contains(t, endpoints.DNSNames, "localhost.localdomain")
-
-				// Should have both localhost IPs even with headless service
-				assert.Len(t, endpoints.IPs, 2)
-
-				localhostIPv4 := net.ParseIP("127.0.0.1")
-				localhostIPv6 := net.ParseIP("::1")
-				hasIPv4 := false
-				hasIPv6 := false
-
-				for _, ip := range endpoints.IPs {
-					if ip.Equal(localhostIPv4) {
-						hasIPv4 = true
-					}
-					if ip.Equal(localhostIPv6) {
-						hasIPv6 = true
-					}
-				}
-
-				assert.True(t, hasIPv4, "Expected localhost IPv4 127.0.0.1 to be included")
-				assert.True(t, hasIPv6, "Expected localhost IPv6 ::1 to be included")
-			},
-		},
-		{
-			name:          "service not found should return error",
-			expectedError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
-
-			endpoints, err := reconciler.discoverResourceProxyEndpoints("openshift-gitops")
-
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				if tt.validateFunc != nil {
-					tt.validateFunc(t, endpoints)
-				}
+			if (err != nil) != tt.expectError {
+				t.Errorf("verifyCACertificateExists() error = %v, expectError %v", err, tt.expectError)
 			}
 		})
 	}
@@ -558,521 +82,182 @@ func TestDiscoverResourceProxyEndpoints(t *testing.T) {
 
 func TestFindArgoCDAgentPrincipalService(t *testing.T) {
 	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
+	_ = corev1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
 
 	tests := []struct {
-		name            string
-		existingObjects []client.Object
-		expectedError   bool
-		expectedName    string
+		name           string
+		serviceName    string
+		serviceLabels  map[string]string
+		namespace      string
+		expectFound    bool
 	}{
 		{
-			name: "find service by primary name",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-				},
+			name:        "service found by hardcoded name - openshift-gitops-agent-principal",
+			serviceName: "openshift-gitops-agent-principal",
+			serviceLabels: map[string]string{
+				"app": "gitops",
 			},
-			expectedName: "openshift-gitops-agent-principal",
+			namespace:   "test-namespace",
+			expectFound: true,
 		},
 		{
-			name: "find service by fallback name",
-			existingObjects: []client.Object{
-				&v1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-principal",
-						Namespace: "openshift-gitops",
-					},
-				},
+			name:        "service found by hardcoded name - argocd-agent-principal",
+			serviceName: "argocd-agent-principal",
+			serviceLabels: map[string]string{
+				"app": "other",
 			},
-			expectedName: "argocd-agent-principal",
+			namespace:   "test-namespace",
+			expectFound: true,
 		},
 		{
-			name:          "no service found should return error",
-			expectedError: true,
+			name:        "service found by suffix match",
+			serviceName: "custom-agent-principal",
+			serviceLabels: map[string]string{
+				"app": "custom",
+			},
+			namespace:   "test-namespace",
+			expectFound: true,
+		},
+		{
+			name:          "service not found - no matching suffix",
+			serviceName:   "other-service",
+			serviceLabels: map[string]string{},
+			namespace:     "test-namespace",
+			expectFound:   false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
+			service := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.serviceName,
+					Namespace: tt.namespace,
+					Labels:    tt.serviceLabels,
+				},
+			}
 
-			reconciler := &ReconcileGitOpsCluster{
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(service).Build()
+			r := &ReconcileGitOpsCluster{
 				Client: fakeClient,
 			}
 
-			service, err := reconciler.findArgoCDAgentPrincipalService("openshift-gitops")
+			result, err := r.FindArgoCDAgentPrincipalService(context.Background(), tt.namespace)
 
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedName, service.Name)
-			}
-		})
-	}
-}
-
-func TestResolveHostname(t *testing.T) {
-	reconciler := &ReconcileGitOpsCluster{}
-
-	tests := []struct {
-		name     string
-		hostname string
-		validate func(t *testing.T, ips []net.IP, err error)
-	}{
-		{
-			name:     "resolve IP address",
-			hostname: "192.168.1.1",
-			validate: func(t *testing.T, ips []net.IP, err error) {
-				assert.NoError(t, err)
-				assert.Len(t, ips, 1)
-				assert.Equal(t, "192.168.1.1", ips[0].String())
-			},
-		},
-		{
-			name:     "resolve localhost",
-			hostname: "localhost",
-			validate: func(t *testing.T, ips []net.IP, err error) {
-				// This may or may not work depending on the test environment
-				// Just ensure it doesn't panic
+			if tt.expectFound {
 				if err != nil {
-					t.Logf("Expected hostname resolution failure for localhost: %v", err)
+					t.Errorf("FindArgoCDAgentPrincipalService() unexpected error = %v", err)
 				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ips, err := reconciler.resolveHostname(tt.hostname)
-			tt.validate(t, ips, err)
-		})
-	}
-}
-
-func TestContainsIP(t *testing.T) {
-	reconciler := &ReconcileGitOpsCluster{}
-
-	ip1 := net.ParseIP("192.168.1.1")
-	ip2 := net.ParseIP("192.168.1.2")
-	ip3 := net.ParseIP("192.168.1.3")
-
-	tests := []struct {
-		name     string
-		ips      []net.IP
-		target   net.IP
-		expected bool
-	}{
-		{
-			name:     "IP found in list",
-			ips:      []net.IP{ip1, ip2},
-			target:   ip1,
-			expected: true,
-		},
-		{
-			name:     "IP not found in list",
-			ips:      []net.IP{ip1, ip2},
-			target:   ip3,
-			expected: false,
-		},
-		{
-			name:     "empty list",
-			ips:      []net.IP{},
-			target:   ip1,
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := reconciler.containsIP(tt.ips, tt.target)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestContains(t *testing.T) {
-	tests := []struct {
-		name     string
-		slice    []string
-		target   string
-		expected bool
-	}{
-		{
-			name:     "string found in list",
-			slice:    []string{"localhost", "example.com"},
-			target:   "localhost",
-			expected: true,
-		},
-		{
-			name:     "string not found in list",
-			slice:    []string{"localhost", "example.com"},
-			target:   "notfound.com",
-			expected: false,
-		},
-		{
-			name:     "empty list",
-			slice:    []string{},
-			target:   "localhost",
-			expected: false,
-		},
-		{
-			name:     "case sensitive check",
-			slice:    []string{"localhost", "Example.com"},
-			target:   "example.com",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := contains(tt.slice, tt.target)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestCheckCertificateExists(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name            string
-		secretName      string
-		namespace       string
-		existingObjects []client.Object
-		expectedExists  bool
-		expectedError   bool
-	}{
-		{
-			name:       "valid TLS secret exists",
-			secretName: "test-tls",
-			namespace:  "test-ns",
-			existingObjects: []client.Object{
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-tls",
-						Namespace: "test-ns",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": []byte("cert-data"),
-						"tls.key": []byte("key-data"),
-					},
-				},
-			},
-			expectedExists: true,
-		},
-		{
-			name:       "secret exists but missing tls.key",
-			secretName: "test-tls",
-			namespace:  "test-ns",
-			existingObjects: []client.Object{
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-tls",
-						Namespace: "test-ns",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": []byte("cert-data"),
-					},
-				},
-			},
-			expectedExists: false,
-		},
-		{
-			name:           "secret does not exist",
-			secretName:     "test-tls",
-			namespace:      "test-ns",
-			expectedExists: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
-
-			exists, err := reconciler.checkCertificateExists(tt.secretName, tt.namespace)
-
-			if tt.expectedError {
-				assert.Error(t, err)
+				if result == nil {
+					t.Error("FindArgoCDAgentPrincipalService() returned nil service")
+				}
 			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedExists, exists)
+				if err == nil {
+					t.Error("FindArgoCDAgentPrincipalService() expected error but got nil")
+				}
 			}
 		})
 	}
 }
 
-func TestGenerateSerialNumber(t *testing.T) {
-	// Test that we can generate serial numbers successfully
-	serial1, err := generateSerialNumber()
-	assert.NoError(t, err)
-	assert.NotNil(t, serial1)
-	assert.True(t, serial1.Cmp(big.NewInt(0)) > 0, "Serial number should be positive")
-
-	// Generate another and ensure they're different
-	serial2, err := generateSerialNumber()
-	assert.NoError(t, err)
-	assert.NotNil(t, serial2)
-	assert.NotEqual(t, serial1, serial2, "Serial numbers should be unique")
-}
-
-func TestGenerateTLSCertificate(t *testing.T) {
-	// Create test CA
-	caCert, caKey := createTestCA(t)
-
-	reconciler := &ReconcileGitOpsCluster{}
-
-	tests := []struct {
-		name         string
-		commonName   string
-		ips          []net.IP
-		dnsNames     []string
-		validateFunc func(t *testing.T, certPEM, keyPEM []byte)
-	}{
-		{
-			name:       "generate certificate with IPs and DNS names",
-			commonName: "test-cert",
-			ips:        []net.IP{net.ParseIP("192.168.1.1")},
-			dnsNames:   []string{"test.example.com"},
-			validateFunc: func(t *testing.T, certPEM, keyPEM []byte) {
-				// Parse and validate certificate
-				block, _ := pem.Decode(certPEM)
-				require.NotNil(t, block)
-
-				cert, err := x509.ParseCertificate(block.Bytes)
-				require.NoError(t, err)
-
-				assert.Equal(t, "test-cert", cert.Subject.CommonName)
-
-				// Check if the expected IP is in the certificate's IP addresses
-				expectedIP := net.ParseIP("192.168.1.1")
-				found := false
-				for _, ip := range cert.IPAddresses {
-					if ip.Equal(expectedIP) {
-						found = true
-						break
-					}
-				}
-				assert.True(t, found, "Expected IP %s not found in certificate IP addresses %v", expectedIP, cert.IPAddresses)
-
-				assert.Contains(t, cert.DNSNames, "test.example.com")
-
-				// Validate that certificate is signed by CA
-				roots := x509.NewCertPool()
-				roots.AddCert(caCert)
-				opts := x509.VerifyOptions{Roots: roots}
-				_, err = cert.Verify(opts)
-				assert.NoError(t, err)
-			},
-		},
-		{
-			name:       "generate certificate with DNS names only",
-			commonName: "dns-only-cert",
-			dnsNames:   []string{"dns-only.example.com", "alt.example.com"},
-			validateFunc: func(t *testing.T, certPEM, keyPEM []byte) {
-				block, _ := pem.Decode(certPEM)
-				cert, err := x509.ParseCertificate(block.Bytes)
-				require.NoError(t, err)
-
-				assert.Equal(t, "dns-only-cert", cert.Subject.CommonName)
-				assert.Empty(t, cert.IPAddresses)
-				assert.Len(t, cert.DNSNames, 2)
-				assert.Contains(t, cert.DNSNames, "dns-only.example.com")
-				assert.Contains(t, cert.DNSNames, "alt.example.com")
-			},
-		},
-		{
-			name:       "generate certificate with localhost IPs and DNS names",
-			commonName: "localhost-cert",
-			ips:        []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
-			dnsNames:   []string{"localhost", "localhost.localdomain"},
-			validateFunc: func(t *testing.T, certPEM, keyPEM []byte) {
-				block, _ := pem.Decode(certPEM)
-				cert, err := x509.ParseCertificate(block.Bytes)
-				require.NoError(t, err)
-
-				assert.Equal(t, "localhost-cert", cert.Subject.CommonName)
-				assert.Len(t, cert.IPAddresses, 2)
-				assert.Len(t, cert.DNSNames, 2)
-
-				// Verify both localhost IPs are included
-				localhostIPv4 := net.ParseIP("127.0.0.1")
-				localhostIPv6 := net.ParseIP("::1")
-				hasIPv4 := false
-				hasIPv6 := false
-
-				for _, ip := range cert.IPAddresses {
-					if ip.Equal(localhostIPv4) {
-						hasIPv4 = true
-					}
-					if ip.Equal(localhostIPv6) {
-						hasIPv6 = true
-					}
-				}
-
-				assert.True(t, hasIPv4, "Expected 127.0.0.1 in certificate IP addresses")
-				assert.True(t, hasIPv6, "Expected ::1 in certificate IP addresses")
-
-				assert.Contains(t, cert.DNSNames, "localhost")
-				assert.Contains(t, cert.DNSNames, "localhost.localdomain")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			certPEM, keyPEM, err := reconciler.generateTLSCertificate(caCert, caKey, tt.commonName, tt.ips, tt.dnsNames)
-
-			assert.NoError(t, err)
-			assert.NotEmpty(t, certPEM)
-			assert.NotEmpty(t, keyPEM)
-
-			if tt.validateFunc != nil {
-				tt.validateFunc(t, certPEM, keyPEM)
-			}
-		})
-	}
-}
-
-func TestCreateTLSSecret(t *testing.T) {
+func TestGetPrincipalHostNames(t *testing.T) {
 	scheme := runtime.NewScheme()
-	err := v1.AddToScheme(scheme)
-	require.NoError(t, err)
+	_ = corev1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
 
-	tests := []struct {
-		name            string
-		secretName      string
-		namespace       string
-		cert            []byte
-		key             []byte
-		existingObjects []client.Object
-		expectedError   bool
-		validateFunc    func(t *testing.T, c client.Client)
-	}{
-		{
-			name:       "create new TLS secret",
-			secretName: "test-tls",
-			namespace:  "test-ns",
-			cert:       []byte("test-cert"),
-			key:        []byte("test-key"),
-			validateFunc: func(t *testing.T, c client.Client) {
-				secret := &v1.Secret{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "test-tls",
-					Namespace: "test-ns",
-				}, secret)
-				assert.NoError(t, err)
-				assert.Equal(t, v1.SecretTypeTLS, secret.Type)
-				assert.Equal(t, []byte("test-cert"), secret.Data["tls.crt"])
-				assert.Equal(t, []byte("test-key"), secret.Data["tls.key"])
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-principal",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "argocd-agent-principal",
 			},
 		},
-		{
-			name:       "secret already exists - no error",
-			secretName: "existing-tls",
-			namespace:  "test-ns",
-			cert:       []byte("test-cert"),
-			key:        []byte("test-key"),
-			existingObjects: []client.Object{
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "existing-tls",
-						Namespace: "test-ns",
-					},
-					Type: v1.SecretTypeTLS,
-					Data: map[string][]byte{
-						"tls.crt": []byte("existing-cert"),
-						"tls.key": []byte("existing-key"),
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						IP:       "10.0.0.1",
+						Hostname: "test.example.com",
 					},
 				},
 			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(service).Build()
+	r := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
 
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace")
 
-			err := reconciler.createTLSSecret(tt.secretName, tt.namespace, tt.cert, tt.key)
+	if len(hostnames) == 0 {
+		t.Error("getPrincipalHostNames() returned empty hostnames")
+	}
 
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				if tt.validateFunc != nil {
-					tt.validateFunc(t, fakeClient)
-				}
-			}
-		})
+	// Verify basic hostnames are included
+	hasLocalhost := false
+	hasInternalDNS := false
+	for _, h := range hostnames {
+		if h == "localhost" {
+			hasLocalhost = true
+		}
+		if h == "argocd-agent-principal.test-namespace.svc" {
+			hasInternalDNS = true
+		}
+	}
+
+	if !hasLocalhost {
+		t.Error("getPrincipalHostNames() should include localhost")
+	}
+	if !hasInternalDNS {
+		t.Error("getPrincipalHostNames() should include internal DNS name")
 	}
 }
 
-// Helper functions for testing
+func TestGetResourceProxyHostNames(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
 
-func createTestCA(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
-	// Generate CA private key
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	// Create CA certificate template
-	caTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			CommonName: "Test CA",
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ReconcileGitOpsCluster{
+		Client: fakeClient,
 	}
 
-	// Create CA certificate
-	caCertDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
+	hostnames := r.getResourceProxyHostNames(context.Background(), "test-namespace")
 
-	caCert, err := x509.ParseCertificate(caCertDER)
-	require.NoError(t, err)
+	if len(hostnames) == 0 {
+		t.Error("getResourceProxyHostNames() returned empty hostnames")
+	}
 
-	return caCert, caKey
+	// Verify basic hostnames are included
+	hasLocalhost := false
+	for _, h := range hostnames {
+		if h == "localhost" {
+			hasLocalhost = true
+		}
+	}
+
+	if !hasLocalhost {
+		t.Error("getResourceProxyHostNames() should include localhost")
+	}
 }
 
-func pemEncodeCertificate(cert *x509.Certificate) []byte {
-	return pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: cert.Raw,
-	})
+func TestCertificateConstants(t *testing.T) {
+	// Verify important constants are set
+	if ArgoCDAgentCASecretName == "" {
+		t.Error("ArgoCDAgentCASecretName should not be empty")
+	}
+	if ArgoCDAgentPrincipalTLSSecretName == "" {
+		t.Error("ArgoCDAgentPrincipalTLSSecretName should not be empty")
+	}
+	if ArgoCDAgentResourceProxyTLSSecretName == "" {
+		t.Error("ArgoCDAgentResourceProxyTLSSecretName should not be empty")
+	}
+	if CASignerNamePrefix == "" {
+		t.Error("CASignerNamePrefix should not be empty")
+	}
 }
 
-func pemEncodePrivateKey(key *rsa.PrivateKey) []byte {
-	return pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
-}

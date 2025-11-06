@@ -241,7 +241,7 @@ func (r *ReconcileGitOpsCluster) getArgoCDAgentServerConfig(
 	}
 
 	if serverAddress == "" || serverPort == "" {
-		return "", "", fmt.Errorf("server address and port not set in GitOpsCluster spec - this should have been handled by EnsureServerAddressAndPort()")
+		return "", "", fmt.Errorf("ArgoCD agent server address and port are not configured. Please ensure the ArgoCD agent principal service has an external LoadBalancer IP assigned, or manually specify serverAddress and serverPort in the GitOpsCluster spec")
 	}
 
 	return serverAddress, serverPort, nil

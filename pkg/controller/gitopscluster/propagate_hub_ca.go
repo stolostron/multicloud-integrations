@@ -30,14 +30,14 @@ import (
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 )
 
-// CreateArgoCDAgentManifestWorks creates ManifestWorks for ArgoCD agent CA certificates on managed clusters
-func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
+// PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters via ManifestWork
+// This function reads the argocd-agent-ca secret from the hub and creates/updates ManifestWorks
+// to deploy this secret to all managed clusters (except local-cluster).
+// The ManifestWorks are never deleted - they persist even if the secret changes or is removed.
+func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
-	// Hub namespace - where we read the CA cert from
-	hubNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
-	if hubNamespace == "" {
-		hubNamespace = "openshift-gitops"
-	}
+	// Hub namespace - where we read the CA cert from (use GitOpsCluster's namespace)
+	hubNamespace := gitOpsCluster.Namespace
 
 	// Managed cluster namespace - where the secret will be created on managed clusters
 	managedNamespace := ""
@@ -72,12 +72,7 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 
 		if err != nil {
 			if k8errors.IsNotFound(err) {
-				// Create new ManifestWork with proper annotations
-				if manifestWork.Annotations == nil {
-					manifestWork.Annotations = make(map[string]string)
-				}
-				manifestWork.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true"
-
+				// Create new ManifestWork
 				err = r.Create(context.TODO(), manifestWork)
 				if err != nil {
 					klog.Errorf("failed to create ManifestWork %s/%s: %v", manifestWork.Namespace, manifestWork.Name, err)
@@ -89,14 +84,7 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 				return fmt.Errorf("failed to get ManifestWork %s/%s: %w", manifestWork.Namespace, manifestWork.Name, err)
 			}
 		} else {
-			// ManifestWork exists - check if it needs updating
-			needsUpdate := false
-
-			// Check if ManifestWork was previously marked as outdated
-			isOutdated := existingMW.Annotations != nil && existingMW.Annotations[ArgoCDAgentOutdatedAnnotation] == "true"
-			previousPropagateCA := existingMW.Annotations != nil && existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] == "true"
-
-			// Check if certificate data has changed
+			// ManifestWork exists - check if certificate data has changed
 			certificateChanged := false
 
 			if len(existingMW.Spec.Workload.Manifests) > 0 {
@@ -112,35 +100,15 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 
 						if existingCert != caCert {
 							certificateChanged = true
-
 							klog.Infof("Certificate data changed for ManifestWork %s/%s", existingMW.Namespace, existingMW.Name)
 						}
 					}
 				}
 			}
 
-			// Update if:
-			// 1. ManifestWork was marked as outdated (false->true transition)
-			// 2. Spec has changed
-			// 3. Certificate data has changed
-			if isOutdated || !previousPropagateCA || certificateChanged {
-				needsUpdate = true
-
-				klog.Infof("ManifestWork %s/%s needs update (outdated: %v, previousPropagateCA: %v, certificateChanged: %v)",
-					existingMW.Namespace, existingMW.Name, isOutdated, previousPropagateCA, certificateChanged)
-			}
-
-			if needsUpdate {
-				// Update the ManifestWork spec
+			// Update ManifestWork if certificate changed
+			if certificateChanged {
 				existingMW.Spec = manifestWork.Spec
-
-				// Update annotations to reflect current state
-				if existingMW.Annotations == nil {
-					existingMW.Annotations = make(map[string]string)
-				}
-
-				delete(existingMW.Annotations, ArgoCDAgentOutdatedAnnotation)     // Remove outdated marker
-				existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true" // Mark as propagating
 
 				err = r.Update(context.TODO(), existingMW)
 				if err != nil {
@@ -148,23 +116,8 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentManifestWorks(
 					return err
 				}
 
-				klog.Infof("updated ManifestWork %s/%s for ArgoCD agent CA", existingMW.Namespace, existingMW.Name)
+				klog.Infof("updated ManifestWork %s/%s with new ArgoCD agent CA", existingMW.Namespace, existingMW.Name)
 			} else {
-				// Ensure annotations are set correctly even if no update is needed
-				if existingMW.Annotations == nil {
-					existingMW.Annotations = make(map[string]string)
-				}
-
-				if existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] != "true" {
-					existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "true"
-
-					err = r.Update(context.TODO(), existingMW)
-					if err != nil {
-						klog.Errorf("failed to update ManifestWork annotations %s/%s: %v", existingMW.Namespace, existingMW.Name, err)
-						return err
-					}
-				}
-
 				klog.V(2).Infof("ManifestWork %s/%s already up to date", existingMW.Namespace, existingMW.Name)
 			}
 		}
@@ -196,7 +149,7 @@ func (r *ReconcileGitOpsCluster) getArgoCDAgentCACert(argoNamespace string) (str
 		// Fallback to ca.crt (in case secret was created by ManifestWork)
 		caCertBytes, exists = secret.Data["ca.crt"]
 		if !exists {
-			return "", fmt.Errorf("neither tls.crt nor ca.crt found in argocd-agent-ca secret")
+			return "", fmt.Errorf("CA certificate data not found in argocd-agent-ca secret. Expected either 'tls.crt' or 'ca.crt' field to be present")
 		}
 	}
 
@@ -254,49 +207,4 @@ func (r *ReconcileGitOpsCluster) createArgoCDAgentManifestWork(clusterName, argo
 	}
 
 	return manifestWork
-}
-
-// MarkArgoCDAgentManifestWorksAsOutdated marks existing ArgoCD agent ManifestWorks as outdated
-// This is called when propagateHubCA is set to false
-func (r *ReconcileGitOpsCluster) MarkArgoCDAgentManifestWorksAsOutdated(
-	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
-	for _, managedCluster := range managedClusters {
-		// Skip local-cluster - same logic as in CreateArgoCDAgentManifestWorks
-		if IsLocalCluster(managedCluster) {
-			continue
-		}
-
-		// Check if ManifestWork exists
-		existingMW := &workv1.ManifestWork{}
-		err := r.Get(context.TODO(), types.NamespacedName{
-			Name:      "argocd-agent-ca-mw",
-			Namespace: managedCluster.Name,
-		}, existingMW)
-
-		if err != nil {
-			if k8errors.IsNotFound(err) {
-				// ManifestWork doesn't exist, nothing to mark
-				continue
-			}
-
-			return fmt.Errorf("failed to get ManifestWork argocd-agent-ca-mw/%s: %w", managedCluster.Name, err)
-		}
-
-		// Mark the ManifestWork as outdated
-		if existingMW.Annotations == nil {
-			existingMW.Annotations = make(map[string]string)
-		}
-		existingMW.Annotations[ArgoCDAgentOutdatedAnnotation] = "true"
-		existingMW.Annotations[ArgoCDAgentPropagateCAAnnotation] = "false"
-
-		err = r.Update(context.TODO(), existingMW)
-		if err != nil {
-			klog.Errorf("failed to mark ManifestWork %s/%s as outdated: %v", existingMW.Namespace, existingMW.Name, err)
-			return err
-		}
-
-		klog.Infof("marked ManifestWork %s/%s as outdated", existingMW.Namespace, existingMW.Name)
-	}
-
-	return nil
 }

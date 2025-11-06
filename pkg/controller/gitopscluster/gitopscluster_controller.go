@@ -81,10 +81,6 @@ var errInvalidPlacementRef = errors.New("invalid placement reference")
 const (
 	clusterSecretSuffix = "-cluster-secret"
 	maxStatusMsgLen     = 128 * 1024
-
-	// Annotation keys for tracking ManifestWork state
-	ArgoCDAgentOutdatedAnnotation    = "apps.open-cluster-management.io/argocd-agent-outdated"
-	ArgoCDAgentPropagateCAAnnotation = "apps.open-cluster-management.io/argocd-agent-propagate-ca"
 )
 
 // newReconciler returns a new reconcile.Reconciler
@@ -286,7 +282,7 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 		}
 
 		// reconcile one GitOpsCluster resource
-		requeueInterval, err := r.reconcileGitOpsCluster(*instance, orphanGitOpsClusterSecretList)
+		requeueInterval, err := r.reconcileGitOpsCluster(ctx, *instance, orphanGitOpsClusterSecretList)
 
 		if err != nil {
 			klog.Error(err.Error())
@@ -341,6 +337,7 @@ func (r *ReconcileGitOpsCluster) cleanupOrphanSecrets(orphanGitOpsClusterSecretL
 }
 
 func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
+	ctx context.Context,
 	gitOpsCluster gitopsclusterV1beta1.GitOpsCluster,
 	orphanSecretsList map[types.NamespacedName]string) (int, error) {
 	instance := gitOpsCluster.DeepCopy()
@@ -509,20 +506,65 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	// 3b. Auto-discover server address and port if ArgoCD agent is enabled and values are empty
+	// 3b. Discover and validate server address and port if ArgoCD agent is enabled
 	if argoCDAgentEnabled {
-		updated, err := r.EnsureServerAddressAndPort(instance, managedClusters)
+		// Discover server address and port from the ArgoCD agent principal service
+		err := r.DiscoverServerAddressAndPort(ctx, instance)
 		if err != nil {
-			klog.Warningf("failed to auto-discover server address/port: %v", err)
-		} else if updated {
-			// Update the GitOpsCluster spec with discovered values
-			err = r.Update(context.TODO(), instance)
-			if err != nil {
-				klog.Errorf("failed to update GitOpsCluster with discovered server address/port: %v", err)
-			} else {
-				klog.Infof("updated GitOpsCluster %s/%s with auto-discovered server address/port", instance.Namespace, instance.Name)
+			klog.Errorf("failed to discover server address and port: %v", err)
+
+			msg := fmt.Sprintf("Failed to discover ArgoCD agent server address and port: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
 			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after server discovery failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
 		}
+
+		// Validate that serverAddress and serverPort are now populated
+		if instance.Spec.GitOpsAddon == nil || instance.Spec.GitOpsAddon.ArgoCDAgent == nil ||
+			instance.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress == "" ||
+			instance.Spec.GitOpsAddon.ArgoCDAgent.ServerPort == "" {
+
+			errMsg := "ArgoCD agent requires serverAddress and serverPort fields to be populated. Server discovery failed to populate these fields. Please ensure the ArgoCD agent principal service is properly configured with a LoadBalancer"
+			klog.Error(errMsg)
+
+			r.updateGitOpsClusterConditions(instance, "failed", errMsg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: errMsg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after validation failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, fmt.Errorf("%s", errMsg)
+		}
+
+		klog.Infof("ArgoCD agent server endpoint configured: %s:%s",
+			instance.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress,
+			instance.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
 	}
 
 	// Check if Hub CA propagation is enabled (default true)
@@ -547,52 +589,70 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// Create AddOnDeploymentConfig and ManagedClusterAddon for each managed cluster namespace if GitOps addon is enabled
 	if gitopsAddonEnabled {
-		// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
-		argoNamespace := instance.Spec.ArgoServer.ArgoNamespace
-		if argoNamespace == "" {
-			argoNamespace = "openshift-gitops"
+		// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace (only needed for ArgoCD agent mode)
+		if argoCDAgentEnabled {
+			argoNamespace := instance.Namespace
+			if argoNamespace == "" {
+				argoNamespace = "openshift-gitops"
+			}
+
+			if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
+				klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
+				r.updateGitOpsClusterConditions(instance, "failed",
+					fmt.Sprintf("Failed to configure required RBAC permissions: %v", err),
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterGitOpsAddonPrereqsReady: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonRBACSetupFailed,
+							Message: fmt.Sprintf("Failed to create necessary Role and RoleBinding resources in ArgoCD namespace '%s'. Please verify the controller has sufficient permissions: %v", argoNamespace, err),
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Errorf("failed to update GitOpsCluster %s status after RBAC setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+					return 3, err2
+				}
+				return 3, err
+			}
+			klog.Infof("Successfully ensured addon-manager-controller RBAC resources in ArgoCD namespace %s for ArgoCD agent mode", argoNamespace)
+
+			// Note: ArgoCD agent CA secret will be created later via certrotation
+			// when EnsureArgoCDAgentCASecret is called during certificate management
 		}
 
-		if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
-			klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
+		// Ensure AddOnTemplate for this GitOpsCluster
+		err = r.EnsureAddOnTemplate(instance)
+		if err != nil {
+			klog.Errorf("failed to ensure AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
 			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to ensure addon-manager RBAC resources: %v", err),
+				fmt.Sprintf("Failed to create addon template: %v", err),
 				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterGitOpsAddonPrereqsReady: {
+					"AddonTemplateReady": {
 						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonRBACSetupFailed,
-						Message: fmt.Sprintf("Failed to setup addon-manager RBAC resources in ArgoCD namespace: %v", err),
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
 					},
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after RBAC setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				klog.Errorf("failed to update GitOpsCluster %s status after AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
 				return 3, err2
 			}
 			return 3, err
 		}
 
-		// Ensure argocd-agent-ca secret exists in ArgoCD namespace
-		if err := r.ensureArgoCDAgentCASecret(argoNamespace); err != nil {
-			klog.Errorf("failed to ensure argocd-agent-ca secret in namespace %s: %v", argoNamespace, err)
-			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to ensure ArgoCD agent CA secret: %v", err),
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterGitOpsAddonPrereqsReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonCASecretSetupFailed,
-						Message: fmt.Sprintf("Failed to setup ArgoCD agent CA secret in ArgoCD namespace: %v", err),
-					},
-				})
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after CA secret setup failure: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
-			}
-			return 3, err
+		r.updateGitOpsClusterConditions(instance, "", "",
+			map[string]ConditionUpdate{
+				"AddonTemplateReady": {
+					Status:  metav1.ConditionTrue,
+					Reason:  gitopsclusterV1beta1.ReasonSuccess,
+					Message: "AddOnTemplate created/updated successfully",
+				},
+			})
+		err2 := r.Client.Status().Update(context.TODO(), instance)
+		if err2 != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 		}
-
-		klog.Infof("Successfully ensured GitOps addon prerequisites (RBAC and CA secret) for GitOpsCluster %s/%s in ArgoCD namespace %s", instance.Namespace, instance.Name, argoNamespace)
 
 		for _, managedCluster := range managedClusters {
 			// Skip local-cluster - addon not needed for hub cluster
@@ -606,11 +666,43 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
 			}
 
-			err = r.EnsureManagedClusterAddon(managedCluster.Name)
+			err = r.EnsureManagedClusterAddon(managedCluster.Name, instance)
 			if err != nil {
 				klog.Errorf("failed to ensure ManagedClusterAddon for managed cluster %s: %v", managedCluster.Name, err)
 			}
 		}
+	}
+
+	// Ensure ArgoCD agent certificates BEFORE creating clusters (if argoCDAgent is enabled)
+	if argoCDAgentEnabled {
+		// Ensure CA certificate first - needed for cluster creation
+		err = r.EnsureArgoCDAgentCASecret(context.TODO(), instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent CA certificate: %v", err)
+
+			msg := fmt.Sprintf("Failed to generate or rotate the CA certificate for ArgoCD agent communication: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+		klog.Infof("Successfully ensured ArgoCD agent CA certificate")
 	}
 
 	// Handle cluster addition based on mode
@@ -622,7 +714,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		if err != nil {
 			klog.Errorf("failed to create ArgoCD agent clusters: %v", err)
 
-			msg := err.Error()
+			msg := fmt.Sprintf("Failed to register managed clusters with ArgoCD agent. This is required for the agent to connect to managed clusters: %v", err)
 			if len(msg) > maxStatusMsgLen {
 				msg = msg[:maxStatusMsgLen]
 			}
@@ -632,7 +724,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 					gitopsclusterV1beta1.GitOpsClusterClustersRegistered: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
-						Message: fmt.Sprintf("ArgoCD agent cluster registration failed: %s", msg),
+						Message: msg,
 					},
 				})
 
@@ -670,7 +762,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		if err != nil {
 			klog.Info("failed to add managed clusters to argo")
 
-			msg := err.Error()
+			msg := fmt.Sprintf("Failed to register managed clusters with ArgoCD. Please verify the managed cluster credentials and network connectivity: %v", err)
 			if len(msg) > maxStatusMsgLen {
 				msg = msg[:maxStatusMsgLen]
 			}
@@ -695,51 +787,73 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	// 5. Handle ArgoCD agent CA secret ManifestWork based on propagateHubCA setting
+	// 5. Propagate ArgoCD agent CA secret to managed clusters via ManifestWork
 	if argoCDAgentEnabled {
-		if propagateHubCA {
-			// Create/update ManifestWork for ArgoCD agent CA secret
-			err = r.CreateArgoCDAgentManifestWorks(instance, managedClusters)
-			if err != nil {
-				klog.Errorf("failed to create ArgoCD agent ManifestWorks: %v", err)
+		// Always propagate the CA secret when it exists - ManifestWorks are never deleted
+		err = r.PropagateHubCA(instance, managedClusters)
+		if err != nil {
+			klog.Errorf("failed to propagate ArgoCD agent CA to managed clusters: %v", err)
 
-				msg := err.Error()
-				if len(msg) > maxStatusMsgLen {
-					msg = msg[:maxStatusMsgLen]
-				}
-
-				r.updateGitOpsClusterConditions(instance, "failed", msg,
-					map[string]ConditionUpdate{
-						gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied: {
-							Status:  metav1.ConditionFalse,
-							Reason:  gitopsclusterV1beta1.ReasonManifestWorkFailed,
-							Message: msg,
-						},
-					})
-
-				err2 := r.Client.Status().Update(context.TODO(), instance)
-
-				if err2 != nil {
-					klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
-					return 3, err2
-				}
-
-				return 3, err
+			msg := fmt.Sprintf("Failed to distribute ArgoCD agent CA certificate to managed clusters. Please verify the argocd-agent-ca secret exists and managed clusters are accessible: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
 			}
-		} else {
-			// Mark existing ManifestWorks as outdated when propagateHubCA is false
-			err = r.MarkArgoCDAgentManifestWorksAsOutdated(instance, managedClusters)
-			if err != nil {
-				klog.Errorf("failed to mark ArgoCD agent ManifestWorks as outdated: %v", err)
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonManifestWorkFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
 			}
+
+			return 3, err
 		}
 	}
 
-	// 6. Ensure ArgoCD agent TLS certificates are signed if argoCDAgent is enabled
+	// 6. Ensure additional ArgoCD agent certificates if argoCDAgent is enabled
 	if argoCDAgentEnabled {
-		err = r.EnsureArgoCDAgentCertificates(instance)
+		// CA certificate was already ensured above before cluster creation
+		// Now ensure Principal TLS certificate
+		err = r.EnsureArgoCDAgentPrincipalTLSCert(context.TODO(), instance)
 		if err != nil {
-			klog.Errorf("failed to ensure ArgoCD agent certificates: %v", err)
+			klog.Errorf("failed to ensure ArgoCD agent principal TLS certificate: %v", err)
+
+			msg := fmt.Sprintf("Failed to generate or rotate the TLS certificate for ArgoCD agent principal service: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+
+		// 6c. Ensure Resource Proxy TLS certificate
+		err = r.EnsureArgoCDAgentResourceProxyTLSCert(context.TODO(), instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent resource proxy TLS certificate: %v", err)
 
 			msg := err.Error()
 			if len(msg) > maxStatusMsgLen {

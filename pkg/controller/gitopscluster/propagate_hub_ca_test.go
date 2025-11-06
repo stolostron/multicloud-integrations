@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
+func TestPropagateHubCA(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := v1.AddToScheme(scheme)
 	require.NoError(t, err)
@@ -66,6 +66,10 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 		{
 			name: "create ManifestWorks for managed clusters",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -97,9 +101,6 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					}, mw)
 					assert.NoError(t, err, "ManifestWork should be created for cluster %s", cluster.Name)
 
-					// Verify annotations
-					assert.Equal(t, "true", mw.Annotations[ArgoCDAgentPropagateCAAnnotation])
-
 					// Verify secret in manifest
 					assert.Len(t, mw.Spec.Workload.Manifests, 1)
 					manifest := mw.Spec.Workload.Manifests[0]
@@ -116,6 +117,10 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 		{
 			name: "skip local-cluster by name",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -158,6 +163,10 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 		{
 			name: "skip cluster with local-cluster label",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -203,6 +212,10 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 		{
 			name: "update existing ManifestWork when certificate changes",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -225,9 +238,6 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "argocd-agent-ca-mw",
 						Namespace: "test-cluster",
-						Annotations: map[string]string{
-							ArgoCDAgentPropagateCAAnnotation: "true",
-						},
 					},
 					Spec: workv1.ManifestWorkSpec{
 						Workload: workv1.ManifestsTemplate{
@@ -259,64 +269,12 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 			},
 		},
 		{
-			name: "update outdated ManifestWork",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-cluster",
-					},
-				},
-			},
-			existingObjects: []client.Object{
-				caSecret,
-				&workv1.ManifestWork{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: "test-cluster",
-						Annotations: map[string]string{
-							ArgoCDAgentOutdatedAnnotation:    "true",
-							ArgoCDAgentPropagateCAAnnotation: "false",
-						},
-					},
-					Spec: workv1.ManifestWorkSpec{
-						Workload: workv1.ManifestsTemplate{
-							Manifests: []workv1.Manifest{
-								{
-									RawExtension: runtime.RawExtension{
-										Raw: []byte(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"argocd-agent-ca","namespace":"openshift-gitops"},"type":"Opaque","data":{"ca.crt":"b2xkLWNlcnRpZmljYXRl"}}`),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				mw := &workv1.ManifestWork{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-ca-mw",
-					Namespace: "test-cluster",
-				}, mw)
-				assert.NoError(t, err)
-
-				// Verify annotations were updated
-				assert.NotContains(t, mw.Annotations, ArgoCDAgentOutdatedAnnotation)
-				assert.Equal(t, "true", mw.Annotations[ArgoCDAgentPropagateCAAnnotation])
-			},
-		},
-		{
 			name: "CA secret not found should return error",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -339,6 +297,10 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 		{
 			name: "use custom GitOpsNamespace for managed clusters",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "openshift-gitops",
+				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
 						ArgoNamespace: "openshift-gitops",
@@ -387,7 +349,7 @@ func TestCreateArgoCDAgentManifestWorks(t *testing.T) {
 				Client: fakeClient,
 			}
 
-			err := reconciler.CreateArgoCDAgentManifestWorks(tt.gitOpsCluster, tt.managedClusters)
+			err := reconciler.PropagateHubCA(tt.gitOpsCluster, tt.managedClusters)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -552,214 +514,6 @@ func TestCreateArgoCDAgentManifestWork(t *testing.T) {
 
 			if tt.validateFunc != nil {
 				tt.validateFunc(t, mw)
-			}
-		})
-	}
-}
-
-func TestMarkArgoCDAgentManifestWorksAsOutdated(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := workv1.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = spokeclusterv1.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = gitopsclusterV1beta1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name            string
-		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
-		managedClusters []*spokeclusterv1.ManagedCluster
-		existingObjects []client.Object
-		expectedError   bool
-		validateFunc    func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster)
-	}{
-		{
-			name: "mark existing ManifestWorks as outdated",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cluster1",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cluster2",
-					},
-				},
-			},
-			existingObjects: []client.Object{
-				&workv1.ManifestWork{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: "cluster1",
-						Annotations: map[string]string{
-							ArgoCDAgentPropagateCAAnnotation: "true",
-						},
-					},
-				},
-				&workv1.ManifestWork{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: "cluster2",
-						Annotations: map[string]string{
-							ArgoCDAgentPropagateCAAnnotation: "true",
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				for _, cluster := range managedClusters {
-					mw := &workv1.ManifestWork{}
-					err := c.Get(context.TODO(), types.NamespacedName{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: cluster.Name,
-					}, mw)
-					assert.NoError(t, err)
-
-					// Verify annotations are updated
-					assert.Equal(t, "true", mw.Annotations[ArgoCDAgentOutdatedAnnotation])
-					assert.Equal(t, "false", mw.Annotations[ArgoCDAgentPropagateCAAnnotation])
-				}
-			},
-		},
-		{
-			name: "skip local-cluster",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "local-cluster",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "remote-cluster",
-					},
-				},
-			},
-			existingObjects: []client.Object{
-				&workv1.ManifestWork{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: "remote-cluster",
-						Annotations: map[string]string{
-							ArgoCDAgentPropagateCAAnnotation: "true",
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// Only remote-cluster should be processed
-				mw := &workv1.ManifestWork{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-ca-mw",
-					Namespace: "remote-cluster",
-				}, mw)
-				assert.NoError(t, err)
-				assert.Equal(t, "true", mw.Annotations[ArgoCDAgentOutdatedAnnotation])
-			},
-		},
-		{
-			name: "skip cluster with local-cluster label",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "labeled-cluster",
-						Labels: map[string]string{
-							"local-cluster": "true",
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "normal-cluster",
-					},
-				},
-			},
-			existingObjects: []client.Object{
-				&workv1.ManifestWork{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "argocd-agent-ca-mw",
-						Namespace: "normal-cluster",
-						Annotations: map[string]string{
-							ArgoCDAgentPropagateCAAnnotation: "true",
-						},
-					},
-				},
-			},
-			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// Only normal-cluster should be processed
-				mw := &workv1.ManifestWork{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-ca-mw",
-					Namespace: "normal-cluster",
-				}, mw)
-				assert.NoError(t, err)
-				assert.Equal(t, "true", mw.Annotations[ArgoCDAgentOutdatedAnnotation])
-			},
-		},
-		{
-			name: "handle non-existent ManifestWorks gracefully",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "cluster-without-mw",
-					},
-				},
-			},
-			existingObjects: []client.Object{},
-			// Should not error when ManifestWork doesn't exist
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
-
-			err := reconciler.MarkArgoCDAgentManifestWorksAsOutdated(tt.gitOpsCluster, tt.managedClusters)
-
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				if tt.validateFunc != nil {
-					tt.validateFunc(t, fakeClient, tt.managedClusters)
-				}
 			}
 		})
 	}

@@ -454,13 +454,23 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
-				assert.Len(t, addon.Spec.Configs, 1)
-
-				config := addon.Spec.Configs[0]
-				assert.Equal(t, "addon.open-cluster-management.io", config.Group)
-				assert.Equal(t, "addondeploymentconfigs", config.Resource)
-				assert.Equal(t, "gitops-addon-config", config.Name)
-				assert.Equal(t, namespace, config.Namespace)
+				// Now we have 2 configs: AddOnTemplate and AddonDeploymentConfig
+				assert.Len(t, addon.Spec.Configs, 2)
+				
+				// Check that we have both configs
+				foundTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						assert.Equal(t, "gitops-addon-test-namespace-test-gitopscluster", config.Name)
+						foundTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.True(t, foundTemplate, "Should have AddOnTemplate config")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
 		{
@@ -483,9 +493,23 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
-				assert.Len(t, addon.Spec.Configs, 1)
-				config := addon.Spec.Configs[0]
-				assert.Equal(t, "gitops-addon-config", config.Name)
+				// Now we have 2 configs: AddOnTemplate and AddonDeploymentConfig
+				assert.Len(t, addon.Spec.Configs, 2)
+				
+				// Check that we have both configs
+				foundTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						assert.Equal(t, "gitops-addon-test-namespace-test-gitopscluster", config.Name)
+						foundTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.True(t, foundTemplate, "Should have AddOnTemplate config")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
 	}
@@ -497,11 +521,18 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				WithObjects(tt.existingObjects...).
 				Build()
 
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
+		reconciler := &ReconcileGitOpsCluster{
+			Client: fakeClient,
+		}
 
-			err := reconciler.EnsureManagedClusterAddon(tt.namespace)
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gitopscluster",
+				Namespace: "test-namespace",
+			},
+		}
+
+		err := reconciler.EnsureManagedClusterAddon(tt.namespace, gitOpsCluster)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -625,12 +656,10 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 				"GITOPS_OPERATOR_NAMESPACE":   "gitops-operator-ns",
 				"GITOPS_NAMESPACE":            "gitops-ns",
 				"RECONCILE_SCOPE":             "All-Namespaces",
-				"UNINSTALL":                   "false",
 				"ARGOCD_AGENT_IMAGE":          "agent-image:v1.0",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
 				"ARGOCD_AGENT_SERVER_PORT":    "443",
 				"ARGOCD_AGENT_MODE":           "managed",
-				"ARGOCD_AGENT_UNINSTALL":      "false",
 			},
 		},
 		{
@@ -654,9 +683,9 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 			expectedVars: map[string]string{
 				"ARGOCD_AGENT_ENABLED":        "true",
 				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
-				"UNINSTALL":                   "false",
+				"GITOPS_OPERATOR_NAMESPACE":   "",
+				"GITOPS_NAMESPACE":            "",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
-				"ARGOCD_AGENT_UNINSTALL":      "false",
 			},
 		},
 		{
@@ -713,7 +742,6 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 				"ARGOCD_AGENT_SERVER_ADDRESS": "new-server.example.com",
 				"ARGOCD_AGENT_SERVER_PORT":    "8443",
 				"ARGOCD_AGENT_MODE":           "autonomous",
-				"ARGOCD_AGENT_UNINSTALL":      "false",
 			},
 		},
 		{
@@ -728,7 +756,6 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 			expectedVars: map[string]string{
 				"EXISTING_VAR":           "existing-value",
 				"ARGOCD_AGENT_IMAGE":     "agent-image:v2.0",
-				"ARGOCD_AGENT_UNINSTALL": "false",
 			},
 		},
 		{
@@ -739,36 +766,6 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 			},
 			expectedVars: map[string]string{
 				"EXISTING_VAR": "existing-value",
-			},
-		},
-		{
-			name: "extract agent uninstall true",
-			argoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-				Image:     "agent-image:v2.0",
-				Uninstall: &[]bool{true}[0], // true pointer
-			},
-			initialVariables: map[string]string{
-				"EXISTING_VAR": "existing-value",
-			},
-			expectedVars: map[string]string{
-				"EXISTING_VAR":           "existing-value",
-				"ARGOCD_AGENT_IMAGE":     "agent-image:v2.0",
-				"ARGOCD_AGENT_UNINSTALL": "true",
-			},
-		},
-		{
-			name: "extract agent uninstall false",
-			argoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-				Image:     "agent-image:v2.0",
-				Uninstall: &[]bool{false}[0], // false pointer
-			},
-			initialVariables: map[string]string{
-				"EXISTING_VAR": "existing-value",
-			},
-			expectedVars: map[string]string{
-				"EXISTING_VAR":           "existing-value",
-				"ARGOCD_AGENT_IMAGE":     "agent-image:v2.0",
-				"ARGOCD_AGENT_UNINSTALL": "false",
 			},
 		},
 	}

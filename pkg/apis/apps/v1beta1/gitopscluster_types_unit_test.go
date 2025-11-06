@@ -426,52 +426,13 @@ func TestArgoCDAgentSpec_DefaultValues(t *testing.T) {
 	assert.Equal(t, "grpc", agentSpec.Mode)
 	assert.Nil(t, agentSpec.Enabled)
 	assert.Nil(t, agentSpec.PropagateHubCA)
-	assert.Nil(t, agentSpec.Uninstall)
 }
 
-func TestArgoCDAgentSpec_WithUninstall(t *testing.T) {
-	// Test ArgoCDAgentSpec with uninstall field
-	uninstallTrue := true
-	uninstallFalse := false
-
-	tests := []struct {
-		name      string
-		uninstall *bool
-		expected  *bool
-	}{
-		{
-			name:      "uninstall true",
-			uninstall: &uninstallTrue,
-			expected:  &uninstallTrue,
-		},
-		{
-			name:      "uninstall false",
-			uninstall: &uninstallFalse,
-			expected:  &uninstallFalse,
-		},
-		{
-			name:      "uninstall nil",
-			uninstall: nil,
-			expected:  nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			agentSpec := &ArgoCDAgentSpec{
-				Image:     "test-agent-image",
-				Uninstall: tt.uninstall,
-			}
-
-			assert.Equal(t, "test-agent-image", agentSpec.Image)
-			if tt.expected == nil {
-				assert.Nil(t, agentSpec.Uninstall)
-			} else {
-				assert.NotNil(t, agentSpec.Uninstall)
-				assert.Equal(t, *tt.expected, *agentSpec.Uninstall)
-			}
-		})
-	}
+// TestArgoCDAgentSpec_WithUninstall removed - Uninstall field was removed from API
+// Cleanup is now handled via pre-delete hooks in the addon framework
+func TestArgoCDAgentSpec_Removed_WithUninstall(t *testing.T) {
+	// Test removed - Uninstall field no longer exists in API
+	t.Skip("Uninstall field removed from API")
 }
 
 func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {

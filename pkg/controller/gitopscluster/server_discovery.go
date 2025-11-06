@@ -72,51 +72,23 @@ func (r *ReconcileGitOpsCluster) FindServiceWithLabelsAndNamespace(namespace str
 }
 
 // EnsureServerAddressAndPort auto-discovers and populates server address and port if they are empty
-func (r *ReconcileGitOpsCluster) EnsureServerAddressAndPort(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) (bool, error) {
-	// Check if serverAddress and serverPort are already set in the GitOpsCluster spec
-	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil &&
-		(gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress != "" || gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort != "") {
-		klog.V(2).Infof("serverAddress or serverPort already set in GitOpsCluster spec, skipping auto-discovery")
-		return false, nil
-	}
+// EnsureServerAddressAndPort is deprecated - use DiscoverServerAddressAndPort instead
+// This function is kept for backwards compatibility but delegates to the new implementation
+func (r *ReconcileGitOpsCluster) EnsureServerAddressAndPort(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) (bool, error) {
+	// Track if values were already set
+	alreadySet := gitOpsCluster.Spec.GitOpsAddon != nil &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress != "" &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort != ""
 
-	// Check if any existing AddonDeploymentConfig already has these values set
-	hasExistingAddonConfig, err := r.HasExistingServerConfig(managedClusters)
+	// Use the new DiscoverServerAddressAndPort function
+	err := r.DiscoverServerAddressAndPort(ctx, gitOpsCluster)
 	if err != nil {
-		return false, fmt.Errorf("failed to check existing addon configs: %w", err)
-	}
-	if hasExistingAddonConfig {
-		klog.V(2).Infof("serverAddress or serverPort already set in existing AddonDeploymentConfig, skipping auto-discovery")
-		return false, nil
+		return false, err
 	}
 
-	// Try to discover server address and port from the ArgoCD agent principal service
-	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
-	if argoNamespace == "" {
-		argoNamespace = "openshift-gitops"
-	}
-
-	serverAddress, serverPort, err := r.DiscoverServerAddressAndPort(argoNamespace)
-	if err != nil {
-		return false, fmt.Errorf("failed to discover server address and port: %w", err)
-	}
-
-	// Initialize GitOpsAddon and ArgoCDAgent specs if they don't exist
-	if gitOpsCluster.Spec.GitOpsAddon == nil {
-		gitOpsCluster.Spec.GitOpsAddon = &gitopsclusterV1beta1.GitOpsAddonSpec{}
-	}
-	if gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent == nil {
-		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent = &gitopsclusterV1beta1.ArgoCDAgentSpec{}
-	}
-
-	// Set the discovered values
-	gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress = serverAddress
-	gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort = serverPort
-
-	klog.Infof("auto-discovered server address: %s, port: %s for GitOpsCluster %s/%s",
-		serverAddress, serverPort, gitOpsCluster.Namespace, gitOpsCluster.Name)
-
-	return true, nil
+	// Return true if values were updated (not already set)
+	return !alreadySet, nil
 }
 
 // HasExistingServerConfig checks if any existing AddonDeploymentConfig has server address/port configured
@@ -152,46 +124,129 @@ func (r *ReconcileGitOpsCluster) HasExistingServerConfig(managedClusters []*spok
 	return false, nil
 }
 
-// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal service
-func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(argoNamespace string) (string, string, error) {
-	// Use the existing logic from argocd_agent_certificates.go to find the principal service
-	service, err := r.findArgoCDAgentPrincipalService(argoNamespace)
+// FindArgoCDAgentPrincipalService finds the ArgoCD agent principal service
+// It tries hardcoded names first, then lists all services and filters by suffix
+func (r *ReconcileGitOpsCluster) FindArgoCDAgentPrincipalService(ctx context.Context, namespace string) (*v1.Service, error) {
+	// Try hardcoded common names first (faster)
+	commonNames := []string{"openshift-gitops-agent-principal", "argocd-agent-principal"}
+
+	for _, name := range commonNames {
+		service := &v1.Service{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		}, service)
+		if err == nil {
+			klog.V(2).Infof("Found ArgoCD agent principal service by name: %s in namespace %s", name, namespace)
+			return service, nil
+		}
+		if !k8errors.IsNotFound(err) {
+			klog.Warningf("Error checking for service %s: %v", name, err)
+		}
+	}
+
+	// Fallback: list all services and find one ending with "-agent-principal"
+	serviceList := &v1.ServiceList{}
+	err := r.List(ctx, serviceList, client.InNamespace(namespace))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
+		return nil, fmt.Errorf("failed to list services in namespace '%s': %w", namespace, err)
+	}
+
+	for _, svc := range serviceList.Items {
+		if strings.HasSuffix(svc.Name, "-agent-principal") {
+			klog.V(2).Infof("Found ArgoCD agent principal service by suffix match: %s in namespace %s", svc.Name, namespace)
+			return &svc, nil
+		}
+	}
+
+	return nil, fmt.Errorf("ArgoCD agent principal service not found in namespace '%s'. Please ensure the ArgoCD instance has been deployed with agent mode enabled and the principal service is running", namespace)
+}
+
+// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal service
+// and updates the GitOpsCluster CR spec fields if they are empty
+func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
+	// Only discover if fields are not already set
+	if gitOpsCluster.Spec.GitOpsAddon != nil &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress != "" &&
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort != "" {
+		klog.V(2).Infof("Server address and port already configured: %s:%s",
+			gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress,
+			gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
+		return nil
+	}
+
+	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
+	if argoNamespace == "" {
+		argoNamespace = "openshift-gitops"
+	}
+
+	// Find the principal service
+	service, err := r.FindArgoCDAgentPrincipalService(ctx, argoNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
 	}
 
 	// Look for LoadBalancer external endpoints
 	var serverAddress string
-	var serverPort string = "443" // Default HTTPS port
+	var serverPort string
 
 	for _, ingress := range service.Status.LoadBalancer.Ingress {
 		if ingress.Hostname != "" {
 			serverAddress = ingress.Hostname
-			klog.V(2).Infof("discovered server address from LoadBalancer hostname: %s", serverAddress)
+			klog.V(2).Infof("Discovered server address from LoadBalancer hostname: %s", serverAddress)
 			break
 		}
 		if ingress.IP != "" {
 			serverAddress = ingress.IP
-			klog.V(2).Infof("discovered server address from LoadBalancer IP: %s", serverAddress)
+			klog.V(2).Infof("Discovered server address from LoadBalancer IP: %s", serverAddress)
 			break
 		}
 	}
 
 	if serverAddress == "" {
-		return "", "", fmt.Errorf("no external LoadBalancer IP or hostname found for service %s in namespace %s", service.Name, argoNamespace)
+		return fmt.Errorf("ArgoCD agent principal service '%s' in namespace '%s' does not have an external LoadBalancer IP or hostname. Please ensure your cluster has a LoadBalancer service provisioner (e.g., MetalLB, cloud provider load balancer) configured", service.Name, argoNamespace)
 	}
 
-	// Try to get the actual port from the service spec
+	// Get the port from the service spec (no default)
 	for _, port := range service.Spec.Ports {
 		if port.Name == "https" || port.Port == 443 {
 			serverPort = fmt.Sprintf("%d", port.Port)
-			klog.V(2).Infof("discovered server port from service spec: %s", serverPort)
+			klog.V(2).Infof("Discovered server port from service spec: %s", serverPort)
 			break
 		}
 	}
 
-	klog.Infof("discovered ArgoCD agent server endpoint: %s:%s", serverAddress, serverPort)
-	return serverAddress, serverPort, nil
+	if serverPort == "" {
+		// Try first port if no https port found
+		if len(service.Spec.Ports) > 0 {
+			serverPort = fmt.Sprintf("%d", service.Spec.Ports[0].Port)
+			klog.V(2).Infof("Using first available port from service spec: %s", serverPort)
+		} else {
+			return fmt.Errorf("ArgoCD agent principal service '%s' has no ports defined", service.Name)
+		}
+	}
+
+	// Update the GitOpsCluster CR with discovered values
+	if gitOpsCluster.Spec.GitOpsAddon == nil {
+		gitOpsCluster.Spec.GitOpsAddon = &gitopsclusterV1beta1.GitOpsAddonSpec{}
+	}
+	if gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent == nil {
+		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent = &gitopsclusterV1beta1.ArgoCDAgentSpec{}
+	}
+
+	gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress = serverAddress
+	gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort = serverPort
+
+	// Update the CR
+	err = r.Update(ctx, gitOpsCluster)
+	if err != nil {
+		return fmt.Errorf("failed to update GitOpsCluster with discovered server address and port: %w", err)
+	}
+
+	klog.Infof("Updated GitOpsCluster %s/%s with discovered ArgoCD agent server endpoint: %s:%s",
+		gitOpsCluster.Namespace, gitOpsCluster.Name, serverAddress, serverPort)
+	return nil
 }
 
 // GetManagedClusters retrieves managed cluster names from placement decision

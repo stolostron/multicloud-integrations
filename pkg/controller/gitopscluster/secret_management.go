@@ -28,89 +28,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
-	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ensureArgoCDAgentCASecret ensures the argocd-agent-ca secret exists in GitOps namespace
-// by copying it from the multicluster-operators-application-svc-ca secret in open-cluster-management namespace
-func (r *ReconcileGitOpsCluster) ensureArgoCDAgentCASecret(gitopsNamespace string) error {
-	// Check if argocd-agent-ca secret already exists
-	targetSecret := &v1.Secret{}
-	targetSecretName := types.NamespacedName{
-		Name:      "argocd-agent-ca",
-		Namespace: gitopsNamespace,
-	}
-
-	err := r.Get(context.TODO(), targetSecretName, targetSecret)
-	if err == nil {
-		klog.Info("argocd-agent-ca secret already exists in namespace", gitopsNamespace)
-		return nil
-	}
-
-	if !k8errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check argocd-agent-ca secret: %w", err)
-	}
-
-	klog.Info("argocd-agent-ca secret not found, copying from source secret in namespace", gitopsNamespace)
-
-	// Get the source secret from open-cluster-management namespace
-	sourceSecret := &v1.Secret{}
-	sourceSecretName := types.NamespacedName{
-		Name:      "multicluster-operators-application-svc-ca",
-		Namespace: utils.GetComponentNamespace("open-cluster-management"),
-	}
-
-	err = r.Get(context.TODO(), sourceSecretName, sourceSecret)
-	if err != nil {
-		if k8errors.IsNotFound(err) {
-			return fmt.Errorf("source secret multicluster-operators-application-svc-ca not found in %s namespace - ensure OCM is properly installed", sourceSecretName.Namespace)
-		}
-
-		return fmt.Errorf("failed to get source secret: %w", err)
-	}
-
-	// Prepare labels and annotations maps
-	labels := make(map[string]string)
-	if sourceSecret.Labels != nil {
-		for k, v := range sourceSecret.Labels {
-			labels[k] = v
-		}
-	}
-
-	annotations := make(map[string]string)
-	if sourceSecret.Annotations != nil {
-		for k, v := range sourceSecret.Annotations {
-			annotations[k] = v
-		}
-	}
-
-	// Create the new secret with modified name and namespace
-	newSecret := &v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "argocd-agent-ca",
-			Namespace:   gitopsNamespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Type: sourceSecret.Type,
-		Data: sourceSecret.Data,
-	}
-
-	err = r.Create(context.TODO(), newSecret)
-	if err != nil {
-		if k8errors.IsAlreadyExists(err) {
-			klog.Info("argocd-agent-ca secret was created by another process in namespace", gitopsNamespace)
-			return nil
-		}
-
-		return fmt.Errorf("failed to create argocd-agent-ca secret: %w", err)
-	}
-
-	klog.Info("Successfully created argocd-agent-ca secret in namespace", gitopsNamespace)
-
-	return nil
-}
+// Note: The argocd-agent-ca secret is now managed by EnsureArgoCDAgentCASecret
+// in argocd_agent_certificates.go using certrotation from ocm-io/sdk-go
 
 // ensureArgoCDRedisSecret ensures the argocd-redis secret exists in GitOps namespace
 func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string) error {
@@ -154,13 +76,13 @@ func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string)
 	}
 
 	if initialPasswordSecret == nil {
-		return fmt.Errorf("no secret found ending with 'redis-initial-password' in namespace %s", gitopsNamespace)
+		return fmt.Errorf("ArgoCD Redis password secret not found in namespace '%s'. Please ensure ArgoCD has been installed and the Redis initial password secret exists (should end with 'redis-initial-password')", gitopsNamespace)
 	}
 
 	// Extract the admin.password value
 	adminPasswordBytes, exists := initialPasswordSecret.Data["admin.password"]
 	if !exists {
-		return fmt.Errorf("admin.password not found in secret %s", initialPasswordSecret.Name)
+		return fmt.Errorf("admin.password field is missing in Redis password secret '%s'. The secret may be corrupted or in an unexpected format", initialPasswordSecret.Name)
 	}
 
 	// Create the argocd-redis secret
