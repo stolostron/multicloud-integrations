@@ -308,6 +308,50 @@ func (r *ApplicationReconciler) generateManifestWork(name, namespace string, app
 		return nil, err
 	}
 
+	// Build manifests list - exclude the default appProject "openshift-gitops/default"
+	manifests := []workv1.Manifest{
+		{
+			RawExtension: runtime.RawExtension{
+				Raw: []byte(manifestNSString),
+			},
+		},
+	}
+
+	includeAppProject := !(appProject.GetName() == "default" && appProject.GetNamespace() == "openshift-gitops")
+
+	if includeAppProject {
+		manifests = append(manifests, workv1.Manifest{
+			RawExtension: runtime.RawExtension{
+				Object: appProject,
+			},
+		})
+	}
+
+	manifests = append(manifests, workv1.Manifest{
+		RawExtension: runtime.RawExtension{
+			Object: &application,
+		},
+	})
+
+	// Build orphaning rules - exclude the default appProject "openshift-gitops/default"
+	orphaningRules := []workv1.OrphaningRule{
+		{
+			Group:     "",
+			Namespace: "",
+			Resource:  "namespaces",
+			Name:      application.GetNamespace(),
+		},
+	}
+
+	if includeAppProject {
+		orphaningRules = append(orphaningRules, workv1.OrphaningRule{
+			Group:     "argoproj.io",
+			Namespace: appProject.GetNamespace(),
+			Resource:  "appprojects",
+			Name:      appProject.GetName(),
+		})
+	}
+
 	return &workv1.ManifestWork{
 		TypeMeta: metav1.TypeMeta{},
 		ObjectMeta: metav1.ObjectMeta{
@@ -318,23 +362,7 @@ func (r *ApplicationReconciler) generateManifestWork(name, namespace string, app
 		},
 		Spec: workv1.ManifestWorkSpec{
 			Workload: workv1.ManifestsTemplate{
-				Manifests: []workv1.Manifest{
-					{
-						RawExtension: runtime.RawExtension{
-							Raw: []byte(manifestNSString),
-						},
-					},
-					{
-						RawExtension: runtime.RawExtension{
-							Object: appProject,
-						},
-					},
-					{
-						RawExtension: runtime.RawExtension{
-							Object: &application,
-						},
-					},
-				},
+				Manifests: manifests,
 			},
 			ManifestConfigs: []workv1.ManifestConfigOption{
 				{
@@ -369,20 +397,7 @@ func (r *ApplicationReconciler) generateManifestWork(name, namespace string, app
 			DeleteOption: &workv1.DeleteOption{
 				PropagationPolicy: workv1.DeletePropagationPolicyTypeSelectivelyOrphan,
 				SelectivelyOrphan: &workv1.SelectivelyOrphan{
-					OrphaningRules: []workv1.OrphaningRule{
-						{
-							Group:     "",
-							Namespace: "",
-							Resource:  "namespaces",
-							Name:      application.GetNamespace(),
-						},
-						{
-							Group:     "argoproj.io",
-							Namespace: appProject.GetNamespace(),
-							Resource:  "appprojects",
-							Name:      appProject.GetName(),
-						},
-					},
+					OrphaningRules: orphaningRules,
 				},
 			},
 		},
