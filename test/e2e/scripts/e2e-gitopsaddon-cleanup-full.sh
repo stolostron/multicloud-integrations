@@ -12,10 +12,10 @@ echo "========================================="
 echo "E2E CLEANUP FULL TEST - Setup + Cleanup"
 echo "========================================="
 
-# Run setup
+# Run setup with ArgoCD agent enabled
 echo ""
-echo "Running setup..."
-./test/e2e/scripts/e2e-setup.sh
+echo "Running setup with ArgoCD agent enabled..."
+ENABLE_ARGOCD_AGENT=true ./test/e2e/scripts/e2e-setup.sh
 
 # Run deploy verification
 echo ""

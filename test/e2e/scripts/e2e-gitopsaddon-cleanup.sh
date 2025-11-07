@@ -12,10 +12,10 @@ echo "========================================="
 echo "E2E GITOPS ADDON CLEANUP TEST (CI mode)"
 echo "========================================="
 
-# Run setup (assumes clusters already exist)
+# Run setup with ArgoCD agent enabled (assumes clusters already exist)
 echo ""
-echo "Running setup..."
-./test/e2e/scripts/e2e-setup.sh
+echo "Running setup with ArgoCD agent enabled..."
+ENABLE_ARGOCD_AGENT=true ./test/e2e/scripts/e2e-setup.sh
 
 # Run deploy verification
 echo ""

@@ -117,7 +117,21 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 			}
 		} else {
 			// Preserve mode (default): preserve ALL existing variables and only add new ones
-			updatedVariables = append(updatedVariables, existing.Spec.CustomizedVariables...)
+			// EXCEPT for ARGOCD_AGENT_ENABLED which should always reflect the current state
+			for _, variable := range existing.Spec.CustomizedVariables {
+				if variable.Name == "ARGOCD_AGENT_ENABLED" {
+					// Always update ARGOCD_AGENT_ENABLED to match current argoCDAgent.enabled state
+					if newValue, exists := managedVariables["ARGOCD_AGENT_ENABLED"]; exists {
+						updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
+							Name:  "ARGOCD_AGENT_ENABLED",
+							Value: newValue,
+						})
+					}
+				} else {
+					// Preserve other existing variables
+					updatedVariables = append(updatedVariables, variable)
+				}
+			}
 
 			// Add only NEW managed variables that don't already exist
 			for name, value := range managedVariables {
@@ -231,9 +245,17 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 		Namespace: namespace,
 	}, existing)
 
-	// Expected configs: AddOnTemplate and AddOnDeploymentConfig
-	expectedConfigs := []addonv1alpha1.AddOnConfig{
-		{
+	// Check if ArgoCD agent is enabled
+	_, argoCDAgentEnabled := r.GetGitOpsAddonStatus(gitOpsCluster)
+
+	// Build expected configs based on whether ArgoCD agent is enabled
+	// When ArgoCD agent is enabled, use the dynamic AddOnTemplate
+	// When ArgoCD agent is NOT enabled, exclude the AddOnTemplate config so it uses the default from ClusterManagementAddOn
+	expectedConfigs := []addonv1alpha1.AddOnConfig{}
+
+	if argoCDAgentEnabled {
+		// Add dynamic AddOnTemplate config only when ArgoCD agent is enabled
+		expectedConfigs = append(expectedConfigs, addonv1alpha1.AddOnConfig{
 			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
 				Group:    "addon.open-cluster-management.io",
 				Resource: "addontemplates",
@@ -241,18 +263,20 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 			ConfigReferent: addonv1alpha1.ConfigReferent{
 				Name: templateName,
 			},
-		},
-		{
-			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
-				Group:    "addon.open-cluster-management.io",
-				Resource: "addondeploymentconfigs",
-			},
-			ConfigReferent: addonv1alpha1.ConfigReferent{
-				Name:      "gitops-addon-config",
-				Namespace: namespace,
-			},
-		},
+		})
 	}
+
+	// Always add AddOnDeploymentConfig
+	expectedConfigs = append(expectedConfigs, addonv1alpha1.AddOnConfig{
+		ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+			Group:    "addon.open-cluster-management.io",
+			Resource: "addondeploymentconfigs",
+		},
+		ConfigReferent: addonv1alpha1.ConfigReferent{
+			Name:      "gitops-addon-config",
+			Namespace: namespace,
+		},
+	})
 
 	if k8errors.IsNotFound(err) {
 		// Create new ManagedClusterAddOn with both config references

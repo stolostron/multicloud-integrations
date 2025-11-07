@@ -109,13 +109,24 @@ fi
 # Step 9: Verify agent pods are running
 echo ""
 echo "Step 9: Verifying agent pods..."
-kubectl --context ${HUB_CONTEXT} wait --for=condition=Ready --timeout=120s \
-  pod -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} || {
-  echo "✗ Principal pods not ready"
-  kubectl --context ${HUB_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
-  exit 1
-}
-echo "✓ Principal pods are ready on hub"
+# Wait for principal deployment rollout (handles pod updates during reconciliation)
+if kubectl --context ${HUB_CONTEXT} get deployment openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} &>/dev/null; then
+  kubectl --context ${HUB_CONTEXT} rollout status deployment/openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --timeout=120s || {
+    echo "✗ Principal deployment rollout failed"
+    kubectl --context ${HUB_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
+    exit 1
+  }
+  echo "✓ Principal pods are ready on hub"
+else
+  # Fallback to pod wait if deployment doesn't exist
+  kubectl --context ${HUB_CONTEXT} wait --for=condition=Ready --timeout=120s \
+    pod -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} || {
+    echo "✗ Principal pods not ready"
+    kubectl --context ${HUB_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
+    exit 1
+  }
+  echo "✓ Principal pods are ready on hub"
+fi
 
 kubectl --context ${SPOKE_CONTEXT} wait --for=condition=Ready --timeout=120s \
   pod -l app.kubernetes.io/name=argocd-agent-agent -n ${GITOPS_NAMESPACE} || {

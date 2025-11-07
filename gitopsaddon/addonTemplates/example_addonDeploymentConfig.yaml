@@ -20,7 +20,6 @@ spec:
   - name: ARGOCD_AGENT_ENABLED
     value: "false"
   - name: ARGOCD_AGENT_IMAGE
-    # Default value - can be overridden via GitOpsCluster.spec.gitOpsAddon.argoCDAgent.image
     value: registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:d17069d475959a5fca31dc4cd2c2dce4f3d895f2c2b97906261791674a889079
   - name: ARGOCD_AGENT_SERVER_ADDRESS
     value: ""
