@@ -503,14 +503,13 @@ func verifyNamespaceCleanup(ctx context.Context, c client.Client, namespace stri
 }
 
 // getCleanupVerificationWaitDuration returns the wait duration for cleanup verification
-// Defaults to 3 minutes, can be overridden with CLEANUP_VERIFICATION_WAIT_SECONDS env var
-// Set to 0 to skip verification (useful for tests)
+// Defaults to 0 seconds, can be overridden with CLEANUP_VERIFICATION_WAIT_SECONDS env var
+// Set to 0 to skip verification
 func getCleanupVerificationWaitDuration() time.Duration {
 	if waitSecondsStr := os.Getenv("CLEANUP_VERIFICATION_WAIT_SECONDS"); waitSecondsStr != "" {
 		if waitSeconds, err := strconv.Atoi(waitSecondsStr); err == nil {
 			return time.Duration(waitSeconds) * time.Second
 		}
 	}
-	// Default: 3 minutes
-	return 3 * time.Minute
+	return 0
 }

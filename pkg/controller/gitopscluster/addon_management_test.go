@@ -282,7 +282,60 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				// New managed variables should be added
 				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "New managed variable should be added")
 				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
-				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be present")
+				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "ARGOCD_AGENT_ENABLED should be updated to match current state")
+			},
+		},
+		{
+			name:      "ARGOCD_AGENT_ENABLED always updates in preserve mode when changed",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						OverrideExistingConfigs: func(b bool) *bool { return &b }(false),
+						GitOpsOperatorImage:     "operator-image:latest",
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false), // Changed from true to false
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "ARGOCD_AGENT_ENABLED", Value: "true"}, // Was true
+							{Name: "USER_CUSTOM_VAR", Value: "user-value"},
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-operator-image:latest"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				// ARGOCD_AGENT_ENABLED should be updated to false even in preserve mode
+				assert.Equal(t, "false", varMap["ARGOCD_AGENT_ENABLED"], "ARGOCD_AGENT_ENABLED should be updated to reflect current argoCDAgent.enabled state")
+				// Other variables should be preserved
+				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
+				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved in preserve mode")
 			},
 		},
 	}
@@ -430,10 +483,13 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := addonv1alpha1.AddToScheme(scheme)
 	require.NoError(t, err)
+	err = gitopsclusterV1beta1.AddToScheme(scheme)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name            string
 		namespace       string
+		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
 		existingObjects []client.Object
 		expectedError   bool
 		validateFunc    func(t *testing.T, c client.Client, namespace string)
@@ -442,10 +498,30 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 			name:          "empty namespace should return error",
 			namespace:     "",
 			expectedError: true,
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+			},
 		},
 		{
-			name:      "create new ManagedClusterAddOn",
+			name:      "create new ManagedClusterAddOn with ArgoCD agent disabled - only AddonDeploymentConfig",
 			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false),
+						},
+					},
+				},
+			},
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
 				addon := &addonv1alpha1.ManagedClusterAddOn{}
 				err := c.Get(context.Background(), types.NamespacedName{
@@ -454,9 +530,52 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
-				// Now we have 2 configs: AddOnTemplate and AddonDeploymentConfig
+				// Only AddonDeploymentConfig when ArgoCD agent is disabled
+				assert.Len(t, addon.Spec.Configs, 1)
+
+				// Check that we only have AddonDeploymentConfig
+				foundTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						foundTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.False(t, foundTemplate, "Should NOT have AddOnTemplate config when ArgoCD agent is disabled")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
+			},
+		},
+		{
+			name:      "create new ManagedClusterAddOn with ArgoCD agent enabled - both configs",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(true),
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+
+				// Both AddOnTemplate and AddonDeploymentConfig when ArgoCD agent is enabled
 				assert.Len(t, addon.Spec.Configs, 2)
-				
+
 				// Check that we have both configs
 				foundTemplate := false
 				foundDeploymentConfig := false
@@ -469,13 +588,27 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 						foundDeploymentConfig = true
 					}
 				}
-				assert.True(t, foundTemplate, "Should have AddOnTemplate config")
+				assert.True(t, foundTemplate, "Should have AddOnTemplate config when ArgoCD agent is enabled")
 				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
 		{
-			name:      "update existing ManagedClusterAddOn with missing config",
+			name:      "update existing ManagedClusterAddOn with missing config - ArgoCD agent disabled",
 			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false),
+						},
+					},
+				},
+			},
 			existingObjects: []client.Object{
 				&addonv1alpha1.ManagedClusterAddOn{
 					ObjectMeta: metav1.ObjectMeta{
@@ -493,9 +626,61 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
-				// Now we have 2 configs: AddOnTemplate and AddonDeploymentConfig
+				// Only AddonDeploymentConfig when ArgoCD agent is disabled
+				assert.Len(t, addon.Spec.Configs, 1)
+
+				// Check that we only have AddonDeploymentConfig
+				foundTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						foundTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.False(t, foundTemplate, "Should NOT have AddOnTemplate config when ArgoCD agent is disabled")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
+			},
+		},
+		{
+			name:      "update existing ManagedClusterAddOn with missing config - ArgoCD agent enabled",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(true),
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.ManagedClusterAddOn{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.ManagedClusterAddOnSpec{},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+
+				// Both AddOnTemplate and AddonDeploymentConfig when ArgoCD agent is enabled
 				assert.Len(t, addon.Spec.Configs, 2)
-				
+
 				// Check that we have both configs
 				foundTemplate := false
 				foundDeploymentConfig := false
@@ -508,7 +693,7 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 						foundDeploymentConfig = true
 					}
 				}
-				assert.True(t, foundTemplate, "Should have AddOnTemplate config")
+				assert.True(t, foundTemplate, "Should have AddOnTemplate config when ArgoCD agent is enabled")
 				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
@@ -521,18 +706,11 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				WithObjects(tt.existingObjects...).
 				Build()
 
-		reconciler := &ReconcileGitOpsCluster{
-			Client: fakeClient,
-		}
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
 
-		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-gitopscluster",
-				Namespace: "test-namespace",
-			},
-		}
-
-		err := reconciler.EnsureManagedClusterAddon(tt.namespace, gitOpsCluster)
+			err := reconciler.EnsureManagedClusterAddon(tt.namespace, tt.gitOpsCluster)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -754,8 +932,8 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 				"EXISTING_VAR": "existing-value",
 			},
 			expectedVars: map[string]string{
-				"EXISTING_VAR":           "existing-value",
-				"ARGOCD_AGENT_IMAGE":     "agent-image:v2.0",
+				"EXISTING_VAR":       "existing-value",
+				"ARGOCD_AGENT_IMAGE": "agent-image:v2.0",
 			},
 		},
 		{
