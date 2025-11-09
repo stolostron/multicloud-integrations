@@ -39,6 +39,43 @@ if [ "$PHASE" != "successful" ]; then
   exit 1
 fi
 
+# Step 2.5: Verify GitOpsCluster conditions
+echo ""
+echo "Step 2.5: Verifying GitOpsCluster conditions..."
+READY=$(kubectl --context ${HUB_CONTEXT} get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+PLACEMENT=$(kubectl --context ${HUB_CONTEXT} get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="PlacementResolved")].status}')
+ARGOSERVER=$(kubectl --context ${HUB_CONTEXT} get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="ArgoServerVerified")].status}')
+CLUSTERS=$(kubectl --context ${HUB_CONTEXT} get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} -o jsonpath='{.status.conditions[?(@.type=="ClustersRegistered")].status}')
+
+echo "  Core Conditions:"
+echo "    Ready: ${READY}"
+echo "    PlacementResolved: ${PLACEMENT}"
+echo "    ArgoServerVerified: ${ARGOSERVER}"
+echo "    ClustersRegistered: ${CLUSTERS}"
+
+if [ "${READY}" != "True" ]; then
+  echo "  ✗ ERROR: Ready condition is not True"
+  kubectl --context ${HUB_CONTEXT} get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} -o yaml
+  exit 1
+fi
+
+if [ "${PLACEMENT}" != "True" ]; then
+  echo "  ✗ ERROR: PlacementResolved condition is not True"
+  exit 1
+fi
+
+if [ "${ARGOSERVER}" != "True" ]; then
+  echo "  ✗ ERROR: ArgoServerVerified condition is not True"
+  exit 1
+fi
+
+if [ "${CLUSTERS}" != "True" ]; then
+  echo "  ✗ ERROR: ClustersRegistered condition is not True"
+  exit 1
+fi
+
+echo "  ✓ All core conditions are True"
+
 # Step 3: Verify CA certificates exist
 echo ""
 echo "Step 3: Verifying certificates..."
@@ -140,4 +177,3 @@ echo ""
 echo "========================================="
 echo "✓ E2E DEPLOY TEST PASSED"
 echo "========================================="
-

@@ -502,6 +502,10 @@ func TestUpdateReadyCondition(t *testing.T) {
 							Status: metav1.ConditionTrue,
 						},
 						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterArgoServerVerified,
+							Status: metav1.ConditionTrue,
+						},
+						{
 							Type:   gitopsclusterV1beta1.GitOpsClusterClustersRegistered,
 							Status: metav1.ConditionTrue,
 						},
@@ -535,6 +539,7 @@ func TestUpdateReadyCondition(t *testing.T) {
 			instance: &gitopsclusterV1beta1.GitOpsCluster{
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: &[]bool{true}[0],
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 							Enabled:        &[]bool{true}[0],
 							PropagateHubCA: &[]bool{true}[0],
@@ -548,11 +553,23 @@ func TestUpdateReadyCondition(t *testing.T) {
 							Status: metav1.ConditionTrue,
 						},
 						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterArgoServerVerified,
+							Status: metav1.ConditionTrue,
+						},
+						{
 							Type:   gitopsclusterV1beta1.GitOpsClusterClustersRegistered,
 							Status: metav1.ConditionTrue,
 						},
 						{
-							Type:   gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady,
+							Type:   gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady,
+							Status: metav1.ConditionTrue,
+						},
+						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady,
+							Status: metav1.ConditionTrue,
+						},
+						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady,
 							Status: metav1.ConditionTrue,
 						},
 						{
@@ -628,6 +645,10 @@ func TestUpdateReadyCondition(t *testing.T) {
 							Status: metav1.ConditionTrue,
 						},
 						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterArgoServerVerified,
+							Status: metav1.ConditionTrue,
+						},
+						{
 							Type:   gitopsclusterV1beta1.GitOpsClusterClustersRegistered,
 							Status: metav1.ConditionTrue,
 						},
@@ -635,11 +656,6 @@ func TestUpdateReadyCondition(t *testing.T) {
 							Type:   gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady,
 							Status: metav1.ConditionTrue,
 							Reason: gitopsclusterV1beta1.ReasonNotRequired,
-						},
-						{
-							Type:   gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady,
-							Status: metav1.ConditionTrue,
-							Reason: gitopsclusterV1beta1.ReasonDisabled,
 						},
 						{
 							Type:   gitopsclusterV1beta1.GitOpsClusterCertificatesReady,

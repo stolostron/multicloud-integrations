@@ -94,6 +94,57 @@ for i in {1..60}; do
 done
 
 echo ""
+echo "Step 5: Verifying GitOpsCluster conditions..."
+# Check that core conditions are set to True
+READY=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+PLACEMENT=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="PlacementResolved")].status}')
+ARGOSERVER=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="ArgoServerVerified")].status}')
+CLUSTERS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="ClustersRegistered")].status}')
+CONFIGS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="AddOnDeploymentConfigsReady")].status}')
+ADDONS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="ManagedClusterAddOnsReady")].status}')
+
+echo "  Conditions:"
+echo "    Ready: ${READY}"
+echo "    PlacementResolved: ${PLACEMENT}"
+echo "    ArgoServerVerified: ${ARGOSERVER}"
+echo "    ClustersRegistered: ${CLUSTERS}"
+echo "    AddOnDeploymentConfigsReady: ${CONFIGS}"
+echo "    ManagedClusterAddOnsReady: ${ADDONS}"
+
+if [ "${READY}" != "True" ]; then
+  echo "  ✗ ERROR: Ready condition is not True"
+  kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml
+  exit 1
+fi
+
+if [ "${PLACEMENT}" != "True" ]; then
+  echo "  ✗ ERROR: PlacementResolved condition is not True"
+  exit 1
+fi
+
+if [ "${ARGOSERVER}" != "True" ]; then
+  echo "  ✗ ERROR: ArgoServerVerified condition is not True"
+  exit 1
+fi
+
+if [ "${CLUSTERS}" != "True" ]; then
+  echo "  ✗ ERROR: ClustersRegistered condition is not True"
+  exit 1
+fi
+
+if [ "${CONFIGS}" != "True" ]; then
+  echo "  ✗ ERROR: AddOnDeploymentConfigsReady condition is not True"
+  exit 1
+fi
+
+if [ "${ADDONS}" != "True" ]; then
+  echo "  ✗ ERROR: ManagedClusterAddOnsReady condition is not True"
+  exit 1
+fi
+
+echo "  ✓ All GitOpsCluster conditions are True"
+
+echo ""
 echo "========================================="
 echo "✓ PHASE 1 PASSED - GitOpsAddon Only Works"
 echo "========================================="
@@ -173,6 +224,50 @@ done
 echo ""
 echo "Step 3: Running full deploy verification with ArgoCD agent enabled..."
 ./test/e2e/scripts/e2e-deploy.sh
+
+echo ""
+echo "Step 4: Verifying GitOpsCluster conditions with ArgoCD agent enabled..."
+# Check that ArgoCD agent specific conditions are also True
+READY=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+TEMPLATE=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="AddOnTemplateReady")].status}')
+AGENT_PREREQS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="ArgoCDAgentPrereqsReady")].status}')
+CERTS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="CertificatesReady")].status}')
+MANIFESTWORKS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.conditions[?(@.type=="ManifestWorksApplied")].status}')
+
+echo "  ArgoCD Agent Conditions:"
+echo "    Ready: ${READY}"
+echo "    AddOnTemplateReady: ${TEMPLATE}"
+echo "    ArgoCDAgentPrereqsReady: ${AGENT_PREREQS}"
+echo "    CertificatesReady: ${CERTS}"
+echo "    ManifestWorksApplied: ${MANIFESTWORKS}"
+
+if [ "${READY}" != "True" ]; then
+  echo "  ✗ ERROR: Ready condition is not True"
+  kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml
+  exit 1
+fi
+
+if [ "${TEMPLATE}" != "True" ]; then
+  echo "  ✗ ERROR: AddOnTemplateReady condition is not True"
+  exit 1
+fi
+
+if [ "${AGENT_PREREQS}" != "True" ]; then
+  echo "  ✗ ERROR: ArgoCDAgentPrereqsReady condition is not True"
+  exit 1
+fi
+
+if [ "${CERTS}" != "True" ]; then
+  echo "  ✗ ERROR: CertificatesReady condition is not True"
+  exit 1
+fi
+
+if [ "${MANIFESTWORKS}" != "True" ]; then
+  echo "  ✗ ERROR: ManifestWorksApplied condition is not True"
+  exit 1
+fi
+
+echo "  ✓ All ArgoCD agent conditions are True"
 
 # Verify app sync
 echo ""
@@ -297,4 +392,3 @@ echo ""
 echo "========================================="
 echo "✓ E2E FULL TEST PASSED"
 echo "========================================="
-
