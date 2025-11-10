@@ -35,9 +35,32 @@ const (
 	// and managed clusters were successfully retrieved.
 	GitOpsClusterPlacementResolved = "PlacementResolved"
 
+	// GitOpsClusterArgoServerVerified indicates whether the ArgoCD server pod was found
+	// in the specified namespace.
+	GitOpsClusterArgoServerVerified = "ArgoServerVerified"
+
+	// GitOpsClusterApplicationSetResourcesReady indicates whether ApplicationSet ConfigMaps
+	// and RBAC resources were created successfully.
+	GitOpsClusterApplicationSetResourcesReady = "ApplicationSetResourcesReady"
+
+	// GitOpsClusterPolicyTemplateReady indicates whether the policy template was created successfully.
+	GitOpsClusterPolicyTemplateReady = "PolicyTemplateReady"
+
 	// GitOpsClusterClustersRegistered indicates whether managed clusters were successfully
 	// registered with the ArgoCD server.
 	GitOpsClusterClustersRegistered = "ClustersRegistered"
+
+	// GitOpsClusterAddOnTemplateReady indicates whether the AddOnTemplate was created successfully
+	// for ArgoCD agent mode (only applies when ArgoCD agent is enabled).
+	GitOpsClusterAddOnTemplateReady = "AddOnTemplateReady"
+
+	// GitOpsClusterAddOnDeploymentConfigsReady indicates whether AddOnDeploymentConfigs were
+	// created successfully for all managed clusters (only applies when GitOps addon is enabled).
+	GitOpsClusterAddOnDeploymentConfigsReady = "AddOnDeploymentConfigsReady"
+
+	// GitOpsClusterManagedClusterAddOnsReady indicates whether ManagedClusterAddons were
+	// created/updated successfully for all managed clusters (only applies when GitOps addon is enabled).
+	GitOpsClusterManagedClusterAddOnsReady = "ManagedClusterAddOnsReady"
 
 	// GitOpsClusterArgoCDAgentPrereqsReady indicates whether the ArgoCD agent prerequisites
 	// (like JWT secrets and configuration) are properly set up.
@@ -63,17 +86,25 @@ const (
 	ReasonDisabled    = "Disabled"
 	ReasonNotRequired = "NotRequired"
 
+	// Progress reasons
+	ReasonReconciling = "Reconciling"
+
 	// Error reasons
-	ReasonInvalidConfiguration      = "InvalidConfiguration"
-	ReasonPlacementNotFound         = "PlacementNotFound"
-	ReasonManagedClustersNotFound   = "ManagedClustersNotFound"
-	ReasonArgoServerNotFound        = "ArgoServerNotFound"
-	ReasonClusterRegistrationFailed = "ClusterRegistrationFailed"
-	ReasonCertificateSigningFailed  = "CertificateSigningFailed"
-	ReasonManifestWorkFailed        = "ManifestWorkFailed"
-	ReasonArgoCDAgentFailed         = "ArgoCDAgentFailed"
-	ReasonRBACSetupFailed           = "RBACSetupFailed"
-	ReasonCASecretSetupFailed       = "CASecretSetupFailed"
+	ReasonInvalidConfiguration         = "InvalidConfiguration"
+	ReasonPlacementNotFound            = "PlacementNotFound"
+	ReasonManagedClustersNotFound      = "ManagedClustersNotFound"
+	ReasonArgoServerNotFound           = "ArgoServerNotFound"
+	ReasonClusterRegistrationFailed    = "ClusterRegistrationFailed"
+	ReasonCertificateSigningFailed     = "CertificateSigningFailed"
+	ReasonManifestWorkFailed           = "ManifestWorkFailed"
+	ReasonArgoCDAgentFailed            = "ArgoCDAgentFailed"
+	ReasonRBACSetupFailed              = "RBACSetupFailed"
+	ReasonCASecretSetupFailed          = "CASecretSetupFailed"
+	ReasonConfigMapCreationFailed      = "ConfigMapCreationFailed"
+	ReasonApplicationSetRBACFailed     = "ApplicationSetRBACFailed"
+	ReasonConfigCreationFailed         = "ConfigCreationFailed"
+	ReasonAddonCreationFailed          = "AddonCreationFailed"
+	ReasonPolicyTemplateCreationFailed = "PolicyTemplateCreationFailed"
 )
 
 // +kubebuilder:object:root=true

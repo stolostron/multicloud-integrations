@@ -336,11 +336,73 @@ func (r *ReconcileGitOpsCluster) cleanupOrphanSecrets(orphanGitOpsClusterSecretL
 	return cleanupSuccessful
 }
 
+// initializeConditions sets all applicable conditions to Unknown/Reconciling state at the start
+func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1beta1.GitOpsCluster) {
+	// Check if GitOps addon is enabled
+	gitopsAddonEnabled := false
+	if instance.Spec.GitOpsAddon != nil && instance.Spec.GitOpsAddon.Enabled != nil {
+		gitopsAddonEnabled = *instance.Spec.GitOpsAddon.Enabled
+	}
+
+	// Check if ArgoCD agent is enabled
+	argoCDAgentEnabled := false
+	if instance.Spec.GitOpsAddon != nil && instance.Spec.GitOpsAddon.ArgoCDAgent != nil && instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled != nil {
+		argoCDAgentEnabled = *instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled
+	}
+
+	// Always initialize these conditions
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterReady)
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterPlacementResolved)
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterArgoServerVerified)
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterApplicationSetResourcesReady)
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterPolicyTemplateReady)
+	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterClustersRegistered)
+
+	// Initialize GitOps addon related conditions
+	if gitopsAddonEnabled {
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady)
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady)
+	}
+
+	// Initialize ArgoCD agent related conditions
+	if argoCDAgentEnabled {
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady)
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady)
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
+
+		// Check if CA propagation is enabled (default true)
+		propagateHubCA := true
+		if instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA != nil {
+			propagateHubCA = *instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA
+		}
+		if propagateHubCA {
+			r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
+		}
+	}
+}
+
+// initializeCondition sets a condition to Unknown if it doesn't exist yet
+func (r *ReconcileGitOpsCluster) initializeCondition(instance *gitopsclusterV1beta1.GitOpsCluster, conditionType string) {
+	condition := instance.GetCondition(conditionType)
+	if condition == nil {
+		instance.SetCondition(conditionType, metav1.ConditionUnknown, gitopsclusterV1beta1.ReasonReconciling, "Reconciliation in progress")
+	}
+}
+
 func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	ctx context.Context,
 	gitOpsCluster gitopsclusterV1beta1.GitOpsCluster,
 	orphanSecretsList map[types.NamespacedName]string) (int, error) {
 	instance := gitOpsCluster.DeepCopy()
+
+	// Initialize all applicable conditions at the start
+	r.initializeConditions(instance)
+
+	// Update status with initialized conditions
+	if err := r.Client.Status().Update(context.TODO(), instance); err != nil {
+		klog.Errorf("failed to initialize GitOpsCluster %s conditions: %s", instance.Namespace+"/"+instance.Name, err)
+		// Don't return error, continue with reconciliation
+	}
 
 	// Validate GitOpsAddon and ArgoCDAgent spec fields
 	if instance.Spec.GitOpsAddon != nil {
@@ -372,6 +434,35 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	// Create default policy template
 	if err := r.CreatePolicyTemplate(instance); err != nil {
 		klog.Error("failed to create policy template: ", err)
+		r.updateGitOpsClusterConditions(instance, "",
+			"",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterPolicyTemplateReady: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonPolicyTemplateCreationFailed,
+					Message: fmt.Sprintf("Failed to create policy template: %v", err),
+				},
+			})
+		// Don't fail reconciliation for policy template, it's optional
+		// Just update the condition and continue
+		err2 := r.Client.Status().Update(context.TODO(), instance)
+		if err2 != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after policy template failure: %s", instance.Namespace+"/"+instance.Name, err2)
+		}
+	} else {
+		r.updateGitOpsClusterConditions(instance, "",
+			"",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterPolicyTemplateReady: {
+					Status:  metav1.ConditionTrue,
+					Reason:  gitopsclusterV1beta1.ReasonSuccess,
+					Message: "Policy template created successfully",
+				},
+			})
+		err2 := r.Client.Status().Update(context.TODO(), instance)
+		if err2 != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after policy template success: %s", instance.Namespace+"/"+instance.Name, err2)
+		}
 	}
 
 	// 1. Verify that spec.argoServer.argoNamespace is a valid ArgoCD namespace
@@ -383,7 +474,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		r.updateGitOpsClusterConditions(instance, "failed",
 			"invalid gitops namespace because argo server pod was not found",
 			map[string]ConditionUpdate{
-				gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady: {
+				gitopsclusterV1beta1.GitOpsClusterArgoServerVerified: {
 					Status:  metav1.ConditionFalse,
 					Reason:  gitopsclusterV1beta1.ReasonArgoServerNotFound,
 					Message: "ArgoCD server pod was not found in the specified namespace",
@@ -400,16 +491,72 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		return 1, errors.New("invalid gitops namespace because argo server pod was not found, will try again")
 	}
 
-	// 1a. Add configMaps to be used by ArgoCD ApplicationSets
-	err := r.CreateApplicationSetConfigMaps(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
+	// ArgoCD server verified successfully
+	r.updateGitOpsClusterConditions(instance, "",
+		"",
+		map[string]ConditionUpdate{
+			gitopsclusterV1beta1.GitOpsClusterArgoServerVerified: {
+				Status:  metav1.ConditionTrue,
+				Reason:  gitopsclusterV1beta1.ReasonSuccess,
+				Message: "ArgoCD server pod found in the specified namespace",
+			},
+		})
+	err := r.Client.Status().Update(context.TODO(), instance)
 	if err != nil {
-		klog.Warningf("there was a problem creating the configMaps: %v", err.Error())
+		klog.Warningf("failed to update GitOpsCluster %s status after argo server verification: %s", instance.Namespace+"/"+instance.Name, err)
+	}
+
+	// 1a. Add configMaps to be used by ArgoCD ApplicationSets
+	configMapErr := r.CreateApplicationSetConfigMaps(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
+	if configMapErr != nil {
+		klog.Warningf("there was a problem creating the configMaps: %v", configMapErr.Error())
 	}
 
 	// 1b. Add roles so applicationset-controller can read placementRules and placementDecisions
-	err = r.CreateApplicationSetRbac(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
-	if err != nil {
-		klog.Warningf("there was a problem creating the role or binding: %v", err.Error())
+	rbacErr := r.CreateApplicationSetRbac(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
+	if rbacErr != nil {
+		klog.Warningf("there was a problem creating the role or binding: %v", rbacErr.Error())
+	}
+
+	// Update ApplicationSetResourcesReady condition
+	if configMapErr != nil || rbacErr != nil {
+		var errMsg string
+		if configMapErr != nil && rbacErr != nil {
+			errMsg = fmt.Sprintf("ConfigMap creation failed: %v; RBAC creation failed: %v", configMapErr, rbacErr)
+		} else if configMapErr != nil {
+			errMsg = fmt.Sprintf("ConfigMap creation failed: %v", configMapErr)
+		} else {
+			errMsg = fmt.Sprintf("RBAC creation failed: %v", rbacErr)
+		}
+
+		r.updateGitOpsClusterConditions(instance, "",
+			"",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterApplicationSetResourcesReady: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonConfigMapCreationFailed,
+					Message: errMsg,
+				},
+			})
+		err = r.Client.Status().Update(context.TODO(), instance)
+		if err != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after ApplicationSet resources failure: %s", instance.Namespace+"/"+instance.Name, err)
+		}
+		// Don't fail reconciliation for ApplicationSet resources, they're optional
+	} else {
+		r.updateGitOpsClusterConditions(instance, "",
+			"",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterApplicationSetResourcesReady: {
+					Status:  metav1.ConditionTrue,
+					Reason:  gitopsclusterV1beta1.ReasonSuccess,
+					Message: "ApplicationSet ConfigMaps and RBAC resources created successfully",
+				},
+			})
+		err = r.Client.Status().Update(context.TODO(), instance)
+		if err != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after ApplicationSet resources success: %s", instance.Namespace+"/"+instance.Name, err)
+		}
 	}
 
 	// 2. Get the list of managed clusters
@@ -627,7 +774,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			r.updateGitOpsClusterConditions(instance, "failed",
 				fmt.Sprintf("Failed to create addon template: %v", err),
 				map[string]ConditionUpdate{
-					"AddonTemplateReady": {
+					gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
 						Status:  metav1.ConditionFalse,
 						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
 						Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
@@ -643,7 +790,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 		r.updateGitOpsClusterConditions(instance, "", "",
 			map[string]ConditionUpdate{
-				"AddonTemplateReady": {
+				gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
 					Status:  metav1.ConditionTrue,
 					Reason:  gitopsclusterV1beta1.ReasonSuccess,
 					Message: "AddOnTemplate created/updated successfully",
@@ -654,6 +801,11 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 		}
 
+		// Track addon creation results
+		var configFailures []string
+		var addonFailures []string
+		successCount := 0
+
 		for _, managedCluster := range managedClusters {
 			// Skip local-cluster - addon not needed for hub cluster
 			if IsLocalCluster(managedCluster) {
@@ -661,15 +813,82 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				continue
 			}
 
+			clusterFailed := false
+
 			err = r.CreateAddOnDeploymentConfig(instance, managedCluster.Name)
 			if err != nil {
 				klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
+				configFailures = append(configFailures, managedCluster.Name)
+				clusterFailed = true
 			}
 
 			err = r.EnsureManagedClusterAddon(managedCluster.Name, instance)
 			if err != nil {
 				klog.Errorf("failed to ensure ManagedClusterAddon for managed cluster %s: %v", managedCluster.Name, err)
+				addonFailures = append(addonFailures, managedCluster.Name)
+				clusterFailed = true
 			}
+
+			if !clusterFailed {
+				successCount++
+			}
+		}
+
+		// Update AddOnDeploymentConfigsReady condition
+		if len(configFailures) > 0 {
+			r.updateGitOpsClusterConditions(instance, "",
+				"",
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonConfigCreationFailed,
+						Message: fmt.Sprintf("Failed to create AddOnDeploymentConfig for clusters: %v", strings.Join(configFailures, ", ")),
+					},
+				})
+		} else {
+			r.updateGitOpsClusterConditions(instance, "",
+				"",
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady: {
+						Status:  metav1.ConditionTrue,
+						Reason:  gitopsclusterV1beta1.ReasonSuccess,
+						Message: fmt.Sprintf("Successfully created AddOnDeploymentConfigs for %d managed clusters", successCount),
+					},
+				})
+		}
+
+		// Update ManagedClusterAddOnsReady condition
+		if len(addonFailures) > 0 {
+			r.updateGitOpsClusterConditions(instance, "",
+				"",
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonAddonCreationFailed,
+						Message: fmt.Sprintf("Failed to create/update ManagedClusterAddon for clusters: %v", strings.Join(addonFailures, ", ")),
+					},
+				})
+		} else {
+			r.updateGitOpsClusterConditions(instance, "",
+				"",
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady: {
+						Status:  metav1.ConditionTrue,
+						Reason:  gitopsclusterV1beta1.ReasonSuccess,
+						Message: fmt.Sprintf("Successfully created/updated ManagedClusterAddons for %d managed clusters", successCount),
+					},
+				})
+		}
+
+		// Update status
+		err3 := r.Client.Status().Update(context.TODO(), instance)
+		if err3 != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after addon creation: %s", instance.Namespace+"/"+instance.Name, err3)
+		}
+
+		// If there were failures, return error to requeue
+		if len(configFailures) > 0 || len(addonFailures) > 0 {
+			return 3, fmt.Errorf("failed to create addons for some clusters - configs: %v, addons: %v", configFailures, addonFailures)
 		}
 	}
 
@@ -901,17 +1120,30 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		},
 	}
 
+	// Add GitOps addon specific conditions if enabled
+	if gitopsAddonEnabled {
+		// These were already set in the addon creation loop above
+		// Just ensure they're marked as not required if addon is disabled below
+	} else {
+		// GitOps addon is disabled, mark addon conditions as not required
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "AddOnDeploymentConfigs not required (GitOps addon disabled)",
+		}
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "ManagedClusterAddons not required (GitOps addon disabled)",
+		}
+	}
+
 	// Add ArgoCD agent specific conditions if enabled
 	if argoCDAgentEnabled {
 		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
 			Reason:  gitopsclusterV1beta1.ReasonSuccess,
 			Message: "ArgoCD agent prerequisites (RBAC, CA secret, Redis secret, and JWT secret) are ready",
-		}
-		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
-			Status:  metav1.ConditionTrue,
-			Reason:  gitopsclusterV1beta1.ReasonSuccess,
-			Message: "ArgoCD agent is properly configured and enabled",
 		}
 		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterCertificatesReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
@@ -933,17 +1165,19 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				Message: "CA propagation is disabled, ManifestWorks not required",
 			}
 		}
+
+		// AddOnTemplateReady was set earlier in the addon template creation
 	} else {
 		// ArgoCD agent is disabled, set conditions accordingly
+		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady] = ConditionUpdate{
+			Status:  metav1.ConditionTrue,
+			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+			Message: "AddOnTemplate not required (ArgoCD agent disabled)",
+		}
 		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
 			Reason:  gitopsclusterV1beta1.ReasonNotRequired,
 			Message: "ArgoCD agent prerequisites not required (agent disabled)",
-		}
-		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady] = ConditionUpdate{
-			Status:  metav1.ConditionTrue,
-			Reason:  gitopsclusterV1beta1.ReasonDisabled,
-			Message: "ArgoCD agent is disabled",
 		}
 		conditionUpdates[gitopsclusterV1beta1.GitOpsClusterCertificatesReady] = ConditionUpdate{
 			Status:  metav1.ConditionTrue,
@@ -1091,24 +1325,68 @@ type ConditionUpdate struct {
 
 // updateReadyCondition sets the Ready condition based on other conditions
 func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1beta1.GitOpsCluster) {
-	// Ready is True if all critical conditions are True and no conditions are False
-	placementResolved := instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterPlacementResolved)
-	clustersRegistered := instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterClustersRegistered)
+	// Check configuration flags
+	gitopsAddonEnabled := false
+	if instance.Spec.GitOpsAddon != nil && instance.Spec.GitOpsAddon.Enabled != nil {
+		gitopsAddonEnabled = *instance.Spec.GitOpsAddon.Enabled
+	}
 
-	// Check if ArgoCD agent is enabled to determine if agent conditions matter
 	argoCDAgentEnabled := false
 	if instance.Spec.GitOpsAddon != nil && instance.Spec.GitOpsAddon.ArgoCDAgent != nil && instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled != nil {
 		argoCDAgentEnabled = *instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
-	// If ArgoCD agent is enabled, also check its conditions
-	agentPrereqsReady := true
-	certificatesReady := true
-	manifestWorksApplied := true
+	// Check if any condition is False (indicating an error)
+	hasError := false
+	failedConditions := []string{}
+	for _, condition := range instance.Status.Conditions {
+		if condition.Type != gitopsclusterV1beta1.GitOpsClusterReady && condition.Status == metav1.ConditionFalse {
+			hasError = true
+			failedConditions = append(failedConditions, condition.Type)
+		}
+	}
 
+	if hasError {
+		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionFalse,
+			gitopsclusterV1beta1.ReasonClusterRegistrationFailed,
+			fmt.Sprintf("One or more components have failed: %v", strings.Join(failedConditions, ", ")))
+		return
+	}
+
+	// Check all critical conditions are True (or NotRequired)
+	criticalConditions := []string{
+		gitopsclusterV1beta1.GitOpsClusterPlacementResolved,
+		gitopsclusterV1beta1.GitOpsClusterArgoServerVerified,
+		gitopsclusterV1beta1.GitOpsClusterClustersRegistered,
+	}
+
+	// Add optional conditions that should be checked
+	// ApplicationSetResourcesReady and PolicyTemplateReady are optional, only check if they exist and are not Unknown
+	for _, condType := range []string{
+		gitopsclusterV1beta1.GitOpsClusterApplicationSetResourcesReady,
+		gitopsclusterV1beta1.GitOpsClusterPolicyTemplateReady,
+	} {
+		cond := instance.GetCondition(condType)
+		if cond != nil && cond.Status != metav1.ConditionUnknown {
+			criticalConditions = append(criticalConditions, condType)
+		}
+	}
+
+	// Add GitOps addon conditions if enabled
+	if gitopsAddonEnabled {
+		criticalConditions = append(criticalConditions,
+			gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady,
+			gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady,
+		)
+	}
+
+	// Add ArgoCD agent conditions if enabled
 	if argoCDAgentEnabled {
-		agentPrereqsReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady)
-		certificatesReady = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
+		criticalConditions = append(criticalConditions,
+			gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady,
+			gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady,
+			gitopsclusterV1beta1.GitOpsClusterCertificatesReady,
+		)
 
 		// Check if CA propagation is enabled
 		propagateHubCA := true
@@ -1118,27 +1396,30 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 
 		// Only require ManifestWorks if CA propagation is enabled
 		if propagateHubCA {
-			manifestWorksApplied = instance.IsConditionTrue(gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
+			criticalConditions = append(criticalConditions, gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
 		}
 	}
 
-	// Check if any condition is False (indicating an error)
-	hasError := false
-	for _, condition := range instance.Status.Conditions {
-		if condition.Status == metav1.ConditionFalse {
-			hasError = true
+	// Check all critical conditions
+	allReady := true
+	for _, condType := range criticalConditions {
+		cond := instance.GetCondition(condType)
+		if cond == nil || cond.Status == metav1.ConditionUnknown {
+			allReady = false
+			break
+		}
+		// True or NotRequired (both are acceptable)
+		if cond.Status != metav1.ConditionTrue {
+			allReady = false
 			break
 		}
 	}
 
-	if hasError {
-		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionFalse,
-			gitopsclusterV1beta1.ReasonClusterRegistrationFailed, "One or more components have failed")
-	} else if placementResolved && clustersRegistered && agentPrereqsReady && certificatesReady && manifestWorksApplied {
+	if allReady {
 		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionTrue,
 			gitopsclusterV1beta1.ReasonSuccess, "GitOpsCluster is ready and all components are functioning correctly")
 	} else {
 		instance.SetCondition(gitopsclusterV1beta1.GitOpsClusterReady, metav1.ConditionUnknown,
-			"InProgress", "GitOpsCluster components are still being processed")
+			gitopsclusterV1beta1.ReasonReconciling, "GitOpsCluster components are still being processed")
 	}
 }
