@@ -311,6 +311,8 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 
 	// ManagedClusterAddOn exists, ensure it has all correct config references
 	needsUpdate := false
+
+	// Add missing configs
 	for _, expectedConfig := range expectedConfigs {
 		configExists := false
 		for _, config := range existing.Spec.Configs {
@@ -333,7 +335,33 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 		}
 	}
 
+	// Remove configs that are no longer expected (e.g., AddOnTemplate when ArgoCD agent is disabled)
+	newConfigs := []addonv1alpha1.AddOnConfig{}
+	for _, config := range existing.Spec.Configs {
+		configExpected := false
+		for _, expectedConfig := range expectedConfigs {
+			if config.Group == expectedConfig.Group &&
+				config.Resource == expectedConfig.Resource &&
+				config.Name == expectedConfig.Name {
+				// Check namespace only if it's set in expected config (AddOnTemplate doesn't have namespace)
+				if expectedConfig.Namespace == "" || config.Namespace == expectedConfig.Namespace {
+					configExpected = true
+					break
+				}
+			}
+		}
+
+		if configExpected {
+			newConfigs = append(newConfigs, config)
+		} else {
+			// This config is no longer expected, remove it
+			klog.Infof("Removing %s config reference from ManagedClusterAddOn gitops-addon in namespace %s", config.Resource, namespace)
+			needsUpdate = true
+		}
+	}
+
 	if needsUpdate {
+		existing.Spec.Configs = newConfigs
 		err = r.Update(context.Background(), existing)
 		if err != nil {
 			klog.Errorf("Failed to update ManagedClusterAddOn gitops-addon: %v", err)
