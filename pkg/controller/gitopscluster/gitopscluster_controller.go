@@ -765,40 +765,40 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 			// Note: ArgoCD agent CA secret will be created later via certrotation
 			// when EnsureArgoCDAgentCASecret is called during certificate management
-		}
 
-		// Ensure AddOnTemplate for this GitOpsCluster
-		err = r.EnsureAddOnTemplate(instance)
-		if err != nil {
-			klog.Errorf("failed to ensure AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
-			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to create addon template: %v", err),
+			// Ensure AddOnTemplate for this GitOpsCluster (only when ArgoCD agent is enabled)
+			err = r.EnsureAddOnTemplate(instance)
+			if err != nil {
+				klog.Errorf("failed to ensure AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+				r.updateGitOpsClusterConditions(instance, "failed",
+					fmt.Sprintf("Failed to create addon template: %v", err),
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+							Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Errorf("failed to update GitOpsCluster %s status after AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
+					return 3, err2
+				}
+				return 3, err
+			}
+
+			r.updateGitOpsClusterConditions(instance, "", "",
 				map[string]ConditionUpdate{
 					gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
-						Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
+						Status:  metav1.ConditionTrue,
+						Reason:  gitopsclusterV1beta1.ReasonSuccess,
+						Message: "AddOnTemplate created/updated successfully",
 					},
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
+				klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
-			return 3, err
-		}
-
-		r.updateGitOpsClusterConditions(instance, "", "",
-			map[string]ConditionUpdate{
-				gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
-					Status:  metav1.ConditionTrue,
-					Reason:  gitopsclusterV1beta1.ReasonSuccess,
-					Message: "AddOnTemplate created/updated successfully",
-				},
-			})
-		err2 := r.Client.Status().Update(context.TODO(), instance)
-		if err2 != nil {
-			klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 		}
 
 		// Track addon creation results
