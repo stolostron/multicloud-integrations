@@ -143,7 +143,7 @@ func (r *GitopsAddonReconciler) reconcile(ctx context.Context) {
 	klog.V(2).Info("Reconciling Gitops Addon")
 
 	// Check if the addon is paused (e.g., during cleanup)
-	if IsPaused(ctx, r.Client, r.GitopsOperatorNS) {
+	if IsPaused(ctx, r.Client) {
 		klog.Info("GitOps addon is paused, skipping reconciliation")
 		return
 	}

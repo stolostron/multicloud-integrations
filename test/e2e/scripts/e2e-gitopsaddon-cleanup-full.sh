@@ -198,12 +198,28 @@ for i in {1..60}; do
 done
 
 echo ""
+echo "Step 7: Verifying pause marker ConfigMap is deleted..."
+for i in {1..60}; do
+  if ! kubectl get configmap gitops-addon-pause -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+    echo "✓ Pause marker ConfigMap 'gitops-addon-pause' deleted (garbage collected with Deployment)"
+    break
+  fi
+  echo "  Waiting for pause marker to be garbage collected... (attempt $i/60)"
+  if [ $i -eq 60 ]; then
+    echo "✗ ERROR: Pause marker ConfigMap still exists after 60 attempts"
+    kubectl get configmap gitops-addon-pause -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} -o yaml 2>/dev/null || true
+    exit 1
+  fi
+  sleep 2
+done
+
+echo ""
 echo "========================================="
 echo "✓ E2E CLEANUP TEST PASSED"
 echo "========================================="
 
 echo ""
-echo "Step 7: Verifying ArgoCD Application still exists in openshift-gitops namespace..."
+echo "Step 8: Verifying ArgoCD Application still exists in openshift-gitops namespace..."
 if kubectl get application guestbook -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
   echo "✓ ArgoCD Application 'guestbook' still exists in openshift-gitops namespace"
 else
@@ -212,7 +228,7 @@ else
 fi
 
 echo ""
-echo "Step 8: Verifying guestbook namespace still has resources..."
+echo "Step 9: Verifying guestbook namespace still has resources..."
 GUESTBOOK_RESOURCES=$(kubectl get all -n guestbook --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
 if [ "${GUESTBOOK_RESOURCES}" -gt "0" ]; then
   echo "✓ Guestbook namespace has ${GUESTBOOK_RESOURCES} resource(s)"

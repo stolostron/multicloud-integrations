@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,10 @@ import (
 const (
 	// PauseMarkerName is the name of the ConfigMap used to pause the gitops-addon controller
 	PauseMarkerName = "gitops-addon-pause"
+	// AddonNamespace is the namespace where the gitops-addon controller runs
+	AddonNamespace = "open-cluster-management-agent-addon"
+	// AddonDeploymentName is the name of the gitops-addon deployment
+	AddonDeploymentName = "gitops-addon"
 )
 
 // uninstallGitopsAgent uninstalls the Gitops agent addon for cleanup reconciler
@@ -47,14 +52,16 @@ func (r *GitopsAddonCleanupReconciler) uninstallGitopsAgent(ctx context.Context)
 // Step 1: Delete ArgoCD CR and wait for it to be fully removed
 // Step 2: Delete argocd-agent resources from openshift-gitops namespace
 // Step 3: Delete openshift-gitops-operator resources from openshift-gitops-operator namespace
+// Step 4: Wait and re-verify that resources stay deleted
+// Step 5: Leave pause marker in place (prevents install controller from reinstalling; cleaned up by addon framework)
 // All steps attempt to continue even if one fails to ensure maximum cleanup
 func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOperatorNS, gitopsNS string) error {
 	klog.Infof("Starting Gitops agent addon uninstall - gitopsOperatorNS: %s, gitopsNS: %s", gitopsOperatorNS, gitopsNS)
 	var errors []error
 
 	// Step 0: Create pause marker to prevent the gitops-addon controller from reconciling resources
-	klog.Infof("Step 0: Creating pause marker in namespace: %s", gitopsOperatorNS)
-	if err := createPauseMarker(ctx, c, gitopsOperatorNS); err != nil {
+	klog.Infof("Step 0: Creating pause marker in namespace: %s", AddonNamespace)
+	if err := createPauseMarker(ctx, c); err != nil {
 		klog.Errorf("Error creating pause marker (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to create pause marker: %w", err))
 	}
@@ -366,13 +373,30 @@ func collectRemainingResources(ctx context.Context, c client.Client, namespacedT
 }
 
 // createPauseMarker creates a ConfigMap marker to pause the gitops-addon controller
-func createPauseMarker(ctx context.Context, c client.Client, namespace string) error {
-	klog.Infof("Creating pause marker ConfigMap '%s' in namespace: %s", PauseMarkerName, namespace)
+// The pause marker is owned by the gitops-addon Deployment, so it will be automatically
+// garbage collected when the Deployment is deleted
+func createPauseMarker(ctx context.Context, c client.Client) error {
+	klog.Infof("Creating pause marker ConfigMap '%s' in namespace: %s", PauseMarkerName, AddonNamespace)
+
+	// Get the gitops-addon Deployment to set as owner
+	deployment := &appsv1.Deployment{}
+	deploymentKey := types.NamespacedName{
+		Name:      AddonDeploymentName,
+		Namespace: AddonNamespace,
+	}
+	if err := c.Get(ctx, deploymentKey, deployment); err != nil {
+		if errors.IsNotFound(err) {
+			klog.Warningf("Deployment %s not found in namespace %s, creating pause marker without owner reference", AddonDeploymentName, AddonNamespace)
+			// Continue without owner reference if deployment doesn't exist
+		} else {
+			return fmt.Errorf("failed to get deployment for owner reference: %w", err)
+		}
+	}
 
 	pauseMarker := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      PauseMarkerName,
-			Namespace: namespace,
+			Namespace: AddonNamespace,
 			Labels: map[string]string{
 				"app": "gitops-addon",
 			},
@@ -384,22 +408,40 @@ func createPauseMarker(ctx context.Context, c client.Client, namespace string) e
 		},
 	}
 
+	// Set owner reference if deployment was found
+	if deployment.UID != "" {
+		blockOwnerDeletion := true
+		controller := true
+		pauseMarker.OwnerReferences = []metav1.OwnerReference{
+			{
+				APIVersion:         "apps/v1",
+				Kind:               "Deployment",
+				Name:               deployment.Name,
+				UID:                deployment.UID,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+				Controller:         &controller,
+			},
+		}
+		klog.Infof("Pause marker will be owned by Deployment %s/%s", AddonNamespace, AddonDeploymentName)
+	}
+
 	err := c.Create(ctx, pauseMarker)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create pause marker: %w", err)
 	}
 
-	klog.Infof("Pause marker created successfully in namespace: %s", namespace)
+	klog.Infof("Pause marker created successfully in namespace: %s", AddonNamespace)
 	return nil
 }
 
 // IsPaused checks if the gitops-addon controller should be paused
 // This is exported so the controller can use it
-func IsPaused(ctx context.Context, c client.Client, namespace string) bool {
+// The pause marker is checked in the addon namespace
+func IsPaused(ctx context.Context, c client.Client) bool {
 	pauseMarker := &corev1.ConfigMap{}
 	key := types.NamespacedName{
 		Name:      PauseMarkerName,
-		Namespace: namespace,
+		Namespace: AddonNamespace,
 	}
 
 	err := c.Get(ctx, key, pauseMarker)

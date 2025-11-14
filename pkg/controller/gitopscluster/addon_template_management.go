@@ -16,6 +16,7 @@ package gitopscluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -166,44 +167,40 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 
 	manifests := []workv1.Manifest{
 		// Pre-delete cleanup job
-		{
-			RawExtension: runtime.RawExtension{
-				Object: &batchv1.Job{
-					TypeMeta: metav1.TypeMeta{
-						APIVersion: "batch/v1",
-						Kind:       "Job",
-					},
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "gitops-addon-cleanup",
-						Namespace: "open-cluster-management-agent-addon",
-						Annotations: map[string]string{
-							"addon.open-cluster-management.io/addon-pre-delete": "",
-						},
-					},
-					Spec: batchv1.JobSpec{
-						BackoffLimit:          int32Ptr(3),   // Retry up to 3 times on failure
-						ActiveDeadlineSeconds: int64Ptr(600), // 10 minutes timeout (increased for cleanup operations)
-						Template: corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								ServiceAccountName: "gitops-addon",
-								RestartPolicy:      corev1.RestartPolicyNever,
-								Containers: []corev1.Container{
+		newManifestWithoutStatus(&batchv1.Job{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "gitops-addon-cleanup",
+				Namespace: "open-cluster-management-agent-addon",
+				Annotations: map[string]string{
+					"addon.open-cluster-management.io/addon-pre-delete": "",
+				},
+			},
+			Spec: batchv1.JobSpec{
+				BackoffLimit:          int32Ptr(3),   // Retry up to 3 times on failure
+				ActiveDeadlineSeconds: int64Ptr(600), // 10 minutes timeout (increased for cleanup operations)
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						ServiceAccountName: "gitops-addon",
+						RestartPolicy:      corev1.RestartPolicyNever,
+						Containers: []corev1.Container{
+							{
+								Name:            "cleanup",
+								Image:           addonImage,
+								ImagePullPolicy: corev1.PullIfNotPresent,
+								Command:         []string{"/usr/local/bin/gitopsaddon"},
+								Args:            []string{"-cleanup"},
+								Env: []corev1.EnvVar{
 									{
-										Name:            "cleanup",
-										Image:           addonImage,
-										ImagePullPolicy: corev1.PullIfNotPresent,
-										Command:         []string{"/usr/local/bin/gitopsaddon"},
-										Args:            []string{"-cleanup"},
-										Env: []corev1.EnvVar{
-											{
-												Name:  "GITOPS_OPERATOR_NAMESPACE",
-												Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
-											},
-											{
-												Name:  "GITOPS_NAMESPACE",
-												Value: "{{GITOPS_NAMESPACE}}",
-											},
-										},
+										Name:  "GITOPS_OPERATOR_NAMESPACE",
+										Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
+									},
+									{
+										Name:  "GITOPS_NAMESPACE",
+										Value: "{{GITOPS_NAMESPACE}}",
 									},
 								},
 							},
@@ -211,160 +208,148 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 					},
 				},
 			},
-		},
+		}),
 		// ServiceAccount
-		{
-			RawExtension: runtime.RawExtension{
-				Object: &corev1.ServiceAccount{
-					TypeMeta: metav1.TypeMeta{
-						APIVersion: "v1",
-						Kind:       "ServiceAccount",
-					},
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "gitops-addon",
-						Namespace: "open-cluster-management-agent-addon",
-					},
-				},
+		newManifestWithoutStatus(&corev1.ServiceAccount{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "v1",
+				Kind:       "ServiceAccount",
 			},
-		},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "gitops-addon",
+				Namespace: "open-cluster-management-agent-addon",
+			},
+		}),
 		// ClusterRoleBinding
-		{
-			RawExtension: runtime.RawExtension{
-				Object: &rbacv1.ClusterRoleBinding{
-					TypeMeta: metav1.TypeMeta{
-						APIVersion: "rbac.authorization.k8s.io/v1",
-						Kind:       "ClusterRoleBinding",
-					},
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "gitops-addon",
-					},
-					RoleRef: rbacv1.RoleRef{
-						APIGroup: "rbac.authorization.k8s.io",
-						Kind:     "ClusterRole",
-						Name:     "cluster-admin",
-					},
-					Subjects: []rbacv1.Subject{
-						{
-							Kind:      "ServiceAccount",
-							Name:      "gitops-addon",
-							Namespace: "open-cluster-management-agent-addon",
-						},
-					},
+		newManifestWithoutStatus(&rbacv1.ClusterRoleBinding{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "rbac.authorization.k8s.io/v1",
+				Kind:       "ClusterRoleBinding",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "gitops-addon",
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     "cluster-admin",
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      "gitops-addon",
+					Namespace: "open-cluster-management-agent-addon",
 				},
 			},
-		},
+		}),
 		// Deployment
-		{
-			RawExtension: runtime.RawExtension{
-				Object: &appsv1.Deployment{
-					TypeMeta: metav1.TypeMeta{
-						APIVersion: "apps/v1",
-						Kind:       "Deployment",
+		newManifestWithoutStatus(&appsv1.Deployment{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "gitops-addon",
+				Namespace: "open-cluster-management-agent-addon",
+				Labels: map[string]string{
+					"app": "gitops-addon",
+				},
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: int32Ptr(1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "gitops-addon",
 					},
+				},
+				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "gitops-addon",
-						Namespace: "open-cluster-management-agent-addon",
 						Labels: map[string]string{
 							"app": "gitops-addon",
 						},
 					},
-					Spec: appsv1.DeploymentSpec{
-						Replicas: int32Ptr(1),
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"app": "gitops-addon",
+					Spec: corev1.PodSpec{
+						ServiceAccountName: "gitops-addon",
+						Containers: []corev1.Container{
+							{
+								Name:            "gitops-addon",
+								Image:           addonImage,
+								ImagePullPolicy: corev1.PullIfNotPresent,
+								Command:         []string{"/usr/local/bin/gitopsaddon"},
+								Env: []corev1.EnvVar{
+									{
+										Name:  "GITOPS_OPERATOR_IMAGE",
+										Value: "{{GITOPS_OPERATOR_IMAGE}}",
+									},
+									{
+										Name:  "GITOPS_OPERATOR_NAMESPACE",
+										Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
+									},
+									{
+										Name:  "GITOPS_IMAGE",
+										Value: "{{GITOPS_IMAGE}}",
+									},
+									{
+										Name:  "GITOPS_NAMESPACE",
+										Value: "{{GITOPS_NAMESPACE}}",
+									},
+									{
+										Name:  "REDIS_IMAGE",
+										Value: "{{REDIS_IMAGE}}",
+									},
+									{
+										Name:  "RECONCILE_SCOPE",
+										Value: "{{RECONCILE_SCOPE}}",
+									},
+									{
+										Name:  "ARGOCD_AGENT_ENABLED",
+										Value: "{{ARGOCD_AGENT_ENABLED}}",
+									},
+									{
+										Name:  "ARGOCD_AGENT_IMAGE",
+										Value: "{{ARGOCD_AGENT_IMAGE}}",
+									},
+									{
+										Name:  "ARGOCD_AGENT_SERVER_ADDRESS",
+										Value: "{{ARGOCD_AGENT_SERVER_ADDRESS}}",
+									},
+									{
+										Name:  "ARGOCD_AGENT_SERVER_PORT",
+										Value: "{{ARGOCD_AGENT_SERVER_PORT}}",
+									},
+									{
+										Name:  "ARGOCD_AGENT_MODE",
+										Value: "{{ARGOCD_AGENT_MODE}}",
+									},
+								},
+								SecurityContext: &corev1.SecurityContext{
+									ReadOnlyRootFilesystem:   boolPtr(true),
+									AllowPrivilegeEscalation: boolPtr(false),
+									RunAsNonRoot:             boolPtr(true),
+									Capabilities: &corev1.Capabilities{
+										Drop: []corev1.Capability{"ALL"},
+									},
+								},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										MountPath: "/tmp",
+										Name:      "tmp-volume",
+									},
+								},
 							},
 						},
-						Template: corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{
-								Labels: map[string]string{
-									"app": "gitops-addon",
-								},
-							},
-							Spec: corev1.PodSpec{
-								ServiceAccountName: "gitops-addon",
-								Containers: []corev1.Container{
-									{
-										Name:            "gitops-addon",
-										Image:           addonImage,
-										ImagePullPolicy: corev1.PullIfNotPresent,
-										Command:         []string{"/usr/local/bin/gitopsaddon"},
-										Env: []corev1.EnvVar{
-											{
-												Name:  "GITOPS_OPERATOR_IMAGE",
-												Value: "{{GITOPS_OPERATOR_IMAGE}}",
-											},
-											{
-												Name:  "GITOPS_OPERATOR_NAMESPACE",
-												Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
-											},
-											{
-												Name:  "GITOPS_IMAGE",
-												Value: "{{GITOPS_IMAGE}}",
-											},
-											{
-												Name:  "GITOPS_NAMESPACE",
-												Value: "{{GITOPS_NAMESPACE}}",
-											},
-											{
-												Name:  "REDIS_IMAGE",
-												Value: "{{REDIS_IMAGE}}",
-											},
-											{
-												Name:  "RECONCILE_SCOPE",
-												Value: "{{RECONCILE_SCOPE}}",
-											},
-											{
-												Name:  "ARGOCD_AGENT_ENABLED",
-												Value: "{{ARGOCD_AGENT_ENABLED}}",
-											},
-											{
-												Name:  "ARGOCD_AGENT_IMAGE",
-												Value: "{{ARGOCD_AGENT_IMAGE}}",
-											},
-											{
-												Name:  "ARGOCD_AGENT_SERVER_ADDRESS",
-												Value: "{{ARGOCD_AGENT_SERVER_ADDRESS}}",
-											},
-											{
-												Name:  "ARGOCD_AGENT_SERVER_PORT",
-												Value: "{{ARGOCD_AGENT_SERVER_PORT}}",
-											},
-											{
-												Name:  "ARGOCD_AGENT_MODE",
-												Value: "{{ARGOCD_AGENT_MODE}}",
-											},
-										},
-										SecurityContext: &corev1.SecurityContext{
-											ReadOnlyRootFilesystem:   boolPtr(true),
-											AllowPrivilegeEscalation: boolPtr(false),
-											RunAsNonRoot:             boolPtr(true),
-											Capabilities: &corev1.Capabilities{
-												Drop: []corev1.Capability{"ALL"},
-											},
-										},
-										VolumeMounts: []corev1.VolumeMount{
-											{
-												MountPath: "/tmp",
-												Name:      "tmp-volume",
-											},
-										},
-									},
-								},
-								Volumes: []corev1.Volume{
-									{
-										Name: "tmp-volume",
-										VolumeSource: corev1.VolumeSource{
-											EmptyDir: &corev1.EmptyDirVolumeSource{},
-										},
-									},
+						Volumes: []corev1.Volume{
+							{
+								Name: "tmp-volume",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
 								},
 							},
 						},
 					},
 				},
 			},
-		},
+		}),
 	}
 
 	return manifests
@@ -381,4 +366,50 @@ func int64Ptr(i int64) *int64 {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// newManifestWithoutStatus creates a workv1.Manifest from a runtime.Object while stripping out the status field
+func newManifestWithoutStatus(obj runtime.Object) workv1.Manifest {
+	// Marshal the object to JSON
+	jsonBytes, err := json.Marshal(obj)
+	if err != nil {
+		klog.Errorf("Failed to marshal object: %v", err)
+		return workv1.Manifest{
+			RawExtension: runtime.RawExtension{
+				Object: obj,
+			},
+		}
+	}
+
+	// Unmarshal to a map to manipulate the JSON
+	var objMap map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &objMap); err != nil {
+		klog.Errorf("Failed to unmarshal object: %v", err)
+		return workv1.Manifest{
+			RawExtension: runtime.RawExtension{
+				Object: obj,
+			},
+		}
+	}
+
+	// Remove the status field if it exists
+	delete(objMap, "status")
+
+	// Marshal back to JSON
+	cleanedBytes, err := json.Marshal(objMap)
+	if err != nil {
+		klog.Errorf("Failed to marshal cleaned object: %v", err)
+		return workv1.Manifest{
+			RawExtension: runtime.RawExtension{
+				Object: obj,
+			},
+		}
+	}
+
+	// Return manifest with Raw bytes instead of Object
+	return workv1.Manifest{
+		RawExtension: runtime.RawExtension{
+			Raw: cleanedBytes,
+		},
+	}
 }
