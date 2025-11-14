@@ -36,7 +36,7 @@ import (
 
 func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 	g := gomega.NewWithT(t)
-	
+
 	// Disable cleanup verification wait for tests
 	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
 
@@ -52,6 +52,18 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 			gitopsOperatorNS: "test-operator-ns",
 			gitopsNS:         "test-gitops-ns",
 			setupObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-uid-1",
+					},
+				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-operator-ns",
@@ -80,6 +92,18 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 			gitopsOperatorNS: "test-operator-ns",
 			gitopsNS:         "test-gitops-ns",
 			setupObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-uid-2",
+					},
+				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-operator-ns",
@@ -133,13 +157,17 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 				Namespace: tt.gitopsNS,
 			}, argoCD)
 			g.Expect(err).To(gomega.HaveOccurred()) // Should be NotFound
+
+			// Verify pause marker remains in place after cleanup (prevents controller from reinstalling)
+			paused := IsPaused(context.TODO(), testClient)
+			g.Expect(paused).To(gomega.BeTrue(), "Pause marker must remain in place after cleanup to prevent reinstallation")
 		})
 	}
 }
 
 func TestUninstallGitopsAgentInternal(t *testing.T) {
 	g := gomega.NewWithT(t)
-	
+
 	// Disable cleanup verification wait for tests
 	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
 
@@ -156,6 +184,18 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 			gitopsOperatorNS: "test-operator-ns",
 			gitopsNS:         "test-gitops-ns",
 			setupObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-uid-3",
+					},
+				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-operator-ns",
@@ -186,6 +226,18 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-uid-4",
+					},
+				},
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-operator-ns",
 					},
 				},
@@ -202,6 +254,18 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 			gitopsOperatorNS: "test-operator-ns",
 			gitopsNS:         "test-gitops-ns",
 			setupObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-uid-5",
+					},
+				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-operator-ns",
@@ -285,13 +349,17 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				Namespace: tt.gitopsNS,
 			}, argoCD)
 			g.Expect(err).To(gomega.HaveOccurred()) // Should be NotFound
+
+			// Verify pause marker remains in place after cleanup (prevents controller from reinstalling)
+			paused := IsPaused(context.TODO(), testClient)
+			g.Expect(paused).To(gomega.BeTrue(), "Pause marker must remain in place after cleanup to prevent reinstallation")
 		})
 	}
 }
 
 func TestUninstallGitopsAgentInternal_WaitTimeout(t *testing.T) {
 	g := gomega.NewWithT(t)
-	
+
 	// Disable cleanup verification wait for tests
 	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
 
@@ -306,6 +374,18 @@ func TestUninstallGitopsAgentInternal_WaitTimeout(t *testing.T) {
 	testClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: AddonNamespace,
+				},
+			},
+			&appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      AddonDeploymentName,
+					Namespace: AddonNamespace,
+					UID:       "test-uid-wait-timeout",
+				},
+			},
 			&corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-operator-ns",
@@ -328,6 +408,10 @@ func TestUninstallGitopsAgentInternal_WaitTimeout(t *testing.T) {
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 	// Should complete quickly since ArgoCD CR doesn't exist
 	g.Expect(elapsed).To(gomega.BeNumerically("<", 5*time.Second))
+
+	// Verify pause marker remains in place after cleanup (prevents controller from reinstalling)
+	paused := IsPaused(context.TODO(), testClient)
+	g.Expect(paused).To(gomega.BeTrue(), "Pause marker must remain in place after cleanup to prevent reinstallation")
 }
 
 func TestDeleteOperatorResourcesInternal(t *testing.T) {
@@ -518,8 +602,8 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				WithObjects(tt.setupObjects...).
 				Build()
 
-		// Call deleteOperatorResources
-		deleteOperatorResources(context.TODO(), testClient, tt.gitopsOperatorNS)
+			// Call deleteOperatorResources
+			deleteOperatorResources(context.TODO(), testClient, tt.gitopsOperatorNS)
 
 			// Verify expected deletions
 			for _, key := range tt.expectDeleted {
@@ -628,3 +712,274 @@ func TestDeleteOperatorResourcesInternal_PartialFailure(t *testing.T) {
 	_ = err
 }
 
+// TestCreatePauseMarker tests the pause marker creation
+func TestCreatePauseMarker(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name             string
+		existingObjects  []client.Object
+		expectError      bool
+		verifyPauseState bool
+		verifyOwnerRef   bool
+	}{
+		{
+			name: "create_pause_marker_successfully_with_deployment",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      AddonDeploymentName,
+						Namespace: AddonNamespace,
+						UID:       "test-deployment-uid",
+					},
+				},
+			},
+			expectError:      false,
+			verifyPauseState: true,
+			verifyOwnerRef:   true,
+		},
+		{
+			name: "create_pause_marker_already_exists",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels: map[string]string{
+							"app": "gitops-addon",
+						},
+					},
+					Data: map[string]string{
+						"paused": "true",
+						"reason": "cleanup",
+					},
+				},
+			},
+			expectError:      false,
+			verifyPauseState: true,
+			verifyOwnerRef:   false,
+		},
+		{
+			name: "create_pause_marker_without_deployment",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+			},
+			expectError:      false,
+			verifyPauseState: true,
+			verifyOwnerRef:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			err := clientgoscheme.AddToScheme(scheme)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			testClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			err = createPauseMarker(context.TODO(), testClient)
+
+			if tt.expectError {
+				g.Expect(err).To(gomega.HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			}
+
+			if tt.verifyPauseState {
+				// Verify the pause marker exists and has correct state
+				paused := IsPaused(context.TODO(), testClient)
+				g.Expect(paused).To(gomega.BeTrue(), "Expected addon to be paused")
+
+				// Verify the ConfigMap exists with correct data
+				cm := &corev1.ConfigMap{}
+				err = testClient.Get(context.TODO(), types.NamespacedName{
+					Name:      PauseMarkerName,
+					Namespace: AddonNamespace,
+				}, cm)
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+				g.Expect(cm.Data["paused"]).To(gomega.Equal("true"))
+				g.Expect(cm.Data["reason"]).To(gomega.Equal("cleanup"))
+
+				// Verify owner reference if expected
+				if tt.verifyOwnerRef {
+					g.Expect(cm.OwnerReferences).To(gomega.HaveLen(1))
+					g.Expect(cm.OwnerReferences[0].Kind).To(gomega.Equal("Deployment"))
+					g.Expect(cm.OwnerReferences[0].Name).To(gomega.Equal(AddonDeploymentName))
+				}
+			}
+		})
+	}
+}
+
+// TestIsPaused tests the IsPaused function
+func TestIsPaused(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name            string
+		existingObjects []client.Object
+		expectedPaused  bool
+	}{
+		{
+			name: "not_paused_no_marker",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+			},
+			expectedPaused: false,
+		},
+		{
+			name: "paused_with_marker",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+					},
+					Data: map[string]string{
+						"paused": "true",
+					},
+				},
+			},
+			expectedPaused: true,
+		},
+		{
+			name: "not_paused_marker_false",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+					},
+					Data: map[string]string{
+						"paused": "false",
+					},
+				},
+			},
+			expectedPaused: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			err := clientgoscheme.AddToScheme(scheme)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			testClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			paused := IsPaused(context.TODO(), testClient)
+			g.Expect(paused).To(gomega.Equal(tt.expectedPaused))
+		})
+	}
+}
+
+// TestUninstallGitopsAgentInternal_PauseMarkerRemains verifies that the pause marker remains after cleanup
+func TestUninstallGitopsAgentInternal_PauseMarkerRemains(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	// Disable cleanup verification wait for tests
+	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: AddonNamespace,
+				},
+			},
+			&appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      AddonDeploymentName,
+					Namespace: AddonNamespace,
+					UID:       "test-deployment-uid",
+				},
+			},
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-operator-ns",
+				},
+			},
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-gitops-ns",
+				},
+			},
+			&unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "argoproj.io/v1beta1",
+					"kind":       "ArgoCD",
+					"metadata": map[string]interface{}{
+						"name":      "openshift-gitops",
+						"namespace": "test-gitops-ns",
+					},
+				},
+			},
+		).
+		Build()
+
+	// Verify pause marker doesn't exist initially
+	paused := IsPaused(context.TODO(), testClient)
+	g.Expect(paused).To(gomega.BeFalse(), "Pause marker should not exist initially")
+
+	// Call uninstallGitopsAgentInternal
+	err = uninstallGitopsAgentInternal(context.TODO(), testClient, "test-operator-ns", "test-gitops-ns")
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// CRITICAL: Verify pause marker remains in place after cleanup to prevent reinstallation
+	paused = IsPaused(context.TODO(), testClient)
+	g.Expect(paused).To(gomega.BeTrue(), "Pause marker MUST remain in place after cleanup to prevent controller from reinstalling")
+
+	// Verify the ConfigMap exists with owner reference
+	cm := &corev1.ConfigMap{}
+	err = testClient.Get(context.TODO(), types.NamespacedName{
+		Name:      PauseMarkerName,
+		Namespace: AddonNamespace,
+	}, cm)
+	g.Expect(err).ToNot(gomega.HaveOccurred(), "Pause marker ConfigMap should still exist")
+	g.Expect(cm.Data["paused"]).To(gomega.Equal("true"), "Pause marker should indicate paused state")
+
+	// Verify owner reference exists so it will be garbage collected with Deployment
+	g.Expect(cm.OwnerReferences).To(gomega.HaveLen(1), "Pause marker should have owner reference")
+	g.Expect(cm.OwnerReferences[0].Kind).To(gomega.Equal("Deployment"))
+	g.Expect(cm.OwnerReferences[0].Name).To(gomega.Equal(AddonDeploymentName))
+}
