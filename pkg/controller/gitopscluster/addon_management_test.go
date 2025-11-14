@@ -697,6 +697,80 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
+		{
+			name:      "remove AddOnTemplate from existing ManagedClusterAddOn when ArgoCD agent is disabled",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false),
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.ManagedClusterAddOn{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.ManagedClusterAddOnSpec{
+						Configs: []addonv1alpha1.AddOnConfig{
+							{
+								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+									Group:    "addon.open-cluster-management.io",
+									Resource: "addontemplates",
+								},
+								ConfigReferent: addonv1alpha1.ConfigReferent{
+									Name: "gitops-addon-test-namespace-test-gitopscluster",
+								},
+							},
+							{
+								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+									Group:    "addon.open-cluster-management.io",
+									Resource: "addondeploymentconfigs",
+								},
+								ConfigReferent: addonv1alpha1.ConfigReferent{
+									Name:      "gitops-addon-config",
+									Namespace: "test-cluster",
+								},
+							},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+
+				// Only AddonDeploymentConfig when ArgoCD agent is disabled
+				assert.Len(t, addon.Spec.Configs, 1)
+
+				// Check that we only have AddonDeploymentConfig
+				foundTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						foundTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.False(t, foundTemplate, "Should NOT have AddOnTemplate config when ArgoCD agent is disabled")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
+			},
+		},
 	}
 
 	for _, tt := range tests {
