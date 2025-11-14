@@ -349,7 +349,7 @@ func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, nam
 // applyManifestSelectively applies manifests with special handling for certain resource types
 func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstructured) error {
 	// Check if the addon is paused before applying anything
-	if IsPaused(context.TODO(), r.Client, r.GitopsOperatorNS) {
+	if IsPaused(context.TODO(), r.Client) {
 		klog.Infof("GitOps addon is paused, skipping selective apply of %s/%s", obj.GetKind(), obj.GetName())
 		return nil
 	}
@@ -416,7 +416,7 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 // applyManifest applies a Kubernetes manifest
 func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) error {
 	// Check if the addon is paused before applying anything
-	if IsPaused(context.TODO(), r.Client, r.GitopsOperatorNS) {
+	if IsPaused(context.TODO(), r.Client) {
 		klog.Infof("GitOps addon is paused, skipping apply of %s/%s", obj.GetKind(), obj.GetName())
 		return nil
 	}

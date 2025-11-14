@@ -107,6 +107,22 @@ for i in {1..60}; do
   sleep 2
 done
 
+echo ""
+echo "Step 7: Verifying pause marker ConfigMap is deleted..."
+for i in {1..60}; do
+  if ! kubectl get configmap gitops-addon-pause -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+    echo "✓ Pause marker ConfigMap 'gitops-addon-pause' deleted (garbage collected with Deployment)"
+    break
+  fi
+  echo "  Waiting for pause marker to be garbage collected... (attempt $i/60)"
+  if [ $i -eq 60 ]; then
+    echo "✗ ERROR: Pause marker ConfigMap still exists after 60 attempts"
+    kubectl get configmap gitops-addon-pause -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} -o yaml 2>/dev/null || true
+    exit 1
+  fi
+  sleep 2
+done
+
 
 echo ""
 echo "========================================="
