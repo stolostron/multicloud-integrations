@@ -104,7 +104,7 @@ Additional examples and end-to-end scenarios are available in the [`e2e/`](e2e/)
 
 ## Contributing
 
-This project welcomes contributions. Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on code style, testing requirements, and submission processes.
+This project welcomes contributions. Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on code style, testing requirements, and submission processes. 
 
 ## License
 
