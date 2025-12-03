@@ -1462,23 +1462,25 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		argoNamespace  string
-		managedCluster *spokeclusterv1.ManagedCluster
-		msaName        string
-		enableTLS      bool
-		setupClient    func() client.Client
-		expectedError  bool
-		expectedName   string
-		expectedServer string
-		description    string
+		name                      string
+		argoNamespace             string
+		managedCluster            *spokeclusterv1.ManagedCluster
+		msaName                   string
+		enableTLS                 bool
+		createBlankClusterSecrets bool
+		setupClient               func() client.Client
+		expectedError             bool
+		expectedName              string
+		expectedServer            string
+		description               string
 	}{
 		{
-			name:           "empty MSA name - should return error",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "",
-			enableTLS:      false,
+			name:                      "empty MSA name - should return error",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).Build()
 			},
@@ -1486,11 +1488,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error for empty ManagedServiceAccount name",
 		},
 		{
-			name:           "MSA not found - should return error",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "non-existent-msa",
-			enableTLS:      false,
+			name:                      "MSA not found - should return error",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "non-existent-msa",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).Build()
 			},
@@ -1498,11 +1501,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when ManagedServiceAccount is not found",
 		},
 		{
-			name:           "MSA without token secret ref - should return error",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "test-msa-no-token",
-			enableTLS:      false,
+			name:                      "MSA without token secret ref - should return error",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "test-msa-no-token",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				msaNoToken := &authv1beta1.ManagedServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1517,11 +1521,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when ManagedServiceAccount has no tokenSecretRef",
 		},
 		{
-			name:           "MSA secret not found - should return error",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "test-msa",
-			enableTLS:      false,
+			name:                      "MSA secret not found - should return error",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "test-msa",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				// Only include MSA but not the secret
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA).Build()
@@ -1530,11 +1535,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when ManagedServiceAccount secret is not found",
 		},
 		{
-			name:           "token as plain string - should succeed",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "test-msa",
-			enableTLS:      false,
+			name:                      "token as plain string - should succeed",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "test-msa",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				invalidSecret := &v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1562,8 +1568,9 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				},
 				// No ManagedClusterClientConfigs
 			},
-			msaName:   "test-msa",
-			enableTLS: false,
+			msaName:                   "test-msa",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
@@ -1571,11 +1578,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:   "Should return error when managed cluster has no client configs",
 		},
 		{
-			name:           "successful secret creation with enableTLS=false",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "test-msa",
-			enableTLS:      false,
+			name:                      "successful secret creation with enableTLS=false",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "test-msa",
+			enableTLS:                 false,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
@@ -1585,11 +1593,12 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 			description:    "Should successfully create secret with MSA name in secret name",
 		},
 		{
-			name:           "successful secret creation with enableTLS=true",
-			argoNamespace:  "argocd",
-			managedCluster: testManagedCluster,
-			msaName:        "test-msa",
-			enableTLS:      true,
+			name:                      "successful secret creation with enableTLS=true",
+			argoNamespace:             "argocd",
+			managedCluster:            testManagedCluster,
+			msaName:                   "test-msa",
+			enableTLS:                 true,
+			createBlankClusterSecrets: false,
 			setupClient: func() client.Client {
 				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(testMSA, testMSASecret).Build()
 			},
@@ -1613,6 +1622,7 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				tt.managedCluster,
 				tt.msaName,
 				tt.enableTLS,
+				tt.createBlankClusterSecrets,
 			)
 
 			if tt.expectedError {

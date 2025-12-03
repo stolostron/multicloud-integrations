@@ -229,7 +229,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 
 			if msaExists {
 				newSecret, err = r.CreateManagedClusterSecretFromManagedServiceAccount(
-					argoNamespace, managedCluster, componentName, false)
+					argoNamespace, managedCluster, componentName, false, createBlankClusterSecrets)
 			} else {
 				newSecret, err = r.CreateManagedClusterSecretInArgo(
 					argoNamespace, managedClusterSecret, managedCluster, createBlankClusterSecrets)
@@ -248,7 +248,7 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 		} else {
 			klog.Infof("create cluster secret using managed service account: %s/%s", managedCluster.Name, gitOpsCluster.Spec.ManagedServiceAccountRef)
 
-			newSecret, err = r.CreateManagedClusterSecretFromManagedServiceAccount(argoNamespace, managedCluster, gitOpsCluster.Spec.ManagedServiceAccountRef, true)
+			newSecret, err = r.CreateManagedClusterSecretFromManagedServiceAccount(argoNamespace, managedCluster, gitOpsCluster.Spec.ManagedServiceAccountRef, true, createBlankClusterSecrets)
 			if err != nil {
 				klog.Error("failed to create managed cluster secret. err: ", err.Error())
 
@@ -432,7 +432,41 @@ func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretInArgo(argoNamespace 
 }
 
 func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretFromManagedServiceAccount(argoNamespace string,
-	managedCluster *spokeclusterv1.ManagedCluster, managedServiceAccountRef string, enableTLS bool) (*v1.Secret, error) {
+	managedCluster *spokeclusterv1.ManagedCluster, managedServiceAccountRef string, enableTLS bool, createBlankClusterSecrets bool) (*v1.Secret, error) {
+	if createBlankClusterSecrets {
+		newSecret := &v1.Secret{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "Secret",
+				APIVersion: "v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      managedCluster.Name + "-" + componentName + clusterSecretSuffix,
+				Namespace: argoNamespace,
+				Labels: map[string]string{
+					"argocd.argoproj.io/secret-type":                 "cluster",
+					"apps.open-cluster-management.io/acm-cluster":    "true",
+					"apps.open-cluster-management.io/cluster-name":   managedCluster.Name,
+					"apps.open-cluster-management.io/cluster-server": managedCluster.Name + "-control-plane", // dummy value for pull model
+				},
+			},
+			Type: "Opaque",
+			StringData: map[string]string{
+				"name":   managedCluster.Name,
+				"server": "https://" + managedCluster.Name + "-control-plane", // dummy value for pull model
+			},
+		}
+
+		// Collect labels to add to the secret
+		// Labels created above have precedence
+		for key, val := range managedCluster.Labels {
+			if _, ok := newSecret.Labels[key]; !ok {
+				newSecret.Labels[key] = val
+			}
+		}
+
+		return newSecret, nil
+	}
+
 	// Find managedserviceaccount in the managed cluster namespace
 	account := &authv1beta1.ManagedServiceAccount{}
 	if err := r.Get(context.TODO(), types.NamespacedName{Name: managedServiceAccountRef, Namespace: managedCluster.Name}, account); err != nil {
