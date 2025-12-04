@@ -1932,7 +1932,7 @@ func TestCreateMangedClusterSecretFromManagedServiceAccount(t *testing.T) {
 
 	// No managed service account
 	_, err = gitopsc.(*ReconcileGitOpsCluster).CreateMangedClusterSecretFromManagedServiceAccount(
-		argocdServerNamespace1.Name, managedCluster1, msa.Name, true)
+		argocdServerNamespace1.Name, managedCluster1, msa.Name, true, false)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).Should(gomega.MatchRegexp("ManagedServiceAccount.authentication.open-cluster-management.io.*not found"))
 
@@ -1946,7 +1946,7 @@ func TestCreateMangedClusterSecretFromManagedServiceAccount(t *testing.T) {
 
 	// No tokenSecretRef
 	_, err = gitopsc.(*ReconcileGitOpsCluster).CreateMangedClusterSecretFromManagedServiceAccount(
-		argocdServerNamespace1.Name, mc1, msa.Name, true)
+		argocdServerNamespace1.Name, mc1, msa.Name, true, false)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.Equal("no token reference secret found in the managed service account: cluster1/managedserviceaccount1"))
 
@@ -1965,7 +1965,7 @@ func TestCreateMangedClusterSecretFromManagedServiceAccount(t *testing.T) {
 
 	// Cluster secret created from the managed service account
 	clusterSecret, err := gitopsc.(*ReconcileGitOpsCluster).CreateMangedClusterSecretFromManagedServiceAccount(
-		argocdServerNamespace1.Name, mc1, msa.Name, true)
+		argocdServerNamespace1.Name, mc1, msa.Name, true, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	data := make(map[string]interface{})
@@ -1986,7 +1986,7 @@ func TestCreateMangedClusterSecretFromManagedServiceAccount(t *testing.T) {
 
 	// Cluster secret update from the managed service account
 	clusterSecret, err = gitopsc.(*ReconcileGitOpsCluster).CreateMangedClusterSecretFromManagedServiceAccount(
-		argocdServerNamespace1.Name, mc1, msa.Name, true)
+		argocdServerNamespace1.Name, mc1, msa.Name, true, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(json.Unmarshal([]byte(clusterSecret.StringData["config"]), &data)).NotTo(gomega.HaveOccurred())
 	g.Expect(data["bearerToken"].(string)).To(gomega.Equal("token2"))
