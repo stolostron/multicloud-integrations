@@ -33,6 +33,32 @@ fi
 echo "SETUP install Argo CD to Managed cluster"
 kubectl config use-context kind-cluster1
 kubectl create namespace argocd
+
+# Function to wait for deployment with retries
+wait_for_deployment() {
+    local namespace=$1
+    local deployment=$2
+    local timeout=${3:-120s}
+    local retries=3
+    
+    for i in $(seq 1 $retries); do
+        echo "Waiting for $deployment in $namespace (attempt $i/$retries)..."
+        if kubectl -n $namespace rollout status deployment/$deployment --timeout=$timeout 2>&1; then
+            echo "$deployment is ready"
+            return 0
+        fi
+        echo "Attempt $i failed, checking pod status..."
+        kubectl -n $namespace get pods -l app.kubernetes.io/name=$deployment -o wide || true
+        kubectl -n $namespace describe pods -l app.kubernetes.io/name=$deployment | tail -30 || true
+        if [ $i -lt $retries ]; then
+            echo "Retrying in 10 seconds..."
+            sleep 10
+        fi
+    done
+    echo "ERROR: $deployment failed to become ready after $retries attempts"
+    return 1
+}
+
 kubectl apply -n argocd --force -f hack/test/e2e/argo-cd-install.yaml
 kubectl -n argocd scale deployment/argocd-applicationset-controller --replicas 0
 kubectl -n argocd scale deployment/argocd-server --replicas 0
@@ -53,7 +79,16 @@ kubectl -n argocd scale statefulset/argocd-application-controller --replicas 0
 # enable progressive sync
 kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{"data":{"applicationsetcontroller.enable.progressive.syncs":"true"}}'
 kubectl -n argocd rollout restart deployment argocd-applicationset-controller
-kubectl -n argocd rollout status deployment argocd-applicationset-controller --timeout=60s
+
+echo "Waiting for argocd-applicationset-controller to be ready..."
+if ! wait_for_deployment argocd argocd-applicationset-controller 120s; then
+    echo "FATAL: argocd-applicationset-controller failed to start"
+    echo "=== Pod Events ==="
+    kubectl -n argocd get events --sort-by='.lastTimestamp' | tail -20
+    echo "=== Pod Logs (if available) ==="
+    kubectl -n argocd logs -l app.kubernetes.io/name=argocd-applicationset-controller --tail=50 || true
+    exit 1
+fi
 
 echo "TEST Propgation controller startup"
 if kubectl -n open-cluster-management logs $POD_NAME argocd-pull-integration-controller-manager | grep "Starting Controller" | grep "Application"; then
@@ -143,9 +178,16 @@ if kubectl -n argocd get application cluster1-guestbook-app; then
     echo "Propagation: hub application cluster1-guestbook-app created"
 else
     echo "Propagation FAILED: hub application cluster1-guestbook-app not created"
+    echo "=== ApplicationSet Status ==="
     kubectl -n argocd get applicationset guestbook-app-set -o yaml
+    echo "=== PlacementDecision Status ==="
     kubectl -n argocd get placementdecision guestbook-app-placement-decision-1 -o yaml
-    kubectl -n argocd logs $(kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-applicationset-controller -o jsonpath="{.items[0].metadata.name}")
+    echo "=== ArgoCD Pods Status ==="
+    kubectl -n argocd get pods -o wide
+    echo "=== ArgoCD Pod Events ==="
+    kubectl -n argocd get events --sort-by='.lastTimestamp' | tail -30
+    echo "=== ApplicationSet Controller Logs ==="
+    kubectl -n argocd logs $(kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-applicationset-controller -o jsonpath="{.items[0].metadata.name}") --tail=100 || echo "Could not get logs"
     exit 1
 fi
 if kubectl -n cluster1 get manifestwork | grep cluster1-guestbook-app; then
