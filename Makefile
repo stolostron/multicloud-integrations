@@ -209,6 +209,24 @@ test-e2e-gitopsaddon-cleanup-full:
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log'
 	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log' && echo "✓ E2E GitOps Addon Cleanup Full Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup-full.log"
 
+# test-e2e-olm-subscription: For CI - assumes clusters and images exist, verifies OLM subscription mode
+.PHONY: test-e2e-olm-subscription
+test-e2e-olm-subscription: manifests
+	@echo "===== E2E OLM Subscription Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee /tmp/e2e-olm-subscription.log' && echo "✓ E2E OLM Subscription Test Complete - Logs: /tmp/e2e-olm-subscription.log"
+
+# test-e2e-olm-subscription-full: For local - creates clusters, builds images, verifies OLM subscription mode
+.PHONY: test-e2e-olm-subscription-full
+test-e2e-olm-subscription-full:
+	@echo "===== E2E OLM Subscription Full Test (Local mode) ====="
+	@$(KIND) delete clusters --all || true
+	@$(KIND) create cluster --name $(HUB_CLUSTER)
+	@$(KIND) create cluster --name $(SPOKE_CLUSTER)
+	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-olm-subscription-full.log'
+	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log'
+	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log'
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log' && echo "✓ E2E OLM Subscription Full Test Complete - Logs: /tmp/e2e-olm-subscription-full.log"
+
 .PHONY: clean-full
 clean-full:
 	@echo "===== Cleaning up all KinD clusters ====="
