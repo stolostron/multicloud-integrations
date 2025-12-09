@@ -350,6 +350,9 @@ func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1b
 		argoCDAgentEnabled = *instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(instance)
+
 	// Always initialize these conditions
 	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterReady)
 	r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterPlacementResolved)
@@ -362,6 +365,11 @@ func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1b
 	if gitopsAddonEnabled {
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady)
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady)
+	}
+
+	// Initialize OLM subscription condition
+	if olmSubscriptionEnabled {
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady)
 	}
 
 	// Initialize ArgoCD agent related conditions
@@ -734,8 +742,50 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(instance)
+
 	// Create AddOnDeploymentConfig and ManagedClusterAddon for each managed cluster namespace if GitOps addon is enabled
 	if gitopsAddonEnabled {
+		// Handle OLM subscription mode - create OLM AddOnTemplate instead of helm-based deployment
+		if olmSubscriptionEnabled {
+			klog.Infof("OLM subscription mode enabled for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+
+			// Ensure OLM AddOnTemplate for this GitOpsCluster
+			err = r.EnsureOLMAddOnTemplate(instance)
+			if err != nil {
+				klog.Errorf("failed to ensure OLM AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+				r.updateGitOpsClusterConditions(instance, "failed",
+					fmt.Sprintf("Failed to create OLM addon template: %v", err),
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+							Message: fmt.Sprintf("Failed to create the OLM addon template for deploying OpenShift GitOps operator via subscription: %v", err),
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Errorf("failed to update GitOpsCluster %s status after OLM AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
+					return 3, err2
+				}
+				return 3, err
+			}
+
+			r.updateGitOpsClusterConditions(instance, "", "",
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+						Status:  metav1.ConditionTrue,
+						Reason:  gitopsclusterV1beta1.ReasonSuccess,
+						Message: "OLM AddOnTemplate created/updated successfully",
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Warningf("failed to update GitOpsCluster %s status after OLM AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
+			}
+		}
+
 		// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace (only needed for ArgoCD agent mode)
 		if argoCDAgentEnabled {
 			argoNamespace := instance.Namespace
@@ -1336,6 +1386,9 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 		argoCDAgentEnabled = *instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(instance)
+
 	// Check if any condition is False (indicating an error)
 	hasError := false
 	failedConditions := []string{}
@@ -1377,6 +1430,13 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 		criticalConditions = append(criticalConditions,
 			gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady,
 			gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady,
+		)
+	}
+
+	// Add OLM subscription condition if enabled
+	if olmSubscriptionEnabled {
+		criticalConditions = append(criticalConditions,
+			gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady,
 		)
 	}
 

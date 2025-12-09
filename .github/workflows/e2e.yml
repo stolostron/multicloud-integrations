@@ -227,3 +227,67 @@ jobs:
         env:
           KUBECONFIG: /home/runner/.kube/config
         run: make test-e2e-gitopsaddon-cleanup
+
+  e2e-olm-subscription:
+    name: e2e-olm-subscription
+    needs: e2e-gitopsaddon-cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: Pre-pull ArgoCD images
+        run: |
+          echo "Pre-pulling ArgoCD images to avoid rate limits..."
+          for i in 1 2 3; do
+            docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
+          done
+          for i in 1 2 3; do
+            docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
+          done
+          echo "All images pulled successfully"
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.14.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.14.0
+          name: hub
+      - name: Load images into Kind clusters
+        run: |
+          echo "Loading images into Kind clusters..."
+          # Load multicloud-integrations image to hub (where controller runs)
+          kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
+          # Load ArgoCD image to hub (for applicationset-controller)
+          kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD image to cluster1 (for repo-server and application-controller)
+          kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
+          # Redis only needed on cluster1 (hub scales it down)
+          kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
+          echo "All images loaded successfully"
+      - name: Run e2e OLM subscription test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-olm-subscription
