@@ -43,7 +43,6 @@ echo "  ArgoCD instance created (principal pods will be ready after GitOpsCluste
 # Step 4: Install Controller and GitOpsCluster
 echo ""
 echo "Step 4: Installing Controller..."
-git checkout HEAD -- deploy/crds/apps.open-cluster-management.io_gitopsclusters.yaml 2>/dev/null || true
 kubectl apply -f deploy/crds/ --context ${HUB_CONTEXT}
 kubectl apply -f deploy/controller/service_account.yaml --context ${HUB_CONTEXT}
 kubectl apply -f deploy/controller/role.yaml --context ${HUB_CONTEXT}
