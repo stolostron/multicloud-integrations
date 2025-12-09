@@ -77,6 +77,10 @@ const (
 	// GitOpsClusterManifestWorksApplied indicates whether CA propagation ManifestWorks were
 	// successfully applied to managed clusters.
 	GitOpsClusterManifestWorksApplied = "ManifestWorksApplied"
+
+	// GitOpsClusterOLMSubscriptionReady indicates whether the OLM Subscription AddOnTemplate
+	// was created successfully (only applies when OLM subscription mode is enabled).
+	GitOpsClusterOLMSubscriptionReady = "OLMSubscriptionReady"
 )
 
 // GitOpsCluster condition reasons
@@ -187,6 +191,50 @@ type GitOpsAddonSpec struct {
 	// When true, config values from GitOpsCluster spec will override existing values.
 	// +kubebuilder:default=false
 	OverrideExistingConfigs *bool `json:"overrideExistingConfigs,omitempty"`
+
+	// OLMSubscription defines the configuration for deploying the full OLM-managed
+	// OpenShift GitOps operator instead of the lightweight helm-based deployment.
+	// This is only supported on OpenShift ManagedClusters with OLM installed.
+	// When enabled, this takes precedence over the helm-based deployment.
+	// Requires gitopsAddon.enabled to be true.
+	// +optional
+	OLMSubscription *OLMSubscriptionSpec `json:"olmSubscription,omitempty"`
+}
+
+// OLMSubscriptionSpec defines the OLM Subscription configuration for deploying
+// the OpenShift GitOps operator via Operator Lifecycle Manager.
+type OLMSubscriptionSpec struct {
+	// Enabled indicates whether to deploy via OLM Subscription. Default is false.
+	// When enabled, the full OLM-managed OpenShift GitOps operator is deployed
+	// instead of the lightweight helm-based operator.
+	// +kubebuilder:default=false
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Name is the name of the Subscription. Default is "openshift-gitops-operator".
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Namespace is the namespace for the Subscription. Default is "openshift-operators".
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Channel is the OLM channel. Default is "stable".
+	// +optional
+	Channel string `json:"channel,omitempty"`
+
+	// Source is the CatalogSource name. Default is "redhat-operators".
+	// +optional
+	Source string `json:"source,omitempty"`
+
+	// SourceNamespace is the CatalogSource namespace. Default is "openshift-marketplace".
+	// +optional
+	SourceNamespace string `json:"sourceNamespace,omitempty"`
+
+	// InstallPlanApproval determines if InstallPlans should be automatically approved.
+	// Default is "Automatic".
+	// +optional
+	// +kubebuilder:validation:Enum=Automatic;Manual
+	InstallPlanApproval string `json:"installPlanApproval,omitempty"`
 }
 
 // ArgoCDAgentSpec defines the configuration for the ArgoCD agent.

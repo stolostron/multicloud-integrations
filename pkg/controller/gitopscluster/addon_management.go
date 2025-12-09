@@ -16,6 +16,7 @@ package gitopscluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -25,6 +26,7 @@ import (
 	"k8s.io/klog"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace
@@ -35,6 +37,9 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 	if namespace == "" {
 		return errors.New("no namespace provided")
 	}
+
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(gitOpsCluster)
 
 	// Define variables managed by GitOpsCluster controller - only ArgoCD agent related variables
 	managedVariables := map[string]string{
@@ -77,6 +82,20 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		if err != nil {
 			klog.Errorf("Failed to create AddOnDeploymentConfig: %v", err)
 			return err
+		}
+
+		// For OLM subscription mode (template-type addon), set AgentInstallNamespace to ""
+		// to use the namespace defined in the AddOnTemplate manifest.
+		// We must use JSON merge patch after creation because the kubebuilder default
+		// would override empty string during creation.
+		// See: https://github.com/open-cluster-management-io/api/blob/main/addon/v1alpha1/types_addondeploymentconfig.go#L56-L63
+		if olmSubscriptionEnabled {
+			klog.Infof("Patching AgentInstallNamespace to empty string for OLM subscription mode in namespace %s", namespace)
+			err = r.patchAgentInstallNamespaceToEmpty(namespace)
+			if err != nil {
+				klog.Errorf("Failed to patch AgentInstallNamespace: %v", err)
+				return err
+			}
 		}
 	} else if err != nil {
 		klog.Errorf("Failed to get AddOnDeploymentConfig: %v", err)
@@ -146,11 +165,24 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		}
 
 		existing.Spec.CustomizedVariables = updatedVariables
-		err = r.Update(context.Background(), existing)
 
+		err = r.Update(context.Background(), existing)
 		if err != nil {
 			klog.Errorf("Failed to update AddOnDeploymentConfig: %v", err)
 			return err
+		}
+
+		// For OLM subscription mode (template-type addon), always patch AgentInstallNamespace to ""
+		// to use the namespace defined in the AddOnTemplate manifest.
+		// The Update() call above re-applies the kubebuilder default, so we must always patch.
+		// See: https://github.com/open-cluster-management-io/api/blob/main/addon/v1alpha1/types_addondeploymentconfig.go#L56-L63
+		if olmSubscriptionEnabled {
+			klog.Infof("Patching AgentInstallNamespace to empty string for OLM subscription mode in namespace %s", namespace)
+			err = r.patchAgentInstallNamespaceToEmpty(namespace)
+			if err != nil {
+				klog.Errorf("Failed to patch AgentInstallNamespace: %v", err)
+				return err
+			}
 		}
 	}
 
@@ -238,6 +270,12 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 	// Get the AddOnTemplate name for this GitOpsCluster
 	templateName := fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(gitOpsCluster)
+
+	// Get OLM AddOnTemplate name if OLM mode is enabled
+	olmTemplateName := getOLMAddOnTemplateName(gitOpsCluster)
+
 	// Check if ManagedClusterAddOn already exists
 	existing := &addonv1alpha1.ManagedClusterAddOn{}
 	err := r.Get(context.Background(), types.NamespacedName{
@@ -248,13 +286,26 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 	// Check if ArgoCD agent is enabled
 	_, argoCDAgentEnabled := r.GetGitOpsAddonStatus(gitOpsCluster)
 
-	// Build expected configs based on whether ArgoCD agent is enabled
-	// When ArgoCD agent is enabled, use the dynamic AddOnTemplate
-	// When ArgoCD agent is NOT enabled, exclude the AddOnTemplate config so it uses the default from ClusterManagementAddOn
+	// Build expected configs based on mode:
+	// 1. OLM subscription mode: use OLM AddOnTemplate (takes precedence)
+	// 2. ArgoCD agent mode: use dynamic AddOnTemplate
+	// 3. Default mode: use default template from ClusterManagementAddOn
 	expectedConfigs := []addonv1alpha1.AddOnConfig{}
 
-	if argoCDAgentEnabled {
-		// Add dynamic AddOnTemplate config only when ArgoCD agent is enabled
+	if olmSubscriptionEnabled {
+		// Add OLM AddOnTemplate config when OLM subscription mode is enabled
+		klog.Infof("Adding OLM AddOnTemplate %s to ManagedClusterAddOn config for namespace %s", olmTemplateName, namespace)
+		expectedConfigs = append(expectedConfigs, addonv1alpha1.AddOnConfig{
+			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+				Group:    "addon.open-cluster-management.io",
+				Resource: "addontemplates",
+			},
+			ConfigReferent: addonv1alpha1.ConfigReferent{
+				Name: olmTemplateName,
+			},
+		})
+	} else if argoCDAgentEnabled {
+		// Add dynamic AddOnTemplate config only when ArgoCD agent is enabled (and OLM is not)
 		expectedConfigs = append(expectedConfigs, addonv1alpha1.AddOnConfig{
 			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
 				Group:    "addon.open-cluster-management.io",
@@ -459,4 +510,37 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 	if argoCDAgent.Mode != "" {
 		managedVariables["ARGOCD_AGENT_MODE"] = argoCDAgent.Mode
 	}
+}
+
+// patchAgentInstallNamespaceToEmpty patches the AgentInstallNamespace field to empty string
+// using JSON merge patch. This is required because the kubebuilder default on the field
+// prevents us from setting it to empty string via normal Create/Update operations.
+func (r *ReconcileGitOpsCluster) patchAgentInstallNamespaceToEmpty(namespace string) error {
+	patch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"agentInstallNamespace": "",
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
+	}
+
+	existing := &addonv1alpha1.AddOnDeploymentConfig{}
+	err = r.Get(context.Background(), types.NamespacedName{
+		Name:      "gitops-addon-config",
+		Namespace: namespace,
+	}, existing)
+	if err != nil {
+		return fmt.Errorf("failed to get AddOnDeploymentConfig: %w", err)
+	}
+
+	err = r.Patch(context.Background(), existing, client.RawPatch(types.MergePatchType, patchBytes))
+	if err != nil {
+		return fmt.Errorf("failed to patch AddOnDeploymentConfig: %w", err)
+	}
+
+	klog.Infof("Successfully patched AgentInstallNamespace to empty string in namespace %s", namespace)
+	return nil
 }

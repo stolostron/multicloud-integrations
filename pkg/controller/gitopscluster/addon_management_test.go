@@ -338,6 +338,84 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved in preserve mode")
 			},
 		},
+		{
+			name:      "OLM subscription mode - create with AgentInstallNamespace patched to empty",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						OLMSubscription: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+							Enabled:   func(b bool) *bool { return &b }(true),
+							Name:      "argocd-operator",
+							Namespace: "operators",
+							Channel:   "alpha",
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				// AgentInstallNamespace should be patched to empty string for OLM mode
+				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty for OLM subscription mode")
+			},
+		},
+		{
+			name:      "OLM subscription mode - update existing config with AgentInstallNamespace patched to empty",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						OLMSubscription: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+							Enabled:   func(b bool) *bool { return &b }(true),
+							Name:      "argocd-operator",
+							Namespace: "operators",
+							Channel:   "alpha",
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						AgentInstallNamespace: "open-cluster-management-agent-addon",
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "ARGOCD_AGENT_ENABLED", Value: "false"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				// AgentInstallNamespace should be patched to empty string for OLM mode
+				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty for OLM subscription mode")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -771,6 +849,100 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
 			},
 		},
+		{
+			name:      "OLM subscription mode - create new ManagedClusterAddOn with OLM template",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						OLMSubscription: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+							Enabled:   func(b bool) *bool { return &b }(true),
+							Name:      "argocd-operator",
+							Namespace: "operators",
+							Channel:   "alpha",
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+
+				// Should have OLM AddOnTemplate and AddonDeploymentConfig
+				assert.Len(t, addon.Spec.Configs, 2)
+
+				// Check that we have OLM template and deployment config
+				foundOLMTemplate := false
+				foundDeploymentConfig := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						// OLM template name should follow the pattern: gitops-addon-olm-<namespace>-<name>
+						assert.Equal(t, "gitops-addon-olm-test-namespace-test-gitopscluster", config.Name)
+						foundOLMTemplate = true
+					}
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addondeploymentconfigs" {
+						foundDeploymentConfig = true
+					}
+				}
+				assert.True(t, foundOLMTemplate, "Should have OLM AddOnTemplate config when OLM subscription is enabled")
+				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
+			},
+		},
+		{
+			name:      "OLM subscription mode takes precedence over ArgoCD agent",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(true), // Also enabled, but should be overridden
+						},
+						OLMSubscription: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+							Enabled:   func(b bool) *bool { return &b }(true),
+							Name:      "argocd-operator",
+							Namespace: "operators",
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+
+				// Check that only OLM template is used, not the ArgoCD agent template
+				foundOLMTemplate := false
+				foundAgentTemplate := false
+				for _, config := range addon.Spec.Configs {
+					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
+						if config.Name == "gitops-addon-olm-test-namespace-test-gitopscluster" {
+							foundOLMTemplate = true
+						} else if config.Name == "gitops-addon-test-namespace-test-gitopscluster" {
+							foundAgentTemplate = true
+						}
+					}
+				}
+				assert.True(t, foundOLMTemplate, "Should have OLM AddOnTemplate when OLM subscription is enabled")
+				assert.False(t, foundAgentTemplate, "Should NOT have ArgoCD agent template when OLM mode takes precedence")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1034,6 +1206,83 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 			reconciler.extractArgoCDAgentVariables(tt.argoCDAgent, managedVariables)
 
 			assert.Equal(t, tt.expectedVars, managedVariables)
+		})
+	}
+}
+
+func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := addonv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		namespace       string
+		existingObjects []client.Object
+		expectedError   bool
+		validateFunc    func(t *testing.T, c client.Client, namespace string)
+	}{
+		{
+			name:      "patch existing config to empty AgentInstallNamespace",
+			namespace: "test-cluster",
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						AgentInstallNamespace: "open-cluster-management-agent-addon",
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "TEST_VAR", Value: "test-value"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				// AgentInstallNamespace should be patched to empty string
+				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty after patch")
+				// Other fields should be preserved
+				assert.Len(t, config.Spec.CustomizedVariables, 1)
+				assert.Equal(t, "TEST_VAR", config.Spec.CustomizedVariables[0].Name)
+				assert.Equal(t, "test-value", config.Spec.CustomizedVariables[0].Value)
+			},
+		},
+		{
+			name:          "error when config doesn't exist",
+			namespace:     "non-existent-cluster",
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			err := reconciler.patchAgentInstallNamespaceToEmpty(tt.namespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				if tt.validateFunc != nil {
+					tt.validateFunc(t, fakeClient, tt.namespace)
+				}
+			}
 		})
 	}
 }
