@@ -67,7 +67,7 @@ func (r *ApplicationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	if report.Statuses.ClusterConditions == nil || len(report.Statuses.ClusterConditions) <= 0 {
+	if len(report.Statuses.ClusterConditions) <= 0 {
 		return ctrl.Result{}, nil
 	}
 
