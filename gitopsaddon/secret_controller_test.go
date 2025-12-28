@@ -152,7 +152,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Verify target secret was created
 		targetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
-			Name:      getSourceSecretName(),
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		}, targetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -200,7 +200,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create existing target secret with old data
 		targetSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      getSourceSecretName(),
+				Name:      TargetSecretName,
 				Namespace: TargetNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
@@ -226,7 +226,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Verify target secret was updated
 		updatedTargetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
-			Name:      getSourceSecretName(),
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		}, updatedTargetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -286,7 +286,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Verify target secret was created with TLS type
 		targetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
-			Name:      getSourceSecretName(),
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		}, targetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -323,7 +323,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Verify target secret remains Opaque
 		targetSecretOpaque := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
-			Name:      getSourceSecretName(),
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		}, targetSecretOpaque)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -378,7 +378,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create existing target secret
 		targetSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      getSourceSecretName(),
+				Name:      TargetSecretName,
 				Namespace: TargetNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
@@ -404,7 +404,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Verify target secret was deleted
 		deletedSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
-			Name:      getSourceSecretName(),
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		}, deletedSecret)
 		g.Expect(err).To(HaveOccurred())

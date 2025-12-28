@@ -365,6 +365,7 @@ func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1b
 	if gitopsAddonEnabled {
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady)
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady)
+		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady)
 	}
 
 	// Initialize OLM subscription condition
@@ -849,6 +850,40 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			if err2 != nil {
 				klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
+		}
+
+		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework
+		err = r.CreateArgoCDPolicy(instance)
+		if err != nil {
+			klog.Errorf("failed to create ArgoCD Policy for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+			r.updateGitOpsClusterConditions(instance, "failed",
+				fmt.Sprintf("Failed to create ArgoCD Policy: %v", err),
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonArgoCDPolicyCreationFailed,
+						Message: fmt.Sprintf("Failed to create the ArgoCD Policy for managing ArgoCD CR on managed clusters: %v", err),
+					},
+				})
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after ArgoCD Policy failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+			return 3, err
+		}
+
+		r.updateGitOpsClusterConditions(instance, "", "",
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
+					Status:  metav1.ConditionTrue,
+					Reason:  gitopsclusterV1beta1.ReasonSuccess,
+					Message: "ArgoCD Policy created/updated successfully",
+				},
+			})
+		err2 := r.Client.Status().Update(context.TODO(), instance)
+		if err2 != nil {
+			klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD Policy success: %s", instance.Namespace+"/"+instance.Name, err2)
 		}
 
 		// Track addon creation results
@@ -1430,6 +1465,7 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 		criticalConditions = append(criticalConditions,
 			gitopsclusterV1beta1.GitOpsClusterAddOnDeploymentConfigsReady,
 			gitopsclusterV1beta1.GitOpsClusterManagedClusterAddOnsReady,
+			gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady,
 		)
 	}
 

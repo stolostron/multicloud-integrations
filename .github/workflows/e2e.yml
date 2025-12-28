@@ -11,8 +11,9 @@ env:
   GO_VERSION: '1.24'
   GO_REQUIRED_MIN_VERSION: ''
   GOPATH: '/home/runner/work/multicloud-integrations/multicloud-integrations/go'
-  # ArgoCD images to pre-load (avoids Docker Hub rate limits)
+  # ArgoCD images to pre-load (avoids rate limits)
   ARGOCD_IMAGE: quay.io/argoproj/argocd:v2.13.0
+  ARGOCD_OPERATOR_IMAGE: quay.io/argoprojlabs/argocd-operator:latest
   REDIS_IMAGE: redis:7.0.15-alpine
 
 defaults:
@@ -51,6 +52,9 @@ jobs:
             docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
           done
           for i in 1 2 3; do
+            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
+          done
+          for i in 1 2 3; do
             docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
           done
           echo "All images pulled successfully"
@@ -69,10 +73,16 @@ jobs:
           echo "Loading images into Kind clusters..."
           # Load multicloud-integrations image to hub (where controller runs)
           kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
+          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
+          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
           # Load ArgoCD image to hub (for applicationset-controller)
           kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to hub
+          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Load ArgoCD image to cluster1 (for repo-server and application-controller)
           kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
+          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Redis only needed on cluster1 (hub scales it down)
           kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
           echo "All images loaded successfully"
@@ -121,6 +131,9 @@ jobs:
             docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
           done
           for i in 1 2 3; do
+            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
+          done
+          for i in 1 2 3; do
             docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
           done
           echo "All images pulled successfully"
@@ -142,10 +155,16 @@ jobs:
           echo "Loading images into Kind clusters..."
           # Load multicloud-integrations image to hub (where controller runs)
           kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
+          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
+          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
           # Load ArgoCD image to hub (for applicationset-controller)
           kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to hub
+          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Load ArgoCD image to cluster1 (for repo-server and application-controller)
           kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
+          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Redis only needed on cluster1 (hub scales it down)
           kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
           echo "All images loaded successfully"
@@ -194,6 +213,9 @@ jobs:
             docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
           done
           for i in 1 2 3; do
+            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
+          done
+          for i in 1 2 3; do
             docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
           done
           echo "All images pulled successfully"
@@ -215,10 +237,16 @@ jobs:
           echo "Loading images into Kind clusters..."
           # Load multicloud-integrations image to hub (where controller runs)
           kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
+          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
+          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
           # Load ArgoCD image to hub (for applicationset-controller)
           kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to hub
+          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Load ArgoCD image to cluster1 (for repo-server and application-controller)
           kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
+          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Redis only needed on cluster1 (hub scales it down)
           kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
           echo "All images loaded successfully"
@@ -262,6 +290,9 @@ jobs:
             docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
           done
           for i in 1 2 3; do
+            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
+          done
+          for i in 1 2 3; do
             docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
           done
           echo "All images pulled successfully"
@@ -280,10 +311,16 @@ jobs:
           echo "Loading images into Kind clusters..."
           # Load multicloud-integrations image to hub (where controller runs)
           kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
+          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
+          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
           # Load ArgoCD image to hub (for applicationset-controller)
           kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to hub
+          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Load ArgoCD image to cluster1 (for repo-server and application-controller)
           kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
+          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
+          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
           # Redis only needed on cluster1 (hub scales it down)
           kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
           echo "All images loaded successfully"

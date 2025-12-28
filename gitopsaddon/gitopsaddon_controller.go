@@ -34,7 +34,6 @@ import (
 //go:embed charts/openshift-gitops-operator/**
 //go:embed charts/openshift-gitops-dependency/**
 //go:embed charts/dep-crds/**
-//go:embed charts/argocd-agent/**
 var ChartFS embed.FS
 
 // GitopsAddonReconciler reconciles a openshift gitops operator

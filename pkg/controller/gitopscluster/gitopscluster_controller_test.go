@@ -584,6 +584,10 @@ func TestUpdateReadyCondition(t *testing.T) {
 							Type:   gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied,
 							Status: metav1.ConditionTrue,
 						},
+						{
+							Type:   gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady,
+							Status: metav1.ConditionTrue,
+						},
 					},
 				},
 			},

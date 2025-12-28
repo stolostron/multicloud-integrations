@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,55 +30,77 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestWaitForArgoCDCR(t *testing.T) {
+func TestWaitForOperatorReady(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name        string
-		timeout     time.Duration
-		setupArgoCD bool
-		expectError bool
+		name            string
+		timeout         time.Duration
+		setupDeployment bool
+		expectError     bool
 	}{
 		{
-			name:        "argocd_exists",
-			timeout:     5 * time.Second,
-			setupArgoCD: true,
-			expectError: false,
+			name:            "operator_exists_and_ready",
+			timeout:         5 * time.Second,
+			setupDeployment: true,
+			expectError:     false, // fake client skips waiting
 		},
 		{
-			name:        "argocd_does_not_exist_timeout",
-			timeout:     100 * time.Millisecond,
-			setupArgoCD: false,
-			expectError: false, // Changed: fake client skips waiting, so no error expected
+			name:            "operator_does_not_exist_timeout",
+			timeout:         100 * time.Millisecond,
+			setupDeployment: false,
+			expectError:     false, // Changed: fake client skips waiting, so no error expected
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
-				Client:   getTestEnv().Client,
-				GitopsNS: "test-gitops-ns",
+				Client:           getTestEnv().Client,
+				GitopsOperatorNS: "openshift-gitops-operator",
 			}
 
-			// Setup ArgoCD CR if needed
-			if tt.setupArgoCD {
-				argoCD := &unstructured.Unstructured{
-					Object: map[string]interface{}{
-						"apiVersion": "argoproj.io/v1beta1",
-						"kind":       "ArgoCD",
-						"metadata": map[string]interface{}{
-							"name":      "openshift-gitops",
-							"namespace": "test-gitops-ns",
+			// Setup operator deployment if needed
+			if tt.setupDeployment {
+				replicas := int32(1)
+				deployment := &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "argocd-operator-controller-manager",
+						Namespace: "openshift-gitops-operator",
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &replicas,
+						Selector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"app": "argocd-operator"},
+						},
+						Template: corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{"app": "argocd-operator"},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "manager", Image: "test"},
+								},
+							},
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						ReadyReplicas: 1,
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentAvailable,
+								Status: corev1.ConditionTrue,
+							},
 						},
 					},
 				}
-				err := reconciler.Create(context.TODO(), argoCD)
+				err := reconciler.Create(context.TODO(), deployment)
 				if err != nil && !errors.IsAlreadyExists(err) {
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 				}
 			}
 
-			err := reconciler.waitForArgoCDCR(tt.timeout)
+			err := reconciler.waitForOperatorReady(tt.timeout)
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -164,92 +187,8 @@ func TestCreateUpdateNamespace(t *testing.T) {
 	}
 }
 
-func TestEnsureArgoCDRedisSecret(t *testing.T) {
-	t.Skip("Skipping due to resource conflicts with fake client setup")
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name               string
-		existingSecret     *corev1.Secret
-		initialPassword    *corev1.Secret
-		expectError        bool
-		expectSecretCreate bool
-	}{
-		{
-			name: "secret_already_exists",
-			existingSecret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "argocd-redis",
-					Namespace: "test-gitops-ns",
-				},
-			},
-			expectError:        false, // Fixed: no error with fake client, function just returns early
-			expectSecretCreate: false,
-		},
-		{
-			name: "create_secret_with_initial_password",
-			initialPassword: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-redis-initial-password",
-					Namespace: "test-gitops-ns",
-				},
-				Data: map[string][]byte{
-					"admin.password": []byte("testpassword"),
-				},
-			},
-			expectError:        false,
-			expectSecretCreate: true,
-		},
-		{
-			name:               "no_initial_password_secret",
-			expectError:        true,
-			expectSecretCreate: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client:   getTestEnv().Client,
-				GitopsNS: "test-gitops-ns",
-			}
-
-			// Setup existing argocd-redis secret if specified
-			if tt.existingSecret != nil {
-				err := reconciler.Create(context.TODO(), tt.existingSecret)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-
-			// Setup initial password secret if specified
-			if tt.initialPassword != nil {
-				err := reconciler.Create(context.TODO(), tt.initialPassword)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-
-			err := reconciler.ensureArgoCDRedisSecret()
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-
-				// Verify secret exists
-				secret := &corev1.Secret{}
-				key := types.NamespacedName{
-					Name:      "argocd-redis",
-					Namespace: "test-gitops-ns",
-				}
-				err = reconciler.Get(context.TODO(), key, secret)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-
-				if tt.expectSecretCreate {
-					// Verify it has the correct label
-					g.Expect(secret.Labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
-				}
-			}
-		})
-	}
-}
+// TestEnsureArgoCDRedisSecret removed - function no longer exists
+// The argocd-operator now handles redis secret creation automatically
 
 func TestHandleDefaultAppProject(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -293,115 +232,6 @@ func TestHandleApplicationControllerClusterRoleBinding(t *testing.T) {
 
 	err := reconciler.handleApplicationControllerClusterRoleBinding(obj)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-func TestHandleArgoCDManifest(t *testing.T) {
-	t.Skip("Skipping due to resource conflicts with fake client setup")
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name        string
-		setupArgoCD bool
-		expectError bool
-	}{
-		{
-			name:        "argocd_does_not_exist",
-			setupArgoCD: false,
-			expectError: true, // Fixed: expect error when trying to create ArgoCD that already exists
-		},
-		{
-			name:        "argocd_exists",
-			setupArgoCD: true,
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-			}
-
-			// Setup existing ArgoCD CR if needed
-			if tt.setupArgoCD {
-				existingArgoCD := &unstructured.Unstructured{
-					Object: map[string]interface{}{
-						"apiVersion": "argoproj.io/v1beta1",
-						"kind":       "ArgoCD",
-						"metadata": map[string]interface{}{
-							"name":      "openshift-gitops",
-							"namespace": "test-ns",
-						},
-						"spec": map[string]interface{}{
-							"server": map[string]interface{}{
-								"route": map[string]interface{}{
-									"enabled": true,
-								},
-							},
-						},
-					},
-				}
-				err := reconciler.Create(context.TODO(), existingArgoCD)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-
-			obj := &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "argoproj.io/v1beta1",
-					"kind":       "ArgoCD",
-					"metadata": map[string]interface{}{
-						"name":      "openshift-gitops",
-						"namespace": "test-ns",
-					},
-					"spec": map[string]interface{}{
-						"server": map[string]interface{}{
-							"route": map[string]interface{}{
-								"enabled": false,
-							},
-						},
-					},
-				},
-			}
-
-			err := reconciler.handleArgoCDManifest(obj)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-
-				// Verify ArgoCD CR was updated
-				result := &unstructured.Unstructured{}
-				result.SetAPIVersion("argoproj.io/v1beta1")
-				result.SetKind("ArgoCD")
-
-				key := types.NamespacedName{
-					Name:      "openshift-gitops",
-					Namespace: "test-ns",
-				}
-				err = reconciler.Get(context.TODO(), key, result)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-
-				// Verify spec was updated
-				spec, found, err := unstructured.NestedMap(result.Object, "spec")
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-				g.Expect(found).To(gomega.BeTrue())
-
-				server, found, err := unstructured.NestedMap(spec, "server")
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-				g.Expect(found).To(gomega.BeTrue())
-
-				route, found, err := unstructured.NestedMap(server, "route")
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-				g.Expect(found).To(gomega.BeTrue())
-
-				enabled, found, err := unstructured.NestedBool(route, "enabled")
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-				g.Expect(found).To(gomega.BeTrue())
-				g.Expect(enabled).To(gomega.BeFalse())
-			}
-		})
-	}
 }
 
 func TestWaitAndAppendImagePullSecrets(t *testing.T) {

@@ -19,9 +19,9 @@ package gitopsaddon
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process
@@ -53,9 +52,14 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 		return err
 	}
 
-	err = r.applyCRDIfNotExists("clusterversions", "config.openshift.io/v1", "charts/dep-crds/clusterversions.config.openshift.io.crd.yaml")
-	if err != nil {
-		return err
+	// Only install clusterversions CRD if we're on OpenShift (i.e., it already exists).
+	// On non-OpenShift clusters (like kind), installing this CRD would cause the argocd-operator
+	// to incorrectly detect the cluster as OpenShift and apply incorrect security contexts.
+	// We check if the CRD already exists first - if it does, it's a real OpenShift cluster.
+	if r.crdExists("clusterversions", "config.openshift.io/v1") {
+		klog.Info("ClusterVersion CRD already exists (OpenShift cluster detected), skipping installation")
+	} else {
+		klog.Info("ClusterVersion CRD does not exist (non-OpenShift cluster), skipping installation to avoid operator misconfiguration")
 	}
 
 	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
@@ -68,16 +72,17 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 		}
 	}
 
-	// 2. Wait for the ArgoCD CR to be created by the openshift-gitops-operator
-	klog.Info("Waiting for ArgoCD CR to be created by openshift-gitops-operator...")
-	timeout := 1 * time.Minute
-	err = r.waitForArgoCDCR(timeout)
+	// 2. Wait for the operator deployment to be ready before creating the ArgoCD CR
+	klog.Info("Waiting for ArgoCD operator deployment to be ready...")
+	timeout := 2 * time.Minute
+	err = r.waitForOperatorReady(timeout)
 	if err != nil {
-		klog.Errorf("Failed to find ArgoCD CR within %v: %v", timeout, err)
+		klog.Errorf("Failed to wait for ArgoCD operator: %v", err)
 		return err
 	}
+	klog.Info("ArgoCD operator is ready")
 
-	// 3. Always render and apply openshift-gitops-dependency helm chart manifests
+	// 3. Create or update the ArgoCD CR via openshift-gitops-dependency helm chart
 	gitopsNsKey := types.NamespacedName{
 		Name: r.GitopsNS,
 	}
@@ -92,146 +97,58 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 		}
 	}
 
-	// 4. Always template and apply the argocd-agent if enabled
+	// 4. Log ArgoCD Agent status (operator handles deployment via ArgoCD CR)
 	if r.ArgoCDAgentEnabled == "true" {
-		klog.Info("Templating and applying argocd-agent...")
-
-		// Template and apply argocd-agent in the same namespace as openshift-gitops
-		if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-			// Ensure argocd-redis secret exists before templating argocd-agent
-			err := r.ensureArgoCDRedisSecret()
-			if err != nil {
-				klog.Errorf("Failed to ensure argocd-redis secret: %v", err)
-				return err
-			}
-
-			err = r.templateAndApplyChart("charts/argocd-agent", r.GitopsNS, "argocd-agent")
-			if err != nil {
-				klog.Errorf("Failed to template and apply argocd-agent: %v", err)
-				return err
-			} else {
-				klog.Info("Successfully templated and applied argocd-agent")
-			}
-		}
+		klog.Info("ArgoCD Agent is enabled - deployment is handled by the argocd-operator via the ArgoCD CR spec.argoCDAgent.agent")
 	} else {
-		klog.Info("ArgoCD Agent not enabled, skipping installation")
+		klog.Info("ArgoCD Agent not enabled")
 	}
 
 	return nil
 }
 
-// waitForArgoCDCR waits for the ArgoCD CR to be created by the operator
-func (r *GitopsAddonReconciler) waitForArgoCDCR(timeout time.Duration) error {
+// waitForOperatorReady waits for the ArgoCD operator deployment to be ready
+func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) error {
 	// Skip waiting in test environments with fake clients
 	if r.Config != nil && r.Config.Host == "fake://test" {
-		klog.Info("Using fake client, skipping ArgoCD CR wait")
+		klog.Info("Using fake client, skipping operator ready wait")
 		return nil
 	}
 
-	argoCDName := "openshift-gitops"
-	argoCDKey := types.NamespacedName{
-		Name:      argoCDName,
-		Namespace: r.GitopsNS,
+	deploymentName := "argocd-operator-controller-manager"
+	deploymentKey := types.NamespacedName{
+		Name:      deploymentName,
+		Namespace: r.GitopsOperatorNS,
 	}
 
-	klog.Infof("Waiting for ArgoCD CR %s to be created in namespace %s...", argoCDName, r.GitopsNS)
+	klog.Infof("Waiting for ArgoCD operator deployment %s to be ready in namespace %s...", deploymentName, r.GitopsOperatorNS)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		argoCD := &unstructured.Unstructured{}
-		argoCD.SetAPIVersion("argoproj.io/v1beta1")
-		argoCD.SetKind("ArgoCD")
-
-		err := r.Get(ctx, argoCDKey, argoCD)
+		deployment := &appsv1.Deployment{}
+		err := r.Get(ctx, deploymentKey, deployment)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				klog.Infof("ArgoCD CR %s not found yet, continuing to wait...", argoCDName)
+				klog.Infof("Operator deployment %s not found yet, continuing to wait...", deploymentName)
 				return false, nil // Continue waiting
 			}
-			klog.Errorf("Error checking for ArgoCD CR %s, continuing to wait..., err: %v", argoCDName, err)
-			return false, nil // Continue waiting
+			klog.Errorf("Error checking for operator deployment %s: %v", deploymentName, err)
+			return false, nil // Continue waiting on transient errors
 		}
 
-		klog.Infof("ArgoCD CR %s found successfully", argoCDName)
-		return true, nil // ArgoCD CR found, stop waiting
+		// Check if deployment is available
+		for _, cond := range deployment.Status.Conditions {
+			if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+				klog.Infof("Operator deployment %s is available", deploymentName)
+				return true, nil
+			}
+		}
+
+		klog.Infof("Operator deployment %s not yet available (replicas: %d/%d)", deploymentName, deployment.Status.ReadyReplicas, *deployment.Spec.Replicas)
+		return false, nil
 	})
-}
-
-// ensureArgoCDRedisSecret creates the argocd-redis secret if it doesn't exist
-func (r *GitopsAddonReconciler) ensureArgoCDRedisSecret() error {
-	// Check if argocd-redis secret already exists
-	argoCDRedisSecret := &corev1.Secret{}
-	argoCDRedisSecretKey := types.NamespacedName{
-		Name:      "argocd-redis",
-		Namespace: r.GitopsNS,
-	}
-
-	err := r.Get(context.TODO(), argoCDRedisSecretKey, argoCDRedisSecret)
-	if err == nil {
-		klog.Info("argocd-redis secret already exists, skipping creation")
-		return nil
-	}
-
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check argocd-redis secret: %w", err)
-	}
-
-	klog.Info("argocd-redis secret not found, creating it...")
-
-	// Find the secret ending with "redis-initial-password"
-	secretList := &corev1.SecretList{}
-	err = r.List(context.TODO(), secretList, client.InNamespace(r.GitopsNS))
-	if err != nil {
-		return fmt.Errorf("failed to list secrets in namespace %s: %w", r.GitopsNS, err)
-	}
-
-	var initialPasswordSecret *corev1.Secret
-	for i := range secretList.Items {
-		if strings.HasSuffix(secretList.Items[i].Name, "redis-initial-password") {
-			initialPasswordSecret = &secretList.Items[i]
-			break
-		}
-	}
-
-	if initialPasswordSecret == nil {
-		return fmt.Errorf("no secret found ending with 'redis-initial-password' in namespace %s", r.GitopsNS)
-	}
-
-	// Extract the admin.password value
-	adminPasswordBytes, exists := initialPasswordSecret.Data["admin.password"]
-	if !exists {
-		return fmt.Errorf("admin.password not found in secret %s", initialPasswordSecret.Name)
-	}
-
-	// Create the argocd-redis secret
-	argoCDRedisSecretNew := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "argocd-redis",
-			Namespace: r.GitopsNS,
-			Labels: map[string]string{
-				"apps.open-cluster-management.io/gitopsaddon": "true",
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"auth": adminPasswordBytes,
-		},
-	}
-
-	err = r.Create(context.TODO(), argoCDRedisSecretNew)
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			klog.Info("argocd-redis secret was created by another process, continuing...")
-			return nil
-		}
-
-		return fmt.Errorf("failed to create argocd-redis secret: %w", err)
-	}
-
-	klog.Info("Successfully created argocd-redis secret")
-	return nil
 }
 
 // CreateUpdateNamespace creates or updates a namespace with proper labels
@@ -368,72 +285,6 @@ func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.Namespace
 	return nil
 }
 
-// handleArgoCDManifest waits for the default ArgoCD CR and overrides its spec
-func (r *GitopsAddonReconciler) handleArgoCDManifest(obj *unstructured.Unstructured) error {
-	klog.Info("Handling ArgoCD manifest - waiting for default ArgoCD CR and overriding spec")
-
-	argoCDKey := types.NamespacedName{
-		Name:      "openshift-gitops",
-		Namespace: obj.GetNamespace(),
-	}
-
-	// Skip waiting in test environments with fake clients
-	if r.Config != nil && r.Config.Host == "fake://test" {
-		klog.Info("Using fake client, applying ArgoCD manifest directly")
-		return r.applyManifest(obj)
-	}
-
-	// Wait up to 1 minute for the ArgoCD CR to exist
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	var existingArgoCD *unstructured.Unstructured
-	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
-		argoCD := &unstructured.Unstructured{}
-		argoCD.SetAPIVersion("argoproj.io/v1beta1")
-		argoCD.SetKind("ArgoCD")
-
-		err := r.Get(ctx, argoCDKey, argoCD)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				klog.Infof("ArgoCD CR %s not found yet, continuing to wait...", argoCDKey.Name)
-				return false, nil
-			}
-			return false, err
-		}
-
-		existingArgoCD = argoCD
-		return true, nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to wait for ArgoCD CR: %w", err)
-	}
-
-	// Override the spec with the rendered spec
-	renderedSpec, found, err := unstructured.NestedMap(obj.Object, "spec")
-	if err != nil {
-		return fmt.Errorf("failed to get rendered spec: %w", err)
-	}
-	if !found {
-		return fmt.Errorf("no spec found in rendered ArgoCD manifest")
-	}
-
-	// Update the existing ArgoCD CR with the new spec
-	err = unstructured.SetNestedMap(existingArgoCD.Object, renderedSpec, "spec")
-	if err != nil {
-		return fmt.Errorf("failed to set spec: %w", err)
-	}
-
-	err = r.Update(context.TODO(), existingArgoCD)
-	if err != nil {
-		return fmt.Errorf("failed to update ArgoCD CR: %w", err)
-	}
-
-	klog.Info("Successfully updated ArgoCD CR spec")
-	return nil
-}
-
 // handleDefaultServiceAccount waits for the default service account and appends imagePullSecrets
 func (r *GitopsAddonReconciler) handleDefaultServiceAccount(obj *unstructured.Unstructured) error {
 	klog.Info("Handling default ServiceAccount - waiting for existence and appending imagePullSecrets")
@@ -486,8 +337,8 @@ func (r *GitopsAddonReconciler) handleApplicationControllerClusterRoleBinding(ob
 
 // waitAndAppendImagePullSecrets waits for a service account to exist and appends imagePullSecrets
 func (r *GitopsAddonReconciler) waitAndAppendImagePullSecrets(saKey types.NamespacedName, renderedObj *unstructured.Unstructured) error {
-	// Wait for the service account to exist (up to 1 minute)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	// Wait for the service account to exist (up to 3 minutes - ArgoCD operator needs time to create resources)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	var existingSA *corev1.ServiceAccount

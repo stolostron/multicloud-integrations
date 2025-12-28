@@ -35,8 +35,9 @@ import (
 )
 
 const (
-	SourceNamespace = "open-cluster-management-agent-addon"
-	TargetNamespace = "openshift-gitops"
+	SourceNamespace  = "open-cluster-management-agent-addon"
+	TargetNamespace  = "openshift-gitops"
+	TargetSecretName = "argocd-agent-client-tls" // #nosec G101
 )
 
 // getSourceSecretName returns the source secret name, allowing override via environment variable
@@ -188,7 +189,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 
 	// Always create or update the target secret since reconciliation was triggered
 	targetSecretKey := types.NamespacedName{
-		Name:      getSourceSecretName(),
+		Name:      TargetSecretName,
 		Namespace: TargetNamespace,
 	}
 
@@ -202,7 +203,7 @@ func (r *SecretReconciler) handleSourceSecretDeletion(ctx context.Context) (reco
 	// Delete the target secret if it exists
 	targetSecret := &corev1.Secret{}
 	targetSecretKey := types.NamespacedName{
-		Name:      getSourceSecretName(),
+		Name:      TargetSecretName,
 		Namespace: TargetNamespace,
 	}
 
@@ -242,7 +243,7 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 
 	targetSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sourceSecret.Name,
+			Name:      TargetSecretName,
 			Namespace: TargetNamespace,
 		},
 		Type: secretType,
@@ -261,7 +262,7 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 		if errors.IsAlreadyExists(err) {
 			// Secret exists, update it instead
 			existingSecret := &corev1.Secret{}
-			err = r.Get(ctx, types.NamespacedName{Name: sourceSecret.Name, Namespace: TargetNamespace}, existingSecret)
+			err = r.Get(ctx, types.NamespacedName{Name: TargetSecretName, Namespace: TargetNamespace}, existingSecret)
 
 			if err != nil {
 				klog.Errorf("Failed to get existing target secret: %v", err)
@@ -278,13 +279,13 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 				return reconcile.Result{}, err
 			}
 
-			klog.Infof("Successfully updated secret %s in namespace %s", sourceSecret.Name, TargetNamespace)
+			klog.Infof("Successfully updated secret %s in namespace %s", TargetSecretName, TargetNamespace)
 		} else {
 			klog.Errorf("Failed to create target secret: %v", err)
 			return reconcile.Result{}, err
 		}
 	} else {
-		klog.Infof("Successfully created secret %s in namespace %s", sourceSecret.Name, TargetNamespace)
+		klog.Infof("Successfully created secret %s in namespace %s", TargetSecretName, TargetNamespace)
 	}
 
 	return reconcile.Result{}, nil
