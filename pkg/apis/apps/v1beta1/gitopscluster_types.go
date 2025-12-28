@@ -81,6 +81,10 @@ const (
 	// GitOpsClusterOLMSubscriptionReady indicates whether the OLM Subscription AddOnTemplate
 	// was created successfully (only applies when OLM subscription mode is enabled).
 	GitOpsClusterOLMSubscriptionReady = "OLMSubscriptionReady"
+
+	// GitOpsClusterArgoCDPolicyReady indicates whether the ArgoCD Policy was created successfully
+	// for managing the ArgoCD CR on managed clusters via the Policy framework.
+	GitOpsClusterArgoCDPolicyReady = "ArgoCDPolicyReady"
 )
 
 // GitOpsCluster condition reasons
@@ -109,6 +113,7 @@ const (
 	ReasonConfigCreationFailed         = "ConfigCreationFailed"
 	ReasonAddonCreationFailed          = "AddonCreationFailed"
 	ReasonPolicyTemplateCreationFailed = "PolicyTemplateCreationFailed"
+	ReasonArgoCDPolicyCreationFailed   = "ArgoCDPolicyCreationFailed"
 )
 
 // +kubebuilder:object:root=true

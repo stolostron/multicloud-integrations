@@ -58,20 +58,24 @@ kubectl delete managedclusteraddon gitops-addon -n cluster1 --context ${HUB_CONT
 echo "✓ ManagedClusterAddon deleted"
 
 echo ""
-echo "Step 4: Verifying ArgoCD CR is deleted from openshift-gitops namespace..."
-for i in {1..60}; do
-  if ! kubectl get argocd -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | grep -q .; then
-    echo "✓ ArgoCD CR deleted"
-    break
-  fi
-  echo "  Waiting for ArgoCD CR to be deleted... (attempt $i/60)"
-  if [ $i -eq 60 ]; then
-    echo "✗ ERROR: ArgoCD CR still exists after 60 attempts"
-    kubectl get argocd -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} 2>/dev/null || true
-    exit 1
-  fi
-  sleep 2
-done
+echo "Step 4: Verifying ArgoCD CR still exists (managed by Policy, not deleted with GitOpsCluster)..."
+# ArgoCD CR is managed by OCM Policy without ownerReferences
+# It should NOT be automatically deleted when GitOpsCluster is deleted
+# Users must manually delete the Policy to remove ArgoCD CR
+if kubectl get argocd openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+  echo "✓ ArgoCD CR 'openshift-gitops' still exists (expected - managed by Policy)"
+else
+  echo "✗ ERROR: ArgoCD CR was unexpectedly deleted"
+  exit 1
+fi
+
+echo ""
+echo "Step 4.1: Verifying Policy still exists on hub (not deleted with GitOpsCluster)..."
+if kubectl get policy gitopscluster-argocd-policy -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+  echo "✓ Policy 'gitopscluster-argocd-policy' still exists (expected - no ownerReferences)"
+else
+  echo "  Note: Policy may not exist if Policy framework was not installed"
+fi
 
 echo ""
 echo "Step 5: Verifying openshift-gitops-operator namespace is cleaned up..."
@@ -91,17 +95,24 @@ for i in {1..60}; do
 done
 
 echo ""
-echo "Step 6: Verifying open-cluster-management-agent-addon namespace is cleaned up..."
+echo "Step 6: Verifying gitops-addon is cleaned up from open-cluster-management-agent-addon namespace..."
+echo "  (Note: governance-policy-framework and config-policy-controller pods are expected to remain)"
 for i in {1..60}; do
-  ADDON_RESOURCES=$(kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
-  if [ "${ADDON_RESOURCES}" -eq "0" ]; then
-    echo "✓ No resources found in open-cluster-management-agent-addon namespace"
+  # Count only gitops-addon related resources, excluding policy framework pods
+  GITOPS_ADDON_RESOURCES=$(kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | grep -v "governance-policy-framework" | grep -v "config-policy-controller" | wc -l)
+  if [ "${GITOPS_ADDON_RESOURCES}" -eq "0" ]; then
+    echo "✓ No gitops-addon resources found in open-cluster-management-agent-addon namespace"
+    # List remaining policy resources for reference
+    REMAINING=$(kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
+    if [ "${REMAINING}" -gt "0" ]; then
+      echo "  (Policy framework pods still running as expected: ${REMAINING} resources)"
+    fi
     break
   fi
-  echo "  Waiting for addon namespace to be cleaned up... (attempt $i/60, current count: ${ADDON_RESOURCES})"
+  echo "  Waiting for gitops-addon to be cleaned up... (attempt $i/60, current count: ${GITOPS_ADDON_RESOURCES})"
   if [ $i -eq 60 ]; then
-    echo "✗ ERROR: ${ADDON_RESOURCES} resource(s) still exist in open-cluster-management-agent-addon namespace"
-    kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} 2>/dev/null || true
+    echo "✗ ERROR: ${GITOPS_ADDON_RESOURCES} gitops-addon resource(s) still exist"
+    kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} 2>/dev/null | grep -v "governance-policy-framework" | grep -v "config-policy-controller" || true
     exit 1
   fi
   sleep 2

@@ -8,9 +8,19 @@ spec:
     enabled: false
   argoCDAgent:
     principal:
-      allowedNamespaces:
-      - '*'
-      auth: mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent
       enabled: true
+      auth: mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent
       image: ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest
       logLevel: trace
+      server:
+        service:
+          type: LoadBalancer
+      namespace:
+        allowedNamespaces:
+          - "*"
+      tls:
+        # Use controller-generated secrets
+        secretName: argocd-agent-principal-tls
+        rootCASecretName: argocd-agent-ca
+      jwt:
+        secretName: argocd-agent-jwt

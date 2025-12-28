@@ -8,10 +8,18 @@ CONTROLLER_NAMESPACE="open-cluster-management"
 GITOPS_NAMESPACE="openshift-gitops"
 E2E_IMG="${E2E_IMG:-quay.io/stolostron/multicloud-integrations:latest}"
 ENABLE_ARGOCD_AGENT="${ENABLE_ARGOCD_AGENT:-false}"
+ARGOCD_AGENT_IMG="${ARGOCD_AGENT_IMG:-ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest}"
 
 echo "========================================="
 echo "E2E SETUP - Installing Components"
 echo "========================================="
+
+# Step 0: Preload ArgoCD Agent image to kind clusters (required for ghcr.io images)
+echo ""
+echo "Step 0: Preloading ArgoCD Agent image to kind clusters..."
+docker pull ${ARGOCD_AGENT_IMG} || echo "Warning: Could not pull ${ARGOCD_AGENT_IMG}"
+kind load docker-image ${ARGOCD_AGENT_IMG} --name hub || echo "Warning: Could not load image to hub"
+kind load docker-image ${ARGOCD_AGENT_IMG} --name cluster1 || echo "Warning: Could not load image to cluster1"
 
 # Step 1: Install MetalLB
 echo ""
@@ -21,7 +29,53 @@ echo "Step 1: Installing MetalLB..."
 # Step 2: Setup OCM environment
 echo ""
 echo "Step 2: Setting up OCM environment..."
+# OCM_VERSION is passed through from Makefile via environment variable
 ./deploy/ocm/install.sh
+
+# Step 2.5: Install governance-policy-framework
+echo ""
+echo "Step 2.5: Installing governance-policy-framework..."
+kubectl config use-context ${HUB_CONTEXT}
+clusteradm install hub-addon --names governance-policy-framework 2>&1 || {
+  echo "  Warning: Failed to install governance-policy-framework hub addon"
+}
+echo "  Waiting for governance-policy-propagator to be ready..."
+kubectl wait --for=condition=available --timeout=180s deployment/governance-policy-propagator -n open-cluster-management --context ${HUB_CONTEXT} 2>/dev/null || {
+  echo "  Warning: governance-policy-propagator not ready, Policy-based ArgoCD management may not work"
+}
+echo "  Enabling governance-policy-framework and config-policy-controller on cluster1..."
+clusteradm addon enable --names governance-policy-framework --clusters cluster1 2>&1 || {
+  echo "  Warning: Failed to enable governance-policy-framework on cluster1"
+}
+clusteradm addon enable --names config-policy-controller --clusters cluster1 2>&1 || {
+  echo "  Warning: Failed to enable config-policy-controller on cluster1"
+}
+echo "  Waiting for policy addons to be ready on cluster1..."
+for i in {1..60}; do
+  POD_COUNT=$(kubectl --context ${SPOKE_CONTEXT} get pods -n open-cluster-management-agent-addon -l app=governance-policy-framework --no-headers 2>/dev/null | grep Running | wc -l)
+  if [ "$POD_COUNT" -gt 0 ]; then
+    echo "  ✓ governance-policy-framework addon running on cluster1"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  Warning: governance-policy-framework addon not running on cluster1"
+    break
+  fi
+  sleep 2
+done
+for i in {1..60}; do
+  POD_COUNT=$(kubectl --context ${SPOKE_CONTEXT} get pods -n open-cluster-management-agent-addon -l app=config-policy-controller --no-headers 2>/dev/null | grep Running | wc -l)
+  if [ "$POD_COUNT" -gt 0 ]; then
+    echo "  ✓ config-policy-controller addon running on cluster1"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  Warning: config-policy-controller addon not running on cluster1"
+    break
+  fi
+  sleep 2
+done
+echo "  ✓ Policy framework installation completed"
 
 # Step 3: Install ArgoCD on Hub
 echo ""
@@ -35,10 +89,13 @@ kubectl wait --for=condition=available --timeout=180s deployment/argocd-operator
   echo "✗ ERROR: ArgoCD operator not ready after 180s"
   exit 1
 }
+
+# Step 3.1: Create ArgoCD instance to trigger service/deployment creation
+echo ""
+echo "Step 3.1: Creating ArgoCD instance..."
 kubectl create -f test/e2e/fixtures/openshift-gitops/operator-instance.yaml --context "${HUB_CONTEXT}" --save-config \
   || kubectl apply -f test/e2e/fixtures/openshift-gitops/operator-instance.yaml --context "${HUB_CONTEXT}"
-echo "  ArgoCD instance created (principal pods will be ready after GitOpsCluster creates secrets)"
-
+echo "  ArgoCD instance created"
 
 # Step 4: Install Controller and GitOpsCluster
 echo ""
@@ -54,20 +111,24 @@ kubectl apply -f deploy/controller/deploy.yaml --context ${HUB_CONTEXT}
 if [ "${E2E_IMG}" != "quay.io/stolostron/multicloud-integrations:latest" ]; then
   kubectl set image deployment/multicloud-integrations-gitops manager=${E2E_IMG} -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT}
 fi
+# Set community ArgoCD operator image for e2e tests (instead of Red Hat registry)
+ARGOCD_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-operator:latest}"
+echo "  Setting GITOPS_OPERATOR_IMAGE to ${ARGOCD_OPERATOR_IMAGE} for e2e tests..."
+kubectl set env deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} GITOPS_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE}
 echo "  Waiting for controller to be ready..."
 kubectl wait --for=condition=available --timeout=180s deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} || {
   echo "✗ ERROR: Controller not ready after 180s"
   exit 1
 }
 
-# Step 5: Create GitOpsCluster
-echo ""
 # Step 4.5: Apply ClusterManagementAddon and default AddOnTemplate
 echo ""
 echo "Step 4.5: Applying ClusterManagementAddon and default AddOnTemplate..."
 kubectl apply -f gitopsaddon/addonTemplates/clusterManagementAddon.yaml --context ${HUB_CONTEXT}
 kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml --context ${HUB_CONTEXT}
 
+# Step 5: Create GitOpsCluster
+echo ""
 echo "Step 5: Creating GitOpsCluster (with argoCDAgent.enabled=${ENABLE_ARGOCD_AGENT})..."
 kubectl apply -f test/e2e/fixtures/gitopscluster/managedclustersetbinding.yaml --context ${HUB_CONTEXT} || true
 kubectl apply -f test/e2e/fixtures/gitopscluster/placement.yaml --context ${HUB_CONTEXT}
@@ -89,9 +150,9 @@ spec:
     namespace: openshift-gitops
   gitopsAddon:
     enabled: true
-    gitOpsOperatorImage: "quay.io/argoprojlabs/argocd-operator@sha256:223ad82fb697471ede79201c4a042115c9ca5c00a172d5bdcd5a780e58c46c79"
+    gitOpsOperatorImage: "quay.io/argoprojlabs/argocd-operator:latest"
     gitOpsImage: "quay.io/argoproj/argocd@sha256:bbdb994007855fed9adfbef31cd58c49f867e652c0e16654bf6579ff037e13e2"
-    redisImage: "redis@sha256:8061ca607db2a0c80010aeb5fc9bed0253448bc68711eaa14253a392f6c48280"
+    redisImage: "public.ecr.aws/docker/library/redis@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
     argoCDAgent:
       enabled: ${ENABLE_ARGOCD_AGENT}
       propagateHubCA: true
@@ -105,21 +166,68 @@ echo "  Waiting for GitOpsCluster to be created..."
 kubectl wait --for=jsonpath='{.metadata.name}'=gitopscluster --timeout=60s gitopscluster/gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} 2>/dev/null || echo "GitOpsCluster created"
 
 if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
-  echo "  ArgoCD Agent is enabled, waiting for GitOpsCluster controller to create secrets..."
-  for i in {1..60}; do
-    if kubectl get secret argocd-agent-resource-proxy-tls -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
-      echo "  ✓ Secret argocd-agent-resource-proxy-tls created"
+  echo "  ArgoCD Agent is enabled, waiting for controller to generate certificates..."
+  
+  # Wait for controller to generate all certificates (CA, principal TLS, resource proxy TLS)
+  echo "  Waiting for argocd-agent-ca secret..."
+  for i in {1..90}; do
+    if kubectl get secret argocd-agent-ca -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+      echo "  ✓ Secret argocd-agent-ca created (attempt $i/90)"
       break
     fi
-    if [ $i -eq 60 ]; then
-      echo "✗ ERROR: Secret argocd-agent-resource-proxy-tls not created after 120s"
+    if [ $i -eq 90 ]; then
+      echo "✗ ERROR: Secret argocd-agent-ca not created after 180s"
       kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml
+      kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50
       exit 1
     fi
     sleep 2
   done
 
-  echo "  Restarting ArgoCD principal pods to pick up secrets..."
+  echo "  Waiting for argocd-agent-principal-tls secret..."
+  for i in {1..60}; do
+    if kubectl get secret argocd-agent-principal-tls -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+      echo "  ✓ Secret argocd-agent-principal-tls created (attempt $i/60)"
+      break
+    fi
+    if [ $i -eq 60 ]; then
+      echo "✗ ERROR: Secret argocd-agent-principal-tls not created after 120s"
+      kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50
+      exit 1
+    fi
+    sleep 2
+  done
+
+  echo "  Waiting for argocd-agent-resource-proxy-tls secret..."
+  for i in {1..60}; do
+    if kubectl get secret argocd-agent-resource-proxy-tls -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+      echo "  ✓ Secret argocd-agent-resource-proxy-tls created (attempt $i/60)"
+      break
+    fi
+    if [ $i -eq 60 ]; then
+      echo "✗ ERROR: Secret argocd-agent-resource-proxy-tls not created after 120s"
+      kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50
+      exit 1
+    fi
+    sleep 2
+  done
+
+  echo "  All certificates generated by controller!"
+  
+  # Verify the principal TLS cert has the LoadBalancer IP in SANs
+  echo "  Verifying principal TLS certificate SANs..."
+  LB_IP=$(kubectl get svc openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  if [ -n "$LB_IP" ]; then
+    CERT_SANS=$(kubectl get secret argocd-agent-principal-tls -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d | openssl x509 -noout -text 2>/dev/null | grep -A1 "Subject Alternative Name" || echo "")
+    if echo "$CERT_SANS" | grep -q "$LB_IP"; then
+      echo "  ✓ Principal TLS certificate includes LoadBalancer IP $LB_IP in SANs"
+    else
+      echo "  Warning: Principal TLS certificate may not include LoadBalancer IP $LB_IP"
+      echo "  Certificate SANs: $CERT_SANS"
+    fi
+  fi
+
+  echo "  Restarting ArgoCD principal pods to pick up controller-generated secrets..."
   kubectl delete pod -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} || true
   echo "  Waiting for principal pods to be recreated and ready..."
   for i in {1..60}; do
@@ -152,23 +260,26 @@ echo "  Creating openshift-gitops namespace on managed cluster..."
 kubectl create namespace ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} || true
 
 echo "  Waiting for ArgoCD operator deployment to be ready..."
-for i in {1..60}; do
+for i in {1..90}; do
   if kubectl --context ${SPOKE_CONTEXT} get deployment argocd-operator-controller-manager -n openshift-gitops-operator &>/dev/null; then
-    echo "  ✓ ArgoCD operator deployment found (attempt $i/60)"
-    kubectl --context ${SPOKE_CONTEXT} wait --for=condition=available --timeout=120s deployment/argocd-operator-controller-manager -n openshift-gitops-operator || {
-      echo "  ✗ ERROR: ArgoCD operator deployment not available"
+    echo "  ✓ ArgoCD operator deployment found (attempt $i/90)"
+    kubectl --context ${SPOKE_CONTEXT} wait --for=condition=available --timeout=300s deployment/argocd-operator-controller-manager -n openshift-gitops-operator || {
+      echo "  ✗ ERROR: ArgoCD operator deployment not available after 300s"
+      echo "  Checking deployment status..."
+      kubectl --context ${SPOKE_CONTEXT} describe deployment argocd-operator-controller-manager -n openshift-gitops-operator || true
+      kubectl --context ${SPOKE_CONTEXT} get pods -n openshift-gitops-operator || true
       exit 1
     }
     echo "  ✓ ArgoCD operator deployment is ready"
     break
   fi
-  if [ $i -eq 60 ]; then
-    echo "  ✗ ERROR: ArgoCD operator deployment not found after 60 attempts"
+  if [ $i -eq 90 ]; then
+    echo "  ✗ ERROR: ArgoCD operator deployment not found after 90 attempts"
     echo "  Checking addon pod logs..."
-    kubectl --context ${SPOKE_CONTEXT} logs -n ${ADDON_NAMESPACE} -l app=gitops-addon --tail=30
+    kubectl --context ${SPOKE_CONTEXT} logs -n open-cluster-management-agent-addon -l app=gitops-addon --tail=30
     exit 1
   fi
-  echo "  Waiting for ArgoCD operator deployment... (attempt $i/60)"
+  echo "  Waiting for ArgoCD operator deployment... (attempt $i/90)"
   sleep 5
 done
 
@@ -186,32 +297,103 @@ for i in {1..30}; do
   sleep 2
 done
 
-echo "  Creating ArgoCD CR on managed cluster..."
-kubectl apply -f test/e2e/fixtures/argocd.yaml --context ${SPOKE_CONTEXT}
-echo "  Waiting for ArgoCD CR to be created..."
-sleep 10
+echo "  Waiting for ArgoCD CR on managed cluster..."
+echo "  (ArgoCD CR is created by gitops-addon directly, with Policy framework as optional enhancement)"
 
-# Step 7: Patch redis and network policy for agent communication
-echo ""
-echo "Step 7: Patching redis and network policy..."
-echo "  Patching redis deployment..."
-kubectl patch deployment openshift-gitops-redis -n ${GITOPS_NAMESPACE} --type='json' -p='[
-  {
-    "op": "add",
-    "path": "/spec/template/spec/securityContext",
-    "value": {"runAsUser": 1000}
-  }
-]' --context ${SPOKE_CONTEXT} || echo "Warning: Could not patch redis deployment"
-sleep 60s
-echo "  Patching network policy..."
-kubectl patch networkpolicy openshift-gitops-redis-network-policy -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} --type='json' -p='[{"op": "add", "path": "/spec/ingress/-", "value": {"ports": [{"port": 6379, "protocol": "TCP"}], "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "argocd-agent-agent"}}}]}}]' || echo "Warning: Could not patch network policy"
+# Wait for ArgoCD CR to be created on managed cluster (by gitops-addon or Policy)
+for i in {1..60}; do
+  if kubectl --context ${SPOKE_CONTEXT} get argocd openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    echo "  ✓ ArgoCD CR 'openshift-gitops' found (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: ArgoCD CR not found after 60 attempts"
+    echo "  Checking addon pod logs..."
+    kubectl --context ${SPOKE_CONTEXT} logs -n open-cluster-management-agent-addon -l app=gitops-addon --tail=50
+    exit 1
+  fi
+  echo "  Waiting for ArgoCD CR... (attempt $i/60)"
+  sleep 5
+done
 
-# Step 8: Restart deployments to apply patches
+# Step 7: Wait for ArgoCD components to be ready
 echo ""
-echo "Step 8: Restarting deployments..."
-kubectl rollout restart deployment openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} || echo "Warning: Could not restart principal"
-kubectl rollout restart deployment argocd-agent-agent -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} || echo "Warning: Could not restart agent (may not exist yet)"
-sleep 30s
+echo "Step 7: Waiting for ArgoCD application controller to be ready..."
+for i in {1..60}; do
+  if kubectl --context ${SPOKE_CONTEXT} get statefulset openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    echo "  ✓ ArgoCD application controller found"
+    kubectl --context ${SPOKE_CONTEXT} wait --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s statefulset/openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} || {
+      echo "  Warning: Application controller not ready yet"
+    }
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: ArgoCD application controller not found"
+    exit 1
+  fi
+  echo "  Waiting for application controller... (attempt $i/60)"
+  sleep 5
+done
+
+# Step 8: Verify agent setup
+echo ""
+echo "Step 8: Verifying agent setup..."
+if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
+  # Wait for principal pods to be ready
+  echo "  Waiting for principal pods to be ready..."
+  for i in {1..60}; do
+    POD_COUNT=$(kubectl get pods -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --no-headers 2>/dev/null | grep -v Terminating | grep Running | wc -l)
+    if [ "$POD_COUNT" -gt 0 ]; then
+      if kubectl wait --for=condition=Ready --timeout=10s pod -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} 2>/dev/null; then
+        echo "  ✓ Principal pods are ready"
+        break
+      fi
+    fi
+    if [ $i -eq 60 ]; then
+      echo "✗ ERROR: Principal pods not ready"
+      kubectl get pods -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT}
+      kubectl logs -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --tail=30
+      exit 1
+    fi
+    sleep 2
+  done
+  
+  # Update GitOpsCluster with the LoadBalancer IP for agents
+  echo ""
+  echo "Step 8.1: Retrieving LoadBalancer IP and updating GitOpsCluster..."
+  LB_IP=$(kubectl get svc openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+  if [ -z "$LB_IP" ]; then
+    echo "  Warning: Could not retrieve LoadBalancer IP, using ClusterIP..."
+    LB_IP=$(kubectl get svc openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+  fi
+  echo "  Updating GitOpsCluster with serverAddress=${LB_IP}..."
+  kubectl patch gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --type=merge \
+    -p '{"spec":{"gitopsAddon":{"argoCDAgent":{"serverAddress":"'"${LB_IP}"'","serverPort":"443"}}}}'
+  echo "  ✓ GitOpsCluster updated with serverAddress"
+
+  # Wait for agent on managed cluster
+  echo ""
+  echo "Step 8.2: Waiting for agent deployment on managed cluster..."
+  sleep 10
+  for i in {1..60}; do
+    if kubectl --context ${SPOKE_CONTEXT} get deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} &>/dev/null; then
+      echo "  ✓ Agent deployment found on managed cluster"
+      kubectl --context ${SPOKE_CONTEXT} rollout restart deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} 2>/dev/null || true
+      sleep 5
+      break
+    fi
+    if [ $i -eq 60 ]; then
+      echo "  Warning: Agent deployment not found on managed cluster (may be expected)"
+      break
+    fi
+    echo "  Waiting for agent deployment... (attempt $i/60)"
+    sleep 3
+  done
+else
+  echo "  ArgoCD Agent is disabled, skipping agent setup"
+  kubectl rollout restart deployment openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} 2>/dev/null || echo "  Warning: Could not restart principal (may not exist)"
+  sleep 10
+fi
 
 # Step 9: Deploy test application
 echo ""

@@ -104,40 +104,6 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 			},
 		}
 		values["global"] = global
-	case "charts/argocd-agent":
-		// Parse the agent image
-		agentImage, agentTag, err := ParseImageReference(r.ArgoCDAgentImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse ArgoCDAgentImage: %w", err)
-		}
-
-		// Set up argocdAgent values
-		argocdAgent := map[string]interface{}{
-			"image": agentImage,
-			"tag":   agentTag,
-		}
-
-		// Set server connection details
-		if r.ArgoCDAgentServerAddress != "" {
-			argocdAgent["serverAddress"] = r.ArgoCDAgentServerAddress
-		}
-		if r.ArgoCDAgentServerPort != "" {
-			argocdAgent["serverPort"] = r.ArgoCDAgentServerPort
-		}
-		if r.ArgoCDAgentMode != "" {
-			argocdAgent["mode"] = r.ArgoCDAgentMode
-		}
-
-		// Set up global values for argocd-agent chart
-		global := map[string]interface{}{
-			"argocdAgent": argocdAgent,
-			"proxyConfig": map[string]interface{}{
-				"HTTP_PROXY":  r.HTTP_PROXY,
-				"HTTPS_PROXY": r.HTTPS_PROXY,
-				"NO_PROXY":    r.NO_PROXY,
-			},
-		}
-		values["global"] = global
 	}
 
 	// Set up release options
@@ -276,6 +242,7 @@ func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, nam
 	}
 
 	// Set up global values for openshift-gitops-dependency chart
+	// Note: ArgoCD CR is managed by OCM Policy from hub cluster, not by this chart
 	global := map[string]interface{}{
 		"application_controller": map[string]interface{}{
 			"image": gitopsImage,
@@ -386,10 +353,6 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 	obj.SetLabels(labels)
 
 	switch kind {
-	case "ArgoCD":
-		if name == "openshift-gitops" {
-			return r.handleArgoCDManifest(obj)
-		}
 	case "ServiceAccount":
 		switch name {
 		case "default":
@@ -463,6 +426,27 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	klog.Infof("Updating %s/%s %s", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 	return r.Update(context.TODO(), obj)
+}
+
+// crdExists checks if a CRD already exists in the cluster
+func (r *GitopsAddonReconciler) crdExists(resource, apiVersion string) bool {
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(r.Config)
+	if err != nil {
+		return false
+	}
+
+	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(apiVersion)
+	if err != nil {
+		return false
+	}
+
+	for _, apiResource := range apiResourceList.APIResources {
+		if apiResource.Name == resource {
+			return true
+		}
+	}
+
+	return false
 }
 
 // applyCRDIfNotExists applies a CRD only if it doesn't already exist

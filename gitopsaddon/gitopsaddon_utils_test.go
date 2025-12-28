@@ -32,7 +32,9 @@ import (
 
 // Test embedded file system for tests
 //
-//go:embed charts/**
+//go:embed charts/openshift-gitops-operator/**
+//go:embed charts/openshift-gitops-dependency/**
+//go:embed charts/dep-crds/**
 var testFS embed.FS
 
 func TestParseImageReference(t *testing.T) {

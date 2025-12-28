@@ -4,6 +4,8 @@ nameOverride: openshift-gitops-dependency
 fullnameOverride: openshift-gitops-dependency
 
 global: 
+  # Note: ArgoCD CR is now managed by OCM Policy from hub cluster
+  # These values are kept for other templates (service accounts, etc.)
   application_controller: 
     image: ""
     tag: ""

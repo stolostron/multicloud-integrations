@@ -165,13 +165,29 @@ else
   echo "✓ Principal pods are ready on hub"
 fi
 
-kubectl --context ${SPOKE_CONTEXT} wait --for=condition=Ready --timeout=120s \
-  pod -l app.kubernetes.io/name=argocd-agent-agent -n ${GITOPS_NAMESPACE} || {
-  echo "✗ Agent pods not ready"
-  kubectl --context ${SPOKE_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
-  exit 1
-}
-echo "✓ Agent pods are ready on managed cluster"
+# Wait for agent deployment on managed cluster (operator creates openshift-gitops-agent-agent)
+for i in {1..30}; do
+  if kubectl --context ${SPOKE_CONTEXT} get deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    kubectl --context ${SPOKE_CONTEXT} rollout status deployment/openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} --timeout=120s || {
+      echo "✗ Agent deployment rollout failed"
+      kubectl --context ${SPOKE_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
+      kubectl --context ${SPOKE_CONTEXT} describe deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE}
+      exit 1
+    }
+    echo "✓ Agent pods are ready on managed cluster"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "✗ Agent deployment not found after 30 attempts"
+    echo "  Note: Agent deployment is only created when argoCDAgent.enabled=true in GitOpsCluster"
+    echo "  Checking ArgoCD CR on managed cluster..."
+    kubectl --context ${SPOKE_CONTEXT} get argocd openshift-gitops -n ${GITOPS_NAMESPACE} -o yaml
+    kubectl --context ${SPOKE_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
+    exit 1
+  fi
+  echo "  Waiting for agent deployment... (attempt $i/30)"
+  sleep 5
+done
 
 echo ""
 echo "========================================="

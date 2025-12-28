@@ -70,6 +70,37 @@ echo "Step 5: Applying ClusterManagementAddon and default AddOnTemplate..."
 kubectl apply -f gitopsaddon/addonTemplates/clusterManagementAddon.yaml --context ${HUB_CONTEXT}
 kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml --context ${HUB_CONTEXT}
 
+# Step 5.5: Install governance-policy-framework (required for ArgoCD Policy)
+echo ""
+echo "Step 5.5: Installing governance-policy-framework..."
+clusteradm install hub-addon --names governance-policy-framework 2>&1 || {
+  echo "  Warning: Failed to install governance-policy-framework hub addon"
+}
+echo "  Waiting for governance-policy-propagator to be ready..."
+kubectl wait --for=condition=available --timeout=180s deployment/governance-policy-propagator -n open-cluster-management --context ${HUB_CONTEXT} 2>/dev/null || {
+  echo "  Warning: governance-policy-propagator not ready"
+}
+echo "  Enabling governance-policy-framework and config-policy-controller on cluster1..."
+clusteradm addon enable --names governance-policy-framework --clusters cluster1 2>&1 || {
+  echo "  Warning: Failed to enable governance-policy-framework on cluster1"
+}
+clusteradm addon enable --names config-policy-controller --clusters cluster1 2>&1 || {
+  echo "  Warning: Failed to enable config-policy-controller on cluster1"
+}
+echo "  Waiting for policy addons to be ready on cluster1..."
+for i in {1..60}; do
+  POD_COUNT=$(kubectl --context ${SPOKE_CONTEXT} get pods -n open-cluster-management-agent-addon -l app=governance-policy-framework --no-headers 2>/dev/null | grep Running | wc -l)
+  if [ "$POD_COUNT" -gt 0 ]; then
+    echo "  ✓ governance-policy-framework addon running on cluster1"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  Warning: governance-policy-framework addon not running on cluster1"
+    break
+  fi
+  sleep 2
+done
+
 # Step 6: Install OLM on managed cluster
 echo ""
 echo "========================================="

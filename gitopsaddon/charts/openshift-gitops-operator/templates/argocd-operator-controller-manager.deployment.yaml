@@ -32,9 +32,9 @@ spec:
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: '*'
         - name: BACKEND_IMAGE
-          value: {{ printf "%s@%s" .Values.global.gitops_service.image .Values.global.gitops_service.tag }}
+          value: {{ if hasPrefix "sha256:" .Values.global.gitops_service.tag }}{{ printf "%s@%s" .Values.global.gitops_service.image .Values.global.gitops_service.tag }}{{ else }}{{ printf "%s:%s" .Values.global.gitops_service.image .Values.global.gitops_service.tag }}{{ end }}
         - name: GITOPS_CONSOLE_PLUGIN_IMAGE
-          value: {{ printf "%s@%s" .Values.global.gitops_console_plugin.image .Values.global.gitops_console_plugin.tag }}
+          value: {{ if hasPrefix "sha256:" .Values.global.gitops_console_plugin.tag }}{{ printf "%s@%s" .Values.global.gitops_console_plugin.image .Values.global.gitops_console_plugin.tag }}{{ else }}{{ printf "%s:%s" .Values.global.gitops_console_plugin.image .Values.global.gitops_console_plugin.tag }}{{ end }}
         {{- if .Values.global.proxyConfig.HTTP_PROXY }}
         - name: HTTP_PROXY
           value: {{ .Values.global.proxyConfig.HTTP_PROXY }}
@@ -47,7 +47,7 @@ spec:
         - name: NO_PROXY
           value: {{ .Values.global.proxyConfig.NO_PROXY }}
         {{- end }}
-        image: {{ printf "%s@%s" .Values.global.openshift_gitops_operator.image .Values.global.openshift_gitops_operator.tag }}
+        image: {{ if hasPrefix "sha256:" .Values.global.openshift_gitops_operator.tag }}{{ printf "%s@%s" .Values.global.openshift_gitops_operator.image .Values.global.openshift_gitops_operator.tag }}{{ else }}{{ printf "%s:%s" .Values.global.openshift_gitops_operator.image .Values.global.openshift_gitops_operator.tag }}{{ end }}
         livenessProbe:
           httpGet:
             path: /healthz
