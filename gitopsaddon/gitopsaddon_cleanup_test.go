@@ -41,16 +41,12 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
 
 	tests := []struct {
-		name             string
-		gitopsOperatorNS string
-		gitopsNS         string
-		setupObjects     []client.Object
-		expectError      bool
+		name         string
+		setupObjects []client.Object
+		expectError  bool
 	}{
 		{
-			name:             "successful_uninstall_with_argocd_cr",
-			gitopsOperatorNS: "test-operator-ns",
-			gitopsNS:         "test-gitops-ns",
+			name: "successful_uninstall_with_argocd_cr",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
@@ -66,12 +62,12 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-gitops-ns",
+						Name: GitOpsNamespace,
 					},
 				},
 				&unstructured.Unstructured{
@@ -79,8 +75,8 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 						"apiVersion": "argoproj.io/v1beta1",
 						"kind":       "ArgoCD",
 						"metadata": map[string]interface{}{
-							"name":      "openshift-gitops",
-							"namespace": "test-gitops-ns",
+							"name":      GitOpsNamespace,
+							"namespace": GitOpsNamespace,
 						},
 					},
 				},
@@ -88,9 +84,7 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:             "uninstall_without_argocd_cr",
-			gitopsOperatorNS: "test-operator-ns",
-			gitopsNS:         "test-gitops-ns",
+			name: "uninstall_without_argocd_cr",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
@@ -106,12 +100,12 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-gitops-ns",
+						Name: GitOpsNamespace,
 					},
 				},
 			},
@@ -134,9 +128,7 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 
 			// Create reconciler
 			reconciler := &GitopsAddonCleanupReconciler{
-				Client:           testClient,
-				GitopsOperatorNS: tt.gitopsOperatorNS,
-				GitopsNS:         tt.gitopsNS,
+				Client: testClient,
 			}
 
 			// Call uninstallGitopsAgent
@@ -153,8 +145,8 @@ func TestGitopsAddonCleanupReconciler_uninstallGitopsAgent(t *testing.T) {
 			argoCD.SetAPIVersion("argoproj.io/v1beta1")
 			argoCD.SetKind("ArgoCD")
 			err = testClient.Get(context.TODO(), types.NamespacedName{
-				Name:      "openshift-gitops",
-				Namespace: tt.gitopsNS,
+				Name:      GitOpsNamespace,
+				Namespace: GitOpsNamespace,
 			}, argoCD)
 			g.Expect(err).To(gomega.HaveOccurred()) // Should be NotFound
 
@@ -172,17 +164,13 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 	t.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
 
 	tests := []struct {
-		name             string
-		gitopsOperatorNS string
-		gitopsNS         string
-		setupObjects     []client.Object
-		expectError      bool
-		errorCheck       func(error) bool
+		name         string
+		setupObjects []client.Object
+		expectError  bool
+		errorCheck   func(error) bool
 	}{
 		{
-			name:             "successful_uninstall_with_argocd_cr",
-			gitopsOperatorNS: "test-operator-ns",
-			gitopsNS:         "test-gitops-ns",
+			name: "successful_uninstall_with_argocd_cr",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
@@ -198,12 +186,12 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-gitops-ns",
+						Name: GitOpsNamespace,
 					},
 				},
 				&unstructured.Unstructured{
@@ -211,8 +199,8 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 						"apiVersion": "argoproj.io/v1beta1",
 						"kind":       "ArgoCD",
 						"metadata": map[string]interface{}{
-							"name":      "openshift-gitops",
-							"namespace": "test-gitops-ns",
+							"name":      GitOpsNamespace,
+							"namespace": GitOpsNamespace,
 						},
 					},
 				},
@@ -220,9 +208,7 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:             "uninstall_without_argocd_cr",
-			gitopsOperatorNS: "test-operator-ns",
-			gitopsNS:         "test-gitops-ns",
+			name: "uninstall_without_argocd_cr",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
@@ -238,21 +224,19 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-gitops-ns",
+						Name: GitOpsNamespace,
 					},
 				},
 			},
 			expectError: false,
 		},
 		{
-			name:             "uninstall_with_operator_resources",
-			gitopsOperatorNS: "test-operator-ns",
-			gitopsNS:         "test-gitops-ns",
+			name: "uninstall_with_operator_resources",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
@@ -268,7 +252,7 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				},
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.Namespace{
@@ -279,7 +263,7 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				&appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-deployment",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -288,7 +272,7 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-service",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -329,7 +313,7 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 				Build()
 
 			// Call uninstallGitopsAgentInternal
-			err = uninstallGitopsAgentInternal(context.TODO(), testClient, tt.gitopsOperatorNS, tt.gitopsNS)
+			err = uninstallGitopsAgentInternal(context.TODO(), testClient, GitOpsOperatorNamespace)
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -345,8 +329,8 @@ func TestUninstallGitopsAgentInternal(t *testing.T) {
 			argoCD.SetAPIVersion("argoproj.io/v1beta1")
 			argoCD.SetKind("ArgoCD")
 			err = testClient.Get(context.TODO(), types.NamespacedName{
-				Name:      "openshift-gitops",
-				Namespace: tt.gitopsNS,
+				Name:      GitOpsNamespace,
+				Namespace: GitOpsNamespace,
 			}, argoCD)
 			g.Expect(err).To(gomega.HaveOccurred()) // Should be NotFound
 
@@ -388,7 +372,7 @@ func TestUninstallGitopsAgentInternal_WaitTimeout(t *testing.T) {
 			},
 			&corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-operator-ns",
+					Name: GitOpsOperatorNamespace,
 				},
 			},
 			&corev1.Namespace{
@@ -402,7 +386,7 @@ func TestUninstallGitopsAgentInternal_WaitTimeout(t *testing.T) {
 	// Call uninstallGitopsAgentInternal with non-existent ArgoCD CR
 	// This should complete quickly without waiting
 	start := time.Now()
-	err = uninstallGitopsAgentInternal(context.TODO(), testClient, "test-operator-ns", "test-gitops-ns")
+	err = uninstallGitopsAgentInternal(context.TODO(), testClient, GitOpsOperatorNamespace)
 	elapsed := time.Since(start)
 
 	g.Expect(err).ToNot(gomega.HaveOccurred())
@@ -418,25 +402,23 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name             string
-		gitopsOperatorNS string
-		setupObjects     []client.Object
-		expectDeleted    []types.NamespacedName
-		expectRemaining  []types.NamespacedName
+		name            string
+		setupObjects    []client.Object
+		expectDeleted   []types.NamespacedName
+		expectRemaining []types.NamespacedName
 	}{
 		{
-			name:             "delete_deployment_and_service",
-			gitopsOperatorNS: "test-operator-ns",
+			name: "delete_deployment_and_service",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-deployment",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -445,7 +427,7 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				&corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-service",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -453,23 +435,22 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				},
 			},
 			expectDeleted: []types.NamespacedName{
-				{Name: "test-deployment", Namespace: "test-operator-ns"},
-				{Name: "test-service", Namespace: "test-operator-ns"},
+				{Name: "test-deployment", Namespace: GitOpsOperatorNamespace},
+				{Name: "test-service", Namespace: GitOpsOperatorNamespace},
 			},
 		},
 		{
-			name:             "delete_rbac_resources",
-			gitopsOperatorNS: "test-operator-ns",
+			name: "delete_rbac_resources",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&rbacv1.Role{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-role",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -478,7 +459,7 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				&rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-rolebinding",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -486,17 +467,16 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				},
 			},
 			expectDeleted: []types.NamespacedName{
-				{Name: "test-role", Namespace: "test-operator-ns"},
-				{Name: "test-rolebinding", Namespace: "test-operator-ns"},
+				{Name: "test-role", Namespace: GitOpsOperatorNamespace},
+				{Name: "test-rolebinding", Namespace: GitOpsOperatorNamespace},
 			},
 		},
 		{
-			name:             "delete_cluster_scoped_resources",
-			gitopsOperatorNS: "test-operator-ns",
+			name: "delete_cluster_scoped_resources",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&rbacv1.ClusterRole{
@@ -522,25 +502,24 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 			},
 		},
 		{
-			name:             "skip_resources_without_label",
-			gitopsOperatorNS: "test-operator-ns",
+			name: "skip_resources_without_label",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "keep-deployment",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						// No gitopsaddon label
 					},
 				},
 				&appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "delete-deployment",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -548,25 +527,24 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				},
 			},
 			expectDeleted: []types.NamespacedName{
-				{Name: "delete-deployment", Namespace: "test-operator-ns"},
+				{Name: "delete-deployment", Namespace: GitOpsOperatorNamespace},
 			},
 			expectRemaining: []types.NamespacedName{
-				{Name: "keep-deployment", Namespace: "test-operator-ns"},
+				{Name: "keep-deployment", Namespace: GitOpsOperatorNamespace},
 			},
 		},
 		{
-			name:             "delete_configmap_and_serviceaccount",
-			gitopsOperatorNS: "test-operator-ns",
+			name: "delete_configmap_and_serviceaccount",
 			setupObjects: []client.Object{
 				&corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-operator-ns",
+						Name: GitOpsOperatorNamespace,
 					},
 				},
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-configmap",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -575,7 +553,7 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				&corev1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-serviceaccount",
-						Namespace: "test-operator-ns",
+						Namespace: GitOpsOperatorNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/gitopsaddon": "true",
 						},
@@ -583,8 +561,8 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				},
 			},
 			expectDeleted: []types.NamespacedName{
-				{Name: "test-configmap", Namespace: "test-operator-ns"},
-				{Name: "test-serviceaccount", Namespace: "test-operator-ns"},
+				{Name: "test-configmap", Namespace: GitOpsOperatorNamespace},
+				{Name: "test-serviceaccount", Namespace: GitOpsOperatorNamespace},
 			},
 		},
 	}
@@ -603,7 +581,7 @@ func TestDeleteOperatorResourcesInternal(t *testing.T) {
 				Build()
 
 			// Call deleteOperatorResources
-			deleteOperatorResources(context.TODO(), testClient, tt.gitopsOperatorNS)
+			deleteOperatorResources(context.TODO(), testClient, GitOpsOperatorNamespace)
 
 			// Verify expected deletions
 			for _, key := range tt.expectDeleted {
@@ -658,14 +636,14 @@ func TestDeleteOperatorResourcesInternal_NoResources(t *testing.T) {
 		WithObjects(
 			&corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-operator-ns",
+					Name: GitOpsOperatorNamespace,
 				},
 			},
 		).
 		Build()
 
 	// This should complete without error
-	err = deleteOperatorResources(context.TODO(), testClient, "test-operator-ns")
+	err = deleteOperatorResources(context.TODO(), testClient, GitOpsOperatorNamespace)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 }
 
@@ -682,13 +660,13 @@ func TestDeleteOperatorResourcesInternal_PartialFailure(t *testing.T) {
 		WithObjects(
 			&corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-operator-ns",
+					Name: GitOpsOperatorNamespace,
 				},
 			},
 			&appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-deployment-1",
-					Namespace: "test-operator-ns",
+					Namespace: GitOpsOperatorNamespace,
 					Labels: map[string]string{
 						"apps.open-cluster-management.io/gitopsaddon": "true",
 					},
@@ -697,7 +675,7 @@ func TestDeleteOperatorResourcesInternal_PartialFailure(t *testing.T) {
 			&appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-deployment-2",
-					Namespace: "test-operator-ns",
+					Namespace: GitOpsOperatorNamespace,
 					Labels: map[string]string{
 						"apps.open-cluster-management.io/gitopsaddon": "true",
 					},
@@ -707,7 +685,7 @@ func TestDeleteOperatorResourcesInternal_PartialFailure(t *testing.T) {
 		Build()
 
 	// This should complete without panic even if some deletions fail
-	err = deleteOperatorResources(context.TODO(), testClient, "test-operator-ns")
+	err = deleteOperatorResources(context.TODO(), testClient, GitOpsOperatorNamespace)
 	// May return error if timeout reached, but should not panic
 	_ = err
 }
@@ -936,7 +914,7 @@ func TestUninstallGitopsAgentInternal_PauseMarkerRemains(t *testing.T) {
 			},
 			&corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-operator-ns",
+					Name: GitOpsOperatorNamespace,
 				},
 			},
 			&corev1.Namespace{
@@ -949,7 +927,7 @@ func TestUninstallGitopsAgentInternal_PauseMarkerRemains(t *testing.T) {
 					"apiVersion": "argoproj.io/v1beta1",
 					"kind":       "ArgoCD",
 					"metadata": map[string]interface{}{
-						"name":      "openshift-gitops",
+						"name":      GitOpsNamespace,
 						"namespace": "test-gitops-ns",
 					},
 				},
@@ -962,7 +940,7 @@ func TestUninstallGitopsAgentInternal_PauseMarkerRemains(t *testing.T) {
 	g.Expect(paused).To(gomega.BeFalse(), "Pause marker should not exist initially")
 
 	// Call uninstallGitopsAgentInternal
-	err = uninstallGitopsAgentInternal(context.TODO(), testClient, "test-operator-ns", "test-gitops-ns")
+	err = uninstallGitopsAgentInternal(context.TODO(), testClient, GitOpsOperatorNamespace)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	// CRITICAL: Verify pause marker remains in place after cleanup to prevent reinstallation

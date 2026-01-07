@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -1053,12 +1054,10 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsOperatorImage:     "operator-image:v1.0",
-						GitOpsImage:             "gitops-image:v1.0",
-						RedisImage:              "redis-image:v1.0",
-						GitOpsOperatorNamespace: "gitops-operator-ns",
-						GitOpsNamespace:         "gitops-ns",
-						ReconcileScope:          "All-Namespaces",
+						GitOpsOperatorImage: "operator-image:v1.0",
+						GitOpsImage:         "gitops-image:v1.0",
+						RedisImage:          "redis-image:v1.0",
+						ReconcileScope:      "All-Namespaces",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 							Enabled:       boolTruePtr,
 							Image:         "agent-image:v1.0",
@@ -1077,8 +1076,8 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
 				"GITOPS_IMAGE":                "gitops-image:v1.0",
 				"REDIS_IMAGE":                 "redis-image:v1.0",
-				"GITOPS_OPERATOR_NAMESPACE":   "gitops-operator-ns",
-				"GITOPS_NAMESPACE":            "gitops-ns",
+				"GITOPS_OPERATOR_NAMESPACE":   utils.GitOpsOperatorNamespace,
+				"GITOPS_NAMESPACE":            utils.GitOpsNamespace,
 				"RECONCILE_SCOPE":             "All-Namespaces",
 				"ARGOCD_AGENT_IMAGE":          "agent-image:v1.0",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
@@ -1107,8 +1106,8 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 			expectedVars: map[string]string{
 				"ARGOCD_AGENT_ENABLED":        "true",
 				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
-				"GITOPS_OPERATOR_NAMESPACE":   "",
-				"GITOPS_NAMESPACE":            "",
+				"GITOPS_OPERATOR_NAMESPACE":   utils.GitOpsOperatorNamespace,
+				"GITOPS_NAMESPACE":            utils.GitOpsNamespace,
 				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
 			},
 		},

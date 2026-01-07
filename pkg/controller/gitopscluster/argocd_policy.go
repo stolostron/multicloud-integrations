@@ -25,6 +25,16 @@ import (
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 )
 
+// Default images for ArgoCD components when OLM subscription mode is disabled
+// and no custom images are specified in GitOpsCluster spec.
+// These are the official Red Hat registry images, pinned to specific SHA digests.
+// Note: registry.redhat.io requires authentication, so for public e2e tests,
+// custom images should be specified in the GitOpsCluster spec.
+const (
+	DefaultGitOpsImage = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
+	DefaultRedisImage  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
+)
+
 // ErrPolicyFrameworkNotAvailable is returned when the governance-policy-framework is not installed.
 var ErrPolicyFrameworkNotAvailable = fmt.Errorf("governance-policy-framework is not installed: Policy CRD not found")
 
@@ -139,6 +149,8 @@ subjects:
 // generateArgoCDPolicyYaml generates the Policy YAML wrapping the ArgoCD CR.
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
 // They must be manually deleted by the user.
+// Note: pruneObjectBehavior is set to None to orphan the ArgoCD CR when the policy is deleted.
+// The ArgoCD CR cleanup is handled by the gitops addon code.
 func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	argoCDSpec := generateArgoCDSpec(gitOpsCluster)
 
@@ -162,7 +174,7 @@ spec:
         metadata:
           name: %s
         spec:
-          pruneObjectBehavior: DeleteIfCreated
+          pruneObjectBehavior: None
           remediationAction: enforce
           severity: medium
           object-templates:
@@ -184,6 +196,10 @@ spec:
 }
 
 // generateArgoCDSpec generates the ArgoCD spec based on GitOpsCluster configuration.
+// The spec is kept minimal, relying on operator defaults for most settings.
+// Image override behavior:
+//   - If OLM subscription is enabled: No image override (OLM handles it)
+//   - If OLM subscription is disabled: Use images from GitOpsCluster spec, or defaults if not specified
 func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	// Check if ArgoCD agent is enabled
 	argoCDAgentEnabled := false
@@ -191,96 +207,49 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 		argoCDAgentEnabled = *gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
-	// Get image configurations
-	gitOpsImage := ""
-	gitOpsImageTag := ""
-	redisImage := ""
-	redisTag := ""
-	reconcileScope := "All-Namespaces"
+	// Check if OLM subscription mode is enabled
+	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(&gitOpsCluster)
 
-	if gitOpsCluster.Spec.GitOpsAddon != nil {
-		if gitOpsCluster.Spec.GitOpsAddon.GitOpsImage != "" {
-			image, tag := parseImageRef(gitOpsCluster.Spec.GitOpsAddon.GitOpsImage)
-			gitOpsImage = image
-			gitOpsImageTag = tag
-		}
-		if gitOpsCluster.Spec.GitOpsAddon.RedisImage != "" {
-			image, tag := parseImageRef(gitOpsCluster.Spec.GitOpsAddon.RedisImage)
-			redisImage = image
-			redisTag = tag
-		}
-		if gitOpsCluster.Spec.GitOpsAddon.ReconcileScope != "" {
-			reconcileScope = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope
-		}
-	}
-
-	// Build controller env
-	controllerEnv := ""
-	if reconcileScope == "All-Namespaces" {
-		controllerEnv = `
-  env:
-    - name: ARGOCD_APPLICATION_NAMESPACES
-      value: '*'`
-	}
-
-	// Build base spec
-	spec := fmt.Sprintf(`controller:
-  enabled: true%s`, controllerEnv)
-
-	// Add image if specified
-	if gitOpsImage != "" {
-		spec = fmt.Sprintf("image: %s\nversion: %s\n%s", gitOpsImage, gitOpsImageTag, spec)
-	}
-
-	// Add redis configuration
-	if redisImage != "" {
-		spec += fmt.Sprintf(`
-redis:
-  enabled: true
-  image: %s
-  version: %s`, redisImage, redisTag)
-	} else {
-		spec += `
-redis:
-  enabled: true`
-	}
-
-	// Add repo configuration
-	if gitOpsImage != "" {
-		spec += fmt.Sprintf(`
-repo:
-  enabled: true
-  image: %s
-  version: %s`, gitOpsImage, gitOpsImageTag)
-	} else {
-		spec += `
-repo:
-  enabled: true`
-	}
-
-	// Add RBAC configuration
-	spec += `
-rbac:
-  defaultPolicy: "role:admin"
-  policy: |
-    g, cluster-admins, role:admin`
-
-	// Disable unused components
-	spec += `
-applicationSet:
-  enabled: false
-grafana:
-  enabled: false
-ha:
-  enabled: false
-server:
-  enabled: false
-monitoring:
-  enabled: false
-notifications:
-  enabled: false
-prometheus:
+	// Base spec: disable server (controller, repo, redis are enabled by default)
+	spec := `server:
   enabled: false`
+
+	// Add image override only when OLM subscription is disabled
+	if !olmSubscriptionEnabled {
+		// Get image configurations - use defaults if not specified
+		gitOpsImage := DefaultGitOpsImage
+		redisImage := DefaultRedisImage
+
+		if gitOpsCluster.Spec.GitOpsAddon != nil {
+			if gitOpsCluster.Spec.GitOpsAddon.GitOpsImage != "" {
+				gitOpsImage = gitOpsCluster.Spec.GitOpsAddon.GitOpsImage
+			}
+			if gitOpsCluster.Spec.GitOpsAddon.RedisImage != "" {
+				redisImage = gitOpsCluster.Spec.GitOpsAddon.RedisImage
+			}
+		}
+
+		// Parse image and version
+		gitOpsImageRepo, gitOpsImageTag := parseImageRef(gitOpsImage)
+		redisImageRepo, redisImageTag := parseImageRef(redisImage)
+
+		// Add image and version to spec
+		spec = fmt.Sprintf(`image: %s
+version: %s
+%s`, gitOpsImageRepo, gitOpsImageTag, spec)
+
+		// Add redis image configuration
+		spec += fmt.Sprintf(`
+redis:
+  image: %s
+  version: %s`, redisImageRepo, redisImageTag)
+
+		// Add repo image configuration (uses same image as controller)
+		spec += fmt.Sprintf(`
+repo:
+  image: %s
+  version: %s`, gitOpsImageRepo, gitOpsImageTag)
+	}
 
 	// Add ArgoCD agent configuration if enabled
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
@@ -301,29 +270,17 @@ argoCDAgent:
   agent:
     enabled: true
     image: %s
-    creds: "mtls:any"
-    logLevel: "info"
-    logFormat: "text"
     client:
       principalServerAddress: "%s"
       principalServerPort: "%s"
-      mode: "%s"
-      enableWebSocket: false
-      enableCompression: false
-      keepAliveInterval: "30s"
-    tls:
-      secretName: "argocd-agent-client-tls"
-      rootCASecretName: "argocd-agent-ca"
-      insecure: false
-    redis:
-      serverAddress: "openshift-gitops-redis:6379"`,
+      mode: "%s"`,
 			agentImage, serverAddress, serverPort, mode)
 	}
 
 	return spec
 }
 
-// parseImageRef parses an image reference into image and tag components.
+// parseImageRef parses an image reference into repository and tag/digest components.
 func parseImageRef(imageRef string) (string, string) {
 	// Handle digest format (image@sha256:...)
 	if strings.Contains(imageRef, "@") {
@@ -332,8 +289,15 @@ func parseImageRef(imageRef string) (string, string) {
 	}
 	// Handle tag format (image:tag)
 	if strings.Contains(imageRef, ":") {
-		parts := strings.SplitN(imageRef, ":", 2)
-		return parts[0], parts[1]
+		// Find the last colon - handles registry URLs with ports like localhost:5000/image:tag
+		lastColonIdx := strings.LastIndex(imageRef, ":")
+		beforeColon := imageRef[:lastColonIdx]
+		afterColon := imageRef[lastColonIdx+1:]
+
+		// Check if this looks like a tag (no slashes after the colon)
+		if !strings.Contains(afterColon, "/") {
+			return beforeColon, afterColon
+		}
 	}
 	// No tag or digest, use latest
 	return imageRef, "latest"

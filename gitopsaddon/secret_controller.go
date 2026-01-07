@@ -36,7 +36,6 @@ import (
 
 const (
 	SourceNamespace  = "open-cluster-management-agent-addon"
-	TargetNamespace  = "openshift-gitops"
 	TargetSecretName = "argocd-agent-client-tls" // #nosec G101
 )
 
@@ -118,10 +117,10 @@ var argoCDAgentSecretPredicateFunc = predicate.TypedFuncs[*corev1.Secret]{
 // targetNamespacePredicateFunc filters events for the target namespace
 var targetNamespacePredicateFunc = predicate.TypedFuncs[*corev1.Namespace]{
 	CreateFunc: func(e event.TypedCreateEvent[*corev1.Namespace]) bool {
-		return e.Object.Name == TargetNamespace
+		return e.Object.Name == GitOpsNamespace
 	},
 	DeleteFunc: func(e event.TypedDeleteEvent[*corev1.Namespace]) bool {
-		return e.Object.Name == TargetNamespace
+		return e.Object.Name == GitOpsNamespace
 	},
 }
 
@@ -132,7 +131,7 @@ func isTargetSecret(secret *corev1.Secret) bool {
 
 // namespaceToSecretMapper maps namespace events to secret reconcile requests
 func namespaceToSecretMapper(ctx context.Context, obj *corev1.Namespace) []reconcile.Request {
-	if obj.Name == TargetNamespace {
+	if obj.Name == GitOpsNamespace {
 		// When the target namespace is created or deleted, trigger reconciliation of the source secret
 		return []reconcile.Request{
 			{
@@ -159,15 +158,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 
 	// Check if target namespace exists
 	targetNs := &corev1.Namespace{}
-	err := r.Get(ctx, types.NamespacedName{Name: TargetNamespace}, targetNs)
+	err := r.Get(ctx, types.NamespacedName{Name: GitOpsNamespace}, targetNs)
 
 	if err != nil {
 		if errors.IsNotFound(err) {
-			klog.Infof("Target namespace %s does not exist, skipping secret copy", TargetNamespace)
+			klog.Infof("Target namespace %s does not exist, skipping secret copy", GitOpsNamespace)
 			return reconcile.Result{}, nil
 		}
 
-		klog.Errorf("Failed to check target namespace %s: %v", TargetNamespace, err)
+		klog.Errorf("Failed to check target namespace %s: %v", GitOpsNamespace, err)
 
 		return reconcile.Result{}, err
 	}
@@ -190,7 +189,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 	// Always create or update the target secret since reconciliation was triggered
 	targetSecretKey := types.NamespacedName{
 		Name:      TargetSecretName,
-		Namespace: TargetNamespace,
+		Namespace: GitOpsNamespace,
 	}
 
 	klog.Infof("Creating/updating target secret %s", targetSecretKey)
@@ -204,7 +203,7 @@ func (r *SecretReconciler) handleSourceSecretDeletion(ctx context.Context) (reco
 	targetSecret := &corev1.Secret{}
 	targetSecretKey := types.NamespacedName{
 		Name:      TargetSecretName,
-		Namespace: TargetNamespace,
+		Namespace: GitOpsNamespace,
 	}
 
 	err := r.Get(ctx, targetSecretKey, targetSecret)
@@ -244,7 +243,7 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 	targetSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		},
 		Type: secretType,
 		Data: make(map[string][]byte),
@@ -262,7 +261,7 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 		if errors.IsAlreadyExists(err) {
 			// Secret exists, update it instead
 			existingSecret := &corev1.Secret{}
-			err = r.Get(ctx, types.NamespacedName{Name: TargetSecretName, Namespace: TargetNamespace}, existingSecret)
+			err = r.Get(ctx, types.NamespacedName{Name: TargetSecretName, Namespace: GitOpsNamespace}, existingSecret)
 
 			if err != nil {
 				klog.Errorf("Failed to get existing target secret: %v", err)
@@ -279,13 +278,13 @@ func (r *SecretReconciler) createOrUpdateSecretCopy(ctx context.Context, sourceS
 				return reconcile.Result{}, err
 			}
 
-			klog.Infof("Successfully updated secret %s in namespace %s", TargetSecretName, TargetNamespace)
+			klog.Infof("Successfully updated secret %s in namespace %s", TargetSecretName, GitOpsNamespace)
 		} else {
 			klog.Errorf("Failed to create target secret: %v", err)
 			return reconcile.Result{}, err
 		}
 	} else {
-		klog.Infof("Successfully created secret %s in namespace %s", TargetSecretName, TargetNamespace)
+		klog.Infof("Successfully created secret %s in namespace %s", TargetSecretName, GitOpsNamespace)
 	}
 
 	return reconcile.Result{}, nil

@@ -178,7 +178,7 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 
 	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
 	if argoNamespace == "" {
-		argoNamespace = "openshift-gitops"
+		argoNamespace = utils.GitOpsNamespace
 	}
 
 	// Find the principal service

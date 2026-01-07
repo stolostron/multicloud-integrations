@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -81,7 +82,7 @@ func TestJWTSecretEdgeCases(t *testing.T) {
 				// Verify secret was created in correct namespace
 				expectedNamespace := tt.gitopsNamespace
 				if expectedNamespace == "" {
-					expectedNamespace = "openshift-gitops"
+					expectedNamespace = utils.GitOpsNamespace
 				}
 
 				secret := &v1.Secret{}
@@ -183,12 +184,12 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 	}{
 		{
 			name:            "create Redis secret from existing redis-initial-password secret",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"admin.password": []byte("test-redis-password"),
@@ -212,12 +213,12 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 		},
 		{
 			name:            "Redis secret already exists - no error",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "argocd-redis",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"auth": []byte("existing-password"),
@@ -242,7 +243,7 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"admin.password": []byte("test-redis-password"),
@@ -253,7 +254,7 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 				secret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-redis",
-					Namespace: "openshift-gitops", // Should use default namespace
+					Namespace: utils.GitOpsNamespace, // Should use default namespace
 				}, secret)
 				assert.NoError(t, err)
 				assert.Equal(t, []byte("test-redis-password"), secret.Data["auth"])
@@ -261,18 +262,18 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 		},
 		{
 			name:            "no redis-initial-password secret found - should return error",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{},
 			expectedError:   true,
 		},
 		{
 			name:            "redis-initial-password secret exists but missing admin.password",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"other-field": []byte("other-value"),
@@ -283,12 +284,12 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 		},
 		{
 			name:            "find secret with different prefix but ending with redis-initial-password",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "custom-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"admin.password": []byte("custom-redis-password"),
@@ -307,12 +308,12 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 		},
 		{
 			name:            "multiple redis-initial-password secrets - should use first found",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "first-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"admin.password": []byte("first-password"),
@@ -321,7 +322,7 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "second-redis-initial-password",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"admin.password": []byte("second-password"),
@@ -366,7 +367,7 @@ func TestEnsureArgoCDRedisSecret(t *testing.T) {
 					// Use the actual namespace or default
 					actualNamespace := tt.gitopsNamespace
 					if actualNamespace == "" {
-						actualNamespace = "openshift-gitops"
+						actualNamespace = utils.GitOpsNamespace
 					}
 					tt.validateFunc(t, fakeClient, actualNamespace)
 				}

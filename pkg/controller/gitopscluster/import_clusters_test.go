@@ -27,6 +27,7 @@ import (
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -47,7 +48,7 @@ func TestGetAllManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster1-cluster-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/acm-cluster": "true",
 							"argocd.argoproj.io/secret-type":              "cluster",
@@ -57,7 +58,7 @@ func TestGetAllManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster2-cluster-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/acm-cluster": "true",
 							"argocd.argoproj.io/secret-type":              "cluster",
@@ -67,7 +68,7 @@ func TestGetAllManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "non-acm-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type": "cluster",
 						},
@@ -97,7 +98,7 @@ func TestGetAllManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster2-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/acm-cluster": "true",
 							"argocd.argoproj.io/secret-type":              "cluster",
@@ -151,12 +152,12 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 	}{
 		{
 			name:          "find non-ACM cluster secrets",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "manual-cluster-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type": "cluster",
 						},
@@ -168,7 +169,7 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "acm-cluster-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"apps.open-cluster-management.io/acm-cluster": "true",
 							"argocd.argoproj.io/secret-type":              "cluster",
@@ -185,12 +186,12 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 		},
 		{
 			name:          "secrets without name field",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "secret-without-name",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type": "cluster",
 						},
@@ -200,7 +201,7 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "acm-cluster-secret",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type":              "cluster",
 							"apps.open-cluster-management.io/acm-cluster": "true",
@@ -215,12 +216,12 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 		},
 		{
 			name:          "multiple secrets for same cluster",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster1-secret-1",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type": "cluster",
 						},
@@ -232,7 +233,7 @@ func TestGetAllNonAcmManagedClusterSecretsInArgo(t *testing.T) {
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster1-secret-2",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"argocd.argoproj.io/secret-type": "cluster",
 						},
@@ -290,7 +291,7 @@ func TestCreateManagedClusterSecretInArgo(t *testing.T) {
 	}{
 		{
 			name:          "create blank cluster secret",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			managedClusterSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster-cluster-secret",
@@ -308,7 +309,7 @@ func TestCreateManagedClusterSecretInArgo(t *testing.T) {
 			createBlankClusterSecrets: true,
 			validateFunc: func(t *testing.T, secret *v1.Secret) {
 				assert.Equal(t, "test-cluster-application-manager-cluster-secret", secret.Name)
-				assert.Equal(t, "openshift-gitops", secret.Namespace)
+				assert.Equal(t, utils.GitOpsNamespace, secret.Namespace)
 				assert.Equal(t, "test-cluster", secret.StringData["name"])
 				assert.Equal(t, "https://test-cluster-control-plane", secret.StringData["server"])
 
@@ -319,7 +320,7 @@ func TestCreateManagedClusterSecretInArgo(t *testing.T) {
 		},
 		{
 			name:          "create secret from existing cluster secret",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			managedClusterSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster-cluster-secret",
@@ -343,7 +344,7 @@ func TestCreateManagedClusterSecretInArgo(t *testing.T) {
 			createBlankClusterSecrets: false,
 			validateFunc: func(t *testing.T, secret *v1.Secret) {
 				assert.Equal(t, "test-cluster-cluster-secret", secret.Name)
-				assert.Equal(t, "openshift-gitops", secret.Namespace)
+				assert.Equal(t, utils.GitOpsNamespace, secret.Namespace)
 				assert.NotEmpty(t, secret.StringData["config"])
 				assert.Equal(t, "test-cluster", secret.StringData["name"])
 				assert.Equal(t, "https://api.test-cluster.com:6443", secret.StringData["server"])

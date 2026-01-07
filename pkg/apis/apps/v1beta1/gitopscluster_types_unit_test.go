@@ -428,13 +428,6 @@ func TestArgoCDAgentSpec_DefaultValues(t *testing.T) {
 	assert.Nil(t, agentSpec.PropagateHubCA)
 }
 
-// TestArgoCDAgentSpec_WithUninstall removed - Uninstall field was removed from API
-// Cleanup is now handled via pre-delete hooks in the addon framework
-func TestArgoCDAgentSpec_Removed_WithUninstall(t *testing.T) {
-	// Test removed - Uninstall field no longer exists in API
-	t.Skip("Uninstall field removed from API")
-}
-
 func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 	// Test GitOpsCluster with GitOpsAddon configuration
 	enabled := true
@@ -451,12 +444,10 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 			},
 			GitOpsAddon: &GitOpsAddonSpec{
 				Enabled:                 &enabled,
-				GitOpsOperatorImage:     "operator:v1.0.0",
-				GitOpsImage:             "argocd:v2.0.0",
-				RedisImage:              "redis:v3.0.0",
-				GitOpsOperatorNamespace: "gitops-operator",
-				GitOpsNamespace:         "gitops",
-				ReconcileScope:          "All-Namespaces",
+				GitOpsOperatorImage: "operator:v1.0.0",
+				GitOpsImage:         "argocd:v2.0.0",
+				RedisImage:          "redis:v3.0.0",
+				ReconcileScope:      "All-Namespaces",
 				OverrideExistingConfigs: &enabled,
 				ArgoCDAgent: &ArgoCDAgentSpec{
 					Enabled:        &enabled,
@@ -475,8 +466,6 @@ func TestGitOpsClusterWithGitOpsAddon(t *testing.T) {
 	assert.Equal(t, "operator:v1.0.0", gitopsCluster.Spec.GitOpsAddon.GitOpsOperatorImage)
 	assert.Equal(t, "argocd:v2.0.0", gitopsCluster.Spec.GitOpsAddon.GitOpsImage)
 	assert.Equal(t, "redis:v3.0.0", gitopsCluster.Spec.GitOpsAddon.RedisImage)
-	assert.Equal(t, "gitops-operator", gitopsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace)
-	assert.Equal(t, "gitops", gitopsCluster.Spec.GitOpsAddon.GitOpsNamespace)
 	assert.Equal(t, "All-Namespaces", gitopsCluster.Spec.GitOpsAddon.ReconcileScope)
 	assert.True(t, *gitopsCluster.Spec.GitOpsAddon.OverrideExistingConfigs)
 
@@ -508,13 +497,11 @@ func TestGitOpsClusterDeepCopy(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			GitOpsAddon: &GitOpsAddonSpec{
-				Enabled:                 &[]bool{true}[0],
-				GitOpsOperatorImage:     "quay.io/test/gitops-operator:latest",
-				GitOpsOperatorNamespace: "gitops-system",
-				GitOpsImage:             "quay.io/test/argocd:latest",
-				GitOpsNamespace:         "argocd",
-				RedisImage:              "redis:6.2",
-				ReconcileScope:          "All-Namespaces",
+				Enabled:             &[]bool{true}[0],
+				GitOpsOperatorImage: "quay.io/test/gitops-operator:latest",
+				GitOpsImage:         "quay.io/test/argocd:latest",
+				RedisImage:          "redis:6.2",
+				ReconcileScope:      "All-Namespaces",
 				ArgoCDAgent: &ArgoCDAgentSpec{
 					Enabled:        &[]bool{true}[0],
 					PropagateHubCA: &[]bool{true}[0],

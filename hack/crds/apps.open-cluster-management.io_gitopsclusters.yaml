@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.1
+    controller-gen.kubebuilder.io/version: v0.17.3
   name: gitopsclusters.apps.open-cluster-management.io
 spec:
   group: apps.open-cluster-management.io
@@ -107,18 +107,53 @@ spec:
                     description: GitOpsImage specifies the GitOps (ArgoCD) container
                       image. Default is empty.
                     type: string
-                  gitOpsNamespace:
-                    description: GitOpsNamespace specifies the GitOps namespace. Default
-                      is empty.
-                    type: string
                   gitOpsOperatorImage:
                     description: GitOpsOperatorImage specifies the GitOps operator
                       container image. Default is empty.
                     type: string
-                  gitOpsOperatorNamespace:
-                    description: GitOpsOperatorNamespace specifies the GitOps operator
-                      namespace. Default is empty.
-                    type: string
+                  olmSubscription:
+                    description: |-
+                      OLMSubscription defines the configuration for deploying the full OLM-managed
+                      OpenShift GitOps operator instead of the lightweight helm-based deployment.
+                      This is only supported on OpenShift ManagedClusters with OLM installed.
+                      When enabled, this takes precedence over the helm-based deployment.
+                      Requires gitopsAddon.enabled to be true.
+                    properties:
+                      channel:
+                        description: Channel is the OLM channel. Default is "stable".
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled indicates whether to deploy via OLM Subscription. Default is false.
+                          When enabled, the full OLM-managed OpenShift GitOps operator is deployed
+                          instead of the lightweight helm-based operator.
+                        type: boolean
+                      installPlanApproval:
+                        description: |-
+                          InstallPlanApproval determines if InstallPlans should be automatically approved.
+                          Default is "Automatic".
+                        enum:
+                        - Automatic
+                        - Manual
+                        type: string
+                      name:
+                        description: Name is the name of the Subscription. Default
+                          is "openshift-gitops-operator".
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace for the Subscription.
+                          Default is "openshift-operators".
+                        type: string
+                      source:
+                        description: Source is the CatalogSource name. Default is
+                          "redhat-operators".
+                        type: string
+                      sourceNamespace:
+                        description: SourceNamespace is the CatalogSource namespace.
+                          Default is "openshift-marketplace".
+                        type: string
+                    type: object
                   overrideExistingConfigs:
                     default: false
                     description: |-

@@ -26,6 +26,7 @@ import (
 	"k8s.io/klog"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -460,19 +461,11 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 			managedVariables["REDIS_IMAGE"] = gitOpsCluster.Spec.GitOpsAddon.RedisImage
 		}
 
-		// Always set namespace variables to ensure OCM substitution works
-		// Empty string allows main.go defaults to apply
-		gitOpsOperatorNamespace := ""
-		if gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace != "" {
-			gitOpsOperatorNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorNamespace
-		}
-		managedVariables["GITOPS_OPERATOR_NAMESPACE"] = gitOpsOperatorNamespace
+		// GITOPS_OPERATOR_NAMESPACE is always openshift-gitops-operator (no longer configurable)
+		managedVariables["GITOPS_OPERATOR_NAMESPACE"] = utils.GitOpsOperatorNamespace
 
-		gitOpsNamespace := ""
-		if gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace != "" {
-			gitOpsNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace
-		}
-		managedVariables["GITOPS_NAMESPACE"] = gitOpsNamespace
+		// GITOPS_NAMESPACE is always openshift-gitops (no longer configurable)
+		managedVariables["GITOPS_NAMESPACE"] = utils.GitOpsNamespace
 
 		if gitOpsCluster.Spec.GitOpsAddon.ReconcileScope != "" {
 			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope

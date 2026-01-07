@@ -47,7 +47,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -111,7 +111,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -153,7 +153,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		targetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		}, targetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
 
@@ -176,7 +176,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -201,7 +201,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		targetSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      TargetSecretName,
-				Namespace: TargetNamespace,
+				Namespace: GitOpsNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -227,7 +227,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		updatedTargetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		}, updatedTargetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
 
@@ -250,7 +250,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -287,7 +287,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		targetSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		}, targetSecret)
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(targetSecret.Type).To(Equal(corev1.SecretTypeTLS))
@@ -324,7 +324,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		targetSecretOpaque := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		}, targetSecretOpaque)
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(targetSecretOpaque.Type).To(Equal(corev1.SecretTypeOpaque))
@@ -369,7 +369,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -379,7 +379,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		targetSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      TargetSecretName,
-				Namespace: TargetNamespace,
+				Namespace: GitOpsNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -405,7 +405,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		deletedSecret := &corev1.Secret{}
 		err = fakeClient.Get(context.TODO(), types.NamespacedName{
 			Name:      TargetSecretName,
-			Namespace: TargetNamespace,
+			Namespace: GitOpsNamespace,
 		}, deletedSecret)
 		g.Expect(err).To(HaveOccurred())
 		g.Expect(err.Error()).To(ContainSubstring("not found"))
@@ -422,7 +422,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		// Create target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 		err := fakeClient.Create(context.TODO(), targetNs)
@@ -479,7 +479,7 @@ func TestNamespaceToSecretMapper(t *testing.T) {
 	// Test target namespace
 	targetNs := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: TargetNamespace,
+			Name: GitOpsNamespace,
 		},
 	}
 	requests := namespaceToSecretMapper(context.TODO(), targetNs)
@@ -545,7 +545,7 @@ func TestPredicateFunctions(t *testing.T) {
 		// Test target namespace
 		targetNs := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: TargetNamespace,
+				Name: GitOpsNamespace,
 			},
 		}
 

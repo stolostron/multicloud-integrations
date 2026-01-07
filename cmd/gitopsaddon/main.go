@@ -64,10 +64,8 @@ var (
 	metricsPort = 8387
 
 	// The default values for the latest openshift gitops operator. It requires to refresh in each ACM major release GA
-	GitopsOperatorImage         = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:1b86eb4e071b1c526931b6d18c3d8f51522293699059c514488602c320271049"
-	GitopsOperatorNS            = "openshift-gitops-operator"
-	GitopsImage                 = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
-	GitopsNS                    = "openshift-gitops"
+	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:1b86eb4e071b1c526931b6d18c3d8f51522293699059c514488602c320271049"
+	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
 	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
 	GitOpsServiceImage          = "registry.redhat.io/openshift-gitops-1/gitops-rhel8@sha256:01883ebbe93f97a8196204adcd1749280b697e4c81f80658fdba507301f033aa"
 	GitOpsConsolePluginImage    = "registry.redhat.io/openshift-gitops-1/console-plugin-rhel8@sha256:fe57b69fc1570f7ea28530a67ceb44a58537dec419e7d5aa77e8e13fa61cccfc"
@@ -160,19 +158,9 @@ func main() {
 		GitopsOperatorImage = newGitopsOperatorImage
 	}
 
-	newGitopsOperatorNS, found := os.LookupEnv("GITOPS_OPERATOR_NAMESPACE")
-	if found && newGitopsOperatorNS > "" {
-		GitopsOperatorNS = newGitopsOperatorNS
-	}
-
 	newGitopsImage, found := os.LookupEnv("GITOPS_IMAGE")
 	if found && newGitopsImage > "" {
 		GitopsImage = newGitopsImage
-	}
-
-	newGitopsNS, found := os.LookupEnv("GITOPS_NAMESPACE")
-	if found && newGitopsNS > "" {
-		GitopsNS = newGitopsNS
 	}
 
 	newRedisImage, found := os.LookupEnv("REDIS_IMAGE")
@@ -248,9 +236,7 @@ func main() {
 		"retryPeriod", options.LeaderElectionRetryPeriod,
 		"syncInterval", options.SyncInterval,
 		"GitopsOperatorImage", GitopsOperatorImage,
-		"GitopsOperatorNS", GitopsOperatorNS,
 		"GitopsImage", GitopsImage,
-		"GitopsNS", GitopsNS,
 		"RedisImage", RedisImage,
 		"GitOpsServiceImage", GitOpsServiceImage,
 		"GitOpsConsolePluginImage", GitOpsConsolePluginImage,
@@ -282,8 +268,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
+	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage,
+		GitopsImage, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}
@@ -314,8 +300,8 @@ func runCleanupMode() {
 	}
 
 	// Setup the cleanup with the manager
-	if err = gitopsaddon.SetupCleanupWithManager(mgr, GitopsOperatorImage, GitopsOperatorNS,
-		GitopsImage, GitopsNS, ARGOCD_AGENT_IMAGE); err != nil {
+	if err = gitopsaddon.SetupCleanupWithManager(mgr, GitopsOperatorImage,
+		GitopsImage, ARGOCD_AGENT_IMAGE); err != nil {
 		setupLog.Error(err, "unable to create cleanup controller")
 		os.Exit(1)
 	}

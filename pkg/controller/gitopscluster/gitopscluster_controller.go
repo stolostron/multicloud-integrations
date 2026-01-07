@@ -791,7 +791,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		if argoCDAgentEnabled {
 			argoNamespace := instance.Namespace
 			if argoNamespace == "" {
-				argoNamespace = "openshift-gitops"
+				argoNamespace = utils.GitOpsNamespace
 			}
 
 			if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {

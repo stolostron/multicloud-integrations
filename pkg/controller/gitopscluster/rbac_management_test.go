@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -65,12 +66,12 @@ func TestGetAppSetServiceAccountName(t *testing.T) {
 	}{
 		{
 			name:      "find service account with argocd-applicationset label",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-applicationset-controller",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app.kubernetes.io/part-of": "argocd-applicationset",
 						},
@@ -81,12 +82,12 @@ func TestGetAppSetServiceAccountName(t *testing.T) {
 		},
 		{
 			name:      "find service account with argocd label",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "custom-applicationset-controller",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app.kubernetes.io/part-of": "argocd",
 						},
@@ -97,12 +98,12 @@ func TestGetAppSetServiceAccountName(t *testing.T) {
 		},
 		{
 			name:      "no matching service account - return default",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "other-service-account",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -110,7 +111,7 @@ func TestGetAppSetServiceAccountName(t *testing.T) {
 		},
 		{
 			name:         "empty namespace - return default",
-			namespace:    "openshift-gitops",
+			namespace:    utils.GitOpsNamespace,
 			expectedName: "openshift-gitops-applicationset-controller",
 		},
 	}
@@ -242,7 +243,7 @@ func TestCreateApplicationSetConfigMaps(t *testing.T) {
 		},
 		{
 			name:      "create both config maps successfully",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
 				// Check old config map
 				oldConfigMap := &v1.ConfigMap{}
@@ -267,12 +268,12 @@ func TestCreateApplicationSetConfigMaps(t *testing.T) {
 		},
 		{
 			name:      "config maps already exist - no error",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      configMapNameOld,
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string]string{
 						"apiVersion": "apps.open-cluster-management.io/v1",
@@ -282,7 +283,7 @@ func TestCreateApplicationSetConfigMaps(t *testing.T) {
 				&v1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      configMapNameNew,
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string]string{
 						"apiVersion": "cluster.open-cluster-management.io/v1beta1",
@@ -355,12 +356,12 @@ func TestCreateApplicationSetRbac(t *testing.T) {
 		},
 		{
 			name:      "create role and rolebinding successfully",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-applicationset-controller",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app.kubernetes.io/part-of": "argocd-applicationset",
 						},
@@ -391,12 +392,12 @@ func TestCreateApplicationSetRbac(t *testing.T) {
 		},
 		{
 			name:      "role and rolebinding already exist - no error",
-			namespace: "openshift-gitops",
+			namespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-applicationset-controller",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app.kubernetes.io/part-of": "argocd-applicationset",
 						},
@@ -404,14 +405,14 @@ func TestCreateApplicationSetRbac(t *testing.T) {
 				},
 				&rbacv1.Role{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops" + RoleSuffix,
-						Namespace: "openshift-gitops",
+						Name:      utils.GitOpsNamespace + RoleSuffix,
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 				&rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops" + RoleSuffix,
-						Namespace: "openshift-gitops",
+						Name:      utils.GitOpsNamespace + RoleSuffix,
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -473,7 +474,7 @@ func TestEnsureAddonManagerRBAC(t *testing.T) {
 	}{
 		{
 			name:            "create both role and rolebinding successfully",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
 				// Check role
 				role := &rbacv1.Role{}
@@ -506,18 +507,18 @@ func TestEnsureAddonManagerRBAC(t *testing.T) {
 		},
 		{
 			name:            "role and rolebinding already exist - no error",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&rbacv1.Role{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "addon-manager-controller-role",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 				&rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "addon-manager-controller-rolebinding",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -579,7 +580,7 @@ func TestEnsureAddonManagerRole(t *testing.T) {
 	}{
 		{
 			name:            "create role successfully",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
 				role := &rbacv1.Role{}
 				err := c.Get(context.TODO(), types.NamespacedName{
@@ -593,12 +594,12 @@ func TestEnsureAddonManagerRole(t *testing.T) {
 		},
 		{
 			name:            "role already exists - no error",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&rbacv1.Role{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "addon-manager-controller-role",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -644,7 +645,7 @@ func TestEnsureAddonManagerRoleBinding(t *testing.T) {
 	}{
 		{
 			name:            "create rolebinding successfully",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			validateFunc: func(t *testing.T, c client.Client, namespace string) {
 				roleBinding := &rbacv1.RoleBinding{}
 				err := c.Get(context.TODO(), types.NamespacedName{
@@ -658,12 +659,12 @@ func TestEnsureAddonManagerRoleBinding(t *testing.T) {
 		},
 		{
 			name:            "rolebinding already exists - no error",
-			gitopsNamespace: "openshift-gitops",
+			gitopsNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&rbacv1.RoleBinding{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "addon-manager-controller-rolebinding",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 				},
 			},

@@ -44,7 +44,6 @@ import (
 var (
 	metricsHost = "0.0.0.0"
 	metricsPort = 8388
-	GitopsNS    = "openshift-gitops"
 )
 
 // RunManager starts the actual manager
