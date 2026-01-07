@@ -56,8 +56,7 @@ func TestWaitForOperatorReady(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
-				Client:           getTestEnv().Client,
-				GitopsOperatorNS: "openshift-gitops-operator",
+				Client: getTestEnv().Client,
 			}
 
 			// Setup operator deployment if needed
@@ -341,8 +340,6 @@ func TestInstallOrUpdateOpenshiftGitops(t *testing.T) {
 	reconciler := &GitopsAddonReconciler{
 		Client:             getTestEnv().Client,
 		Config:             getTestEnv().Config,
-		GitopsOperatorNS:   "test-operator-ns",
-		GitopsNS:           "test-gitops-ns",
 		ArgoCDAgentEnabled: "false",
 	}
 

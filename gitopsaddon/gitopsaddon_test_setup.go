@@ -108,8 +108,8 @@ func createInitialTestResources() []client.Object {
 			"apiVersion": "argoproj.io/v1beta1",
 			"kind":       "ArgoCD",
 			"metadata": map[string]interface{}{
-				"name":      "openshift-gitops",
-				"namespace": "openshift-gitops",
+				"name":      GitOpsNamespace,
+				"namespace": GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"server": map[string]interface{}{
@@ -127,7 +127,7 @@ func createInitialTestResources() []client.Object {
 			"apiVersion": "argoproj.io/v1beta1",
 			"kind":       "ArgoCD",
 			"metadata": map[string]interface{}{
-				"name":      "openshift-gitops",
+				"name":      GitOpsNamespace,
 				"namespace": "test-ns",
 			},
 			"spec": map[string]interface{}{
@@ -146,7 +146,7 @@ func createInitialTestResources() []client.Object {
 			"apiVersion": "argoproj.io/v1beta1",
 			"kind":       "ArgoCD",
 			"metadata": map[string]interface{}{
-				"name":      "openshift-gitops",
+				"name":      GitOpsNamespace,
 				"namespace": "test-gitops-ns",
 			},
 			"spec": map[string]interface{}{
@@ -162,7 +162,7 @@ func createInitialTestResources() []client.Object {
 	// Create test namespaces
 	testGitopsNS := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "openshift-gitops",
+			Name: GitOpsNamespace,
 		},
 	}
 
@@ -188,7 +188,7 @@ func createInitialTestResources() []client.Object {
 	initialPassword := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-redis-initial-password",
-			Namespace: "openshift-gitops",
+			Namespace: GitOpsNamespace,
 		},
 		Data: map[string][]byte{
 			"admin.password": []byte("testpassword"),
@@ -209,7 +209,7 @@ func createInitialTestResources() []client.Object {
 	defaultSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "default",
-			Namespace: "openshift-gitops",
+			Namespace: GitOpsNamespace,
 		},
 	}
 
@@ -234,7 +234,7 @@ func createInitialTestResources() []client.Object {
 		"argocd-agent-agent",
 	}
 
-	namespaces := []string{"openshift-gitops", "test-ns", "test-gitops-ns", "openshift-gitops-operator"}
+	namespaces := []string{GitOpsNamespace, "test-ns", "test-gitops-ns", "openshift-gitops-operator"}
 
 	var serviceAccounts []client.Object
 	for _, name := range serviceAccountNames {

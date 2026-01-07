@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -36,6 +37,12 @@ import (
 //go:embed charts/dep-crds/**
 var ChartFS embed.FS
 
+// GitOpsNamespace is exported from pkg/utils for backward compatibility
+const GitOpsNamespace = utils.GitOpsNamespace
+
+// GitOpsOperatorNamespace is exported from pkg/utils for backward compatibility
+const GitOpsOperatorNamespace = utils.GitOpsOperatorNamespace
+
 // GitopsAddonReconciler reconciles a openshift gitops operator
 type GitopsAddonReconciler struct {
 	client.Client
@@ -43,9 +50,7 @@ type GitopsAddonReconciler struct {
 	Config                   *rest.Config
 	Interval                 int
 	GitopsOperatorImage      string
-	GitopsOperatorNS         string
 	GitopsImage              string
-	GitopsNS                 string
 	RedisImage               string
 	GitOpsServiceImage       string
 	GitOpsConsolePluginImage string
@@ -66,15 +71,13 @@ type GitopsAddonCleanupReconciler struct {
 	Scheme              *runtime.Scheme
 	Config              *rest.Config
 	GitopsOperatorImage string
-	GitopsOperatorNS    string
 	GitopsImage         string
-	GitopsNS            string
 	ArgoCDAgentImage    string
 }
 
 // SetupWithManager sets up the addon with the Manager
-func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gitopsOperatorNS,
-	gitopsImage, gitopsNS, redisImage, gitOpsServiceImage, gitOpsConsolePluginImage, reconcileScope,
+func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage,
+	gitopsImage, redisImage, gitOpsServiceImage, gitOpsConsolePluginImage, reconcileScope,
 	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
 	reconciler := &GitopsAddonReconciler{
 		Client:                   mgr.GetClient(),
@@ -82,9 +85,7 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 		Config:                   mgr.GetConfig(),
 		Interval:                 interval,
 		GitopsOperatorImage:      gitopsOperatorImage,
-		GitopsOperatorNS:         gitopsOperatorNS,
 		GitopsImage:              gitopsImage,
-		GitopsNS:                 gitopsNS,
 		RedisImage:               redisImage,
 		GitOpsServiceImage:       gitOpsServiceImage,
 		GitOpsConsolePluginImage: gitOpsConsolePluginImage,
@@ -108,15 +109,13 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage, gi
 }
 
 // SetupCleanupWithManager sets up the cleanup reconciler with the Manager
-func SetupCleanupWithManager(mgr manager.Manager, gitopsOperatorImage, gitopsOperatorNS, gitopsImage, gitopsNS, argoCDAgentImage string) error {
+func SetupCleanupWithManager(mgr manager.Manager, gitopsOperatorImage, gitopsImage, argoCDAgentImage string) error {
 	reconciler := &GitopsAddonCleanupReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
 		Config:              mgr.GetConfig(),
 		GitopsOperatorImage: gitopsOperatorImage,
-		GitopsOperatorNS:    gitopsOperatorNS,
 		GitopsImage:         gitopsImage,
-		GitopsNS:            gitopsNS,
 		ArgoCDAgentImage:    argoCDAgentImage,
 	}
 

@@ -65,7 +65,7 @@ func TestMain(m *testing.M) {
 	}
 
 	err = c.Create(context.TODO(), &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops"},
+		ObjectMeta: metav1.ObjectMeta{Name: utils.GitOpsNamespace},
 	})
 	if err != nil {
 		log.Fatal(err)

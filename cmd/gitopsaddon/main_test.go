@@ -28,9 +28,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	// Test default values
 	t.Run("DefaultValues", func(t *testing.T) {
 		g.Expect(GitopsOperatorImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator"))
-		g.Expect(GitopsOperatorNS).To(gomega.Equal("openshift-gitops-operator"))
 		g.Expect(GitopsImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel8"))
-		g.Expect(GitopsNS).To(gomega.Equal("openshift-gitops"))
 		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
 		g.Expect(GitOpsServiceImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
 		g.Expect(GitOpsConsolePluginImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
@@ -226,30 +224,20 @@ func TestAdditionalEnvironmentVariables(t *testing.T) {
 	t.Run("AdditionalGitOpsVariables", func(t *testing.T) {
 		// Store original values
 		originalGitopsOperatorImage := GitopsOperatorImage
-		originalGitopsOperatorNS := GitopsOperatorNS
 		originalGitopsImage := GitopsImage
-		originalGitopsNS := GitopsNS
 		originalRedisImage := RedisImage
 
 		// Set environment variables
 		t.Setenv("GITOPS_OPERATOR_IMAGE", "custom.registry.io/gitops-operator:v1.0.0")
-		t.Setenv("GITOPS_OPERATOR_NAMESPACE", "custom-gitops-operator")
 		t.Setenv("GITOPS_IMAGE", "custom.registry.io/argocd:v2.0.0")
-		t.Setenv("GITOPS_NAMESPACE", "custom-gitops")
 		t.Setenv("REDIS_IMAGE", "custom.registry.io/redis:v6.0.0")
 
 		// Simulate the environment variable processing logic from main()
 		if val, found := os.LookupEnv("GITOPS_OPERATOR_IMAGE"); found && val > "" {
 			GitopsOperatorImage = val
 		}
-		if val, found := os.LookupEnv("GITOPS_OPERATOR_NAMESPACE"); found && val > "" {
-			GitopsOperatorNS = val
-		}
 		if val, found := os.LookupEnv("GITOPS_IMAGE"); found && val > "" {
 			GitopsImage = val
-		}
-		if val, found := os.LookupEnv("GITOPS_NAMESPACE"); found && val > "" {
-			GitopsNS = val
 		}
 		if val, found := os.LookupEnv("REDIS_IMAGE"); found && val > "" {
 			RedisImage = val
@@ -257,16 +245,12 @@ func TestAdditionalEnvironmentVariables(t *testing.T) {
 
 		// Verify the values were updated
 		g.Expect(GitopsOperatorImage).To(gomega.Equal("custom.registry.io/gitops-operator:v1.0.0"))
-		g.Expect(GitopsOperatorNS).To(gomega.Equal("custom-gitops-operator"))
 		g.Expect(GitopsImage).To(gomega.Equal("custom.registry.io/argocd:v2.0.0"))
-		g.Expect(GitopsNS).To(gomega.Equal("custom-gitops"))
 		g.Expect(RedisImage).To(gomega.Equal("custom.registry.io/redis:v6.0.0"))
 
 		// Restore original values
 		GitopsOperatorImage = originalGitopsOperatorImage
-		GitopsOperatorNS = originalGitopsOperatorNS
 		GitopsImage = originalGitopsImage
-		GitopsNS = originalGitopsNS
 		RedisImage = originalRedisImage
 	})
 }
@@ -299,8 +283,6 @@ func TestExtendedProxyEnvironmentVariables(t *testing.T) {
 		}
 		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
 			ReconcileScope = val
-		}
-		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
 		}
 
 		// Verify the values were updated
@@ -341,10 +323,6 @@ func TestConstantsAndVariables(t *testing.T) {
 		g.Expect(GitopsImage).To(gomega.ContainSubstring("registry.redhat.io"))
 		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io"))
 		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io"))
-
-		// Test namespace values
-		g.Expect(GitopsOperatorNS).To(gomega.Equal("openshift-gitops-operator"))
-		g.Expect(GitopsNS).To(gomega.Equal("openshift-gitops"))
 	})
 }
 
@@ -397,9 +375,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		// Store original values
 		originalValues := map[string]string{
 			"GitopsOperatorImage":         GitopsOperatorImage,
-			"GitopsOperatorNS":            GitopsOperatorNS,
 			"GitopsImage":                 GitopsImage,
-			"GitopsNS":                    GitopsNS,
 			"RedisImage":                  RedisImage,
 			"GitOpsServiceImage":          GitOpsServiceImage,
 			"GitOpsConsolePluginImage":    GitOpsConsolePluginImage,
@@ -417,9 +393,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		// Set all environment variables
 		envVars := map[string]string{
 			"GITOPS_OPERATOR_IMAGE":       "test.registry.io/gitops-operator:test",
-			"GITOPS_OPERATOR_NAMESPACE":   "test-gitops-operator",
 			"GITOPS_IMAGE":                "test.registry.io/argocd:test",
-			"GITOPS_NAMESPACE":            "test-gitops",
 			"REDIS_IMAGE":                 "test.registry.io/redis:test",
 			"GitOpsServiceImage":          "test.registry.io/gitops-service:test",
 			"GitOpsConsolePluginImage":    "test.registry.io/gitops-console-plugin:test",
@@ -427,7 +401,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			"HTTPS_PROXY":                 "https://test-proxy:8443",
 			"NO_PROXY":                    "test.local",
 			"RECONCILE_SCOPE":             "Test-Scope",
-			"UNINSTALL":                   "true",
 			"ARGOCD_AGENT_ENABLED":        "true",
 			"ARGOCD_AGENT_IMAGE":          "test.registry.io/argocd-agent:test",
 			"ARGOCD_AGENT_SERVER_ADDRESS": "test.argocd.local",
@@ -443,14 +416,8 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		if val, found := os.LookupEnv("GITOPS_OPERATOR_IMAGE"); found && val > "" {
 			GitopsOperatorImage = val
 		}
-		if val, found := os.LookupEnv("GITOPS_OPERATOR_NAMESPACE"); found && val > "" {
-			GitopsOperatorNS = val
-		}
 		if val, found := os.LookupEnv("GITOPS_IMAGE"); found && val > "" {
 			GitopsImage = val
-		}
-		if val, found := os.LookupEnv("GITOPS_NAMESPACE"); found && val > "" {
-			GitopsNS = val
 		}
 		if val, found := os.LookupEnv("REDIS_IMAGE"); found && val > "" {
 			RedisImage = val
@@ -473,8 +440,6 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
 			ReconcileScope = val
 		}
-		if val, found := os.LookupEnv("UNINSTALL"); found && val > "" {
-		}
 		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
 			ARGOCD_AGENT_ENABLED = val
 		}
@@ -493,9 +458,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 
 		// Verify all values were updated
 		g.Expect(GitopsOperatorImage).To(gomega.Equal("test.registry.io/gitops-operator:test"))
-		g.Expect(GitopsOperatorNS).To(gomega.Equal("test-gitops-operator"))
 		g.Expect(GitopsImage).To(gomega.Equal("test.registry.io/argocd:test"))
-		g.Expect(GitopsNS).To(gomega.Equal("test-gitops"))
 		g.Expect(RedisImage).To(gomega.Equal("test.registry.io/redis:test"))
 		g.Expect(GitOpsServiceImage).To(gomega.Equal("test.registry.io/gitops-service:test"))
 		g.Expect(GitOpsConsolePluginImage).To(gomega.Equal("test.registry.io/gitops-console-plugin:test"))
@@ -511,9 +474,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 
 		// Restore original values
 		GitopsOperatorImage = originalValues["GitopsOperatorImage"]
-		GitopsOperatorNS = originalValues["GitopsOperatorNS"]
 		GitopsImage = originalValues["GitopsImage"]
-		GitopsNS = originalValues["GitopsNS"]
 		RedisImage = originalValues["RedisImage"]
 		GitOpsServiceImage = originalValues["GitOpsServiceImage"]
 		GitOpsConsolePluginImage = originalValues["GitOpsConsolePluginImage"]

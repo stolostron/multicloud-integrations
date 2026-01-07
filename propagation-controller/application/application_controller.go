@@ -39,6 +39,7 @@ import (
 
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 const (
@@ -197,7 +198,7 @@ func (r *ApplicationReconciler) discoverAndFetchAppProject(application *unstruct
 	// 2. Fall back to trying common ArgoCD namespaces
 	candidateNamespaces := []string{
 		application.GetNamespace(), // Try application's namespace first
-		"openshift-gitops",         // Default OpenShift GitOps namespace
+		utils.GitOpsNamespace,         // Default OpenShift GitOps namespace
 		"argocd",                   // Common ArgoCD namespace
 	}
 
@@ -317,7 +318,7 @@ func (r *ApplicationReconciler) generateManifestWork(name, namespace string, app
 		},
 	}
 
-	includeAppProject := !(appProject.GetName() == "default" && appProject.GetNamespace() == "openshift-gitops")
+	includeAppProject := !(appProject.GetName() == "default" && appProject.GetNamespace() == utils.GitOpsNamespace)
 
 	if includeAppProject {
 		manifests = append(manifests, workv1.Manifest{

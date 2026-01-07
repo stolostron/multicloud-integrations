@@ -38,7 +38,7 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 
 	// 1. Always template and apply the openshift gitops operator manifest
 	gitopsOperatorNsKey := types.NamespacedName{
-		Name: r.GitopsOperatorNS,
+		Name: GitOpsOperatorNamespace,
 	}
 
 	// install dependency CRDs if it doesn't exist
@@ -63,7 +63,7 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	}
 
 	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
-		err := r.templateAndApplyChart("charts/openshift-gitops-operator", r.GitopsOperatorNS, "openshift-gitops-operator")
+		err := r.templateAndApplyChart("charts/openshift-gitops-operator", GitOpsOperatorNamespace, "openshift-gitops-operator")
 		if err != nil {
 			klog.Errorf("Failed to template and apply openshift-gitops-operator: %v", err)
 			return err
@@ -84,11 +84,11 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 
 	// 3. Create or update the ArgoCD CR via openshift-gitops-dependency helm chart
 	gitopsNsKey := types.NamespacedName{
-		Name: r.GitopsNS,
+		Name: GitOpsNamespace,
 	}
 
 	if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", r.GitopsNS)
+		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", GitOpsNamespace)
 		if err != nil {
 			klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
 			return err
@@ -118,10 +118,10 @@ func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) erro
 	deploymentName := "argocd-operator-controller-manager"
 	deploymentKey := types.NamespacedName{
 		Name:      deploymentName,
-		Namespace: r.GitopsOperatorNS,
+		Namespace: GitOpsOperatorNamespace,
 	}
 
-	klog.Infof("Waiting for ArgoCD operator deployment %s to be ready in namespace %s...", deploymentName, r.GitopsOperatorNS)
+	klog.Infof("Waiting for ArgoCD operator deployment %s to be ready in namespace %s...", deploymentName, GitOpsOperatorNamespace)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

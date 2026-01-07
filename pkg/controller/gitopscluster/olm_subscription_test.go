@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -214,7 +215,7 @@ func TestGetOLMAddOnTemplateName(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 			},
 			expected: "gitops-addon-olm-openshift-gitops-my-cluster",
@@ -257,7 +258,7 @@ func TestEnsureOLMAddOnTemplate(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "gitopscluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
@@ -302,7 +303,7 @@ func TestEnsureOLMAddOnTemplate(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "gitopscluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{

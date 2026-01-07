@@ -28,6 +28,7 @@ import (
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters via ManifestWork
@@ -40,13 +41,8 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	hubNamespace := gitOpsCluster.Namespace
 
 	// Managed cluster namespace - where the secret will be created on managed clusters
-	managedNamespace := ""
-	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace != "" {
-		managedNamespace = gitOpsCluster.Spec.GitOpsAddon.GitOpsNamespace
-	}
-	if managedNamespace == "" {
-		managedNamespace = "openshift-gitops"
-	}
+	// This is always openshift-gitops as the GitOpsNamespace is no longer configurable
+	managedNamespace := utils.GitOpsNamespace
 
 	// Get the CA certificate from the argocd-agent-ca secret on the hub
 	caCert, err := r.getArgoCDAgentCACert(hubNamespace)

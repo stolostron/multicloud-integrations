@@ -101,7 +101,7 @@ var (
 			Namespace: "cluster1",
 			Annotations: map[string]string{
 				"apps.open-cluster-management.io/hosting-applicationset":    "openshift-gitops/appset-4",
-				"apps.open-cluster-management.io/hub-application-namespace": "openshift-gitops",
+				"apps.open-cluster-management.io/hub-application-namespace": utils.GitOpsNamespace,
 				"apps.open-cluster-management.io/hub-application-name":      "sample-app",
 			},
 			Labels: map[string]string{
@@ -142,7 +142,7 @@ var (
 	sampleMulticlusterApplicationSetReport1 = &appsetreportV1alpha1.MulticlusterApplicationSetReport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "appset-1",
-			Namespace: "openshift-gitops",
+			Namespace: utils.GitOpsNamespace,
 			Labels: map[string]string{
 				"apps.open-cluster-management.io/hosting-applicationset": "openshift-gitops.appset-1",
 			},
@@ -152,7 +152,7 @@ var (
 	sampleMulticlusterApplicationSetReport2 = &appsetreportV1alpha1.MulticlusterApplicationSetReport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "appset-2",
-			Namespace: "openshift-gitops",
+			Namespace: utils.GitOpsNamespace,
 			Labels: map[string]string{
 				"apps.open-cluster-management.io/hosting-applicationset": "openshift-gitops.appset-2",
 				"diff-labels-test": "true",
@@ -163,7 +163,7 @@ var (
 	sampleMulticlusterApplicationSetReportBgd5 = &appsetreportV1alpha1.MulticlusterApplicationSetReport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bgd-app-5",
-			Namespace: "openshift-gitops",
+			Namespace: utils.GitOpsNamespace,
 			Labels: map[string]string{
 				"apps.open-cluster-management.io/hosting-applicationset": "openshift-gitops.bgd-app-5",
 			},
@@ -173,7 +173,7 @@ var (
 	sampleMulticlusterApplicationSetReportDummy = &appsetreportV1alpha1.MulticlusterApplicationSetReport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dummy-app",
-			Namespace: "openshift-gitops",
+			Namespace: utils.GitOpsNamespace,
 			Labels: map[string]string{
 				"apps.open-cluster-management.io/hosting-applicationset": "",
 			},
@@ -188,7 +188,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "long-resource-name-truncate-the-name-over-46-chars",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -215,7 +215,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "appset-1",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -242,7 +242,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "appset-2",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -269,7 +269,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "appset-3",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -296,7 +296,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "appset-4",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -323,7 +323,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "bgd-app",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -350,7 +350,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "bgd-app-2",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -377,7 +377,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "bgd-app-3",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -404,7 +404,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "bgd-app-4",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -431,7 +431,7 @@ var (
 			"kind":       "ApplicationSet",
 			"metadata": map[string]interface{}{
 				"name":      "dummy-app",
-				"namespace": "openshift-gitops",
+				"namespace": utils.GitOpsNamespace,
 			},
 			"spec": map[string]interface{}{
 				"generators": []interface{}{},
@@ -595,7 +595,7 @@ func TestReconcilePullModel(t *testing.T) {
 
 	// verify truncating label is working properly
 	appsetReport := &appsetreportV1alpha1.MulticlusterApplicationSetReport{}
-	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops",
+	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: utils.GitOpsNamespace,
 		Name: "long-resource-name-truncate-the-name-over-46-chars"}, appsetReport)).NotTo(HaveOccurred())
 	g.Expect(appsetReport.Labels["apps.open-cluster-management.io/hosting-applicationset"]).
 		To(Equal("openshift-gitops.long-resource-name-truncate-the-name-over-46-c"))
@@ -615,7 +615,7 @@ func TestReconcilePullModel(t *testing.T) {
 		},
 	}))
 
-	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops", Name: "appset-1"}, appsetReport)).NotTo(HaveOccurred())
+	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: utils.GitOpsNamespace, Name: "appset-1"}, appsetReport)).NotTo(HaveOccurred())
 	g.Expect(appsetReport.Statuses.Summary).To(Equal(appsetreportV1alpha1.ReportSummary{
 		Synced:     "1",
 		NotSynced:  "0",
@@ -656,7 +656,7 @@ func TestReconcilePullModel(t *testing.T) {
 	}))
 
 	// Test 2: no corresponding resource list yaml but MulticlusterApplicationSetReport exists beforehand
-	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops", Name: "appset-2"}, appsetReport)).NotTo(HaveOccurred())
+	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: utils.GitOpsNamespace, Name: "appset-2"}, appsetReport)).NotTo(HaveOccurred())
 	g.Expect(appsetReport.Statuses.Resources).To(BeNil())
 	g.Expect(appsetReport.Statuses.ClusterConditions).To(Equal([]appsetreportV1alpha1.ClusterCondition{
 		{
@@ -669,7 +669,7 @@ func TestReconcilePullModel(t *testing.T) {
 	}))
 
 	// Test 3: no corresponding resource list yaml but MulticlusterApplicationSetReport does not exist beforehand
-	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops", Name: "appset-3"}, appsetReport)).NotTo(HaveOccurred())
+	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: utils.GitOpsNamespace, Name: "appset-3"}, appsetReport)).NotTo(HaveOccurred())
 	g.Expect(appsetReport.Statuses.Resources).To(BeNil())
 	g.Expect(appsetReport.Statuses.ClusterConditions).To(Equal([]appsetreportV1alpha1.ClusterCondition{
 		{
@@ -713,7 +713,7 @@ func TestReconcilePullModel(t *testing.T) {
 
 	time.Sleep(15 * time.Second)
 
-	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: "openshift-gitops", Name: "appset-4"}, appsetReport)).NotTo(HaveOccurred())
+	g.Expect(c.Get(ctx, types.NamespacedName{Namespace: utils.GitOpsNamespace, Name: "appset-4"}, appsetReport)).NotTo(HaveOccurred())
 	g.Expect(appsetReport.Statuses.Resources).To(BeNil())
 	g.Expect(appsetReport.Statuses.ClusterConditions).To(Equal([]appsetreportV1alpha1.ClusterCondition{
 		{
