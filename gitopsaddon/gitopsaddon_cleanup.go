@@ -44,7 +44,7 @@ const (
 
 // uninstallGitopsAgent uninstalls the Gitops agent addon for cleanup reconciler
 func (r *GitopsAddonCleanupReconciler) uninstallGitopsAgent(ctx context.Context) error {
-	return uninstallGitopsAgentInternal(ctx, r.Client, r.GitopsOperatorNS, r.GitopsNS)
+	return uninstallGitopsAgentInternal(ctx, r.Client, GitOpsOperatorNamespace)
 }
 
 // uninstallGitopsAgentInternal performs the actual uninstall logic
@@ -55,8 +55,8 @@ func (r *GitopsAddonCleanupReconciler) uninstallGitopsAgent(ctx context.Context)
 // Step 4: Leave pause marker in place (prevents install controller from reinstalling; cleaned up by addon framework)
 // All steps attempt to continue even if one fails to ensure maximum cleanup
 // Note: argocd-agent resources are handled by the argocd-operator when the ArgoCD CR is deleted
-func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOperatorNS, gitopsNS string) error {
-	klog.Infof("Starting Gitops agent addon uninstall - gitopsOperatorNS: %s, gitopsNS: %s", gitopsOperatorNS, gitopsNS)
+func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOperatorNS string) error {
+	klog.Infof("Starting Gitops agent addon uninstall - gitopsOperatorNS: %s, gitopsNS: %s", gitopsOperatorNS, GitOpsNamespace)
 	var errors []error
 
 	// Step 0: Create pause marker to prevent the gitops-addon controller from reconciling resources
@@ -68,8 +68,8 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 
 	// Step 1: Delete ArgoCD CR and wait for it to be fully removed
 	// The argocd-operator will handle cleaning up the agent resources when the ArgoCD CR is deleted
-	klog.Info("Step 1: Deleting ArgoCD CR from namespace: " + gitopsNS)
-	if err := deleteArgoCDCR(ctx, c, gitopsNS); err != nil {
+	klog.Info("Step 1: Deleting ArgoCD CR from namespace: " + GitOpsNamespace)
+	if err := deleteArgoCDCR(ctx, c); err != nil {
 		klog.Errorf("Error deleting ArgoCD CR (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to delete ArgoCD CR: %w", err))
 	}
@@ -88,7 +88,7 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 	waitDuration := getCleanupVerificationWaitDuration()
 	if waitDuration > 0 {
 		klog.Infof("Step 3: Waiting and re-verifying that resources stay deleted (%v)...", waitDuration)
-		if err := waitAndVerifyCleanup(ctx, c, gitopsOperatorNS, gitopsNS, waitDuration); err != nil {
+		if err := waitAndVerifyCleanup(ctx, c, gitopsOperatorNS, waitDuration); err != nil {
 			klog.Errorf("Error during cleanup verification (resources may have been recreated): %v", err)
 			errors = append(errors, fmt.Errorf("cleanup verification failed: %w", err))
 		}
@@ -107,12 +107,12 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 }
 
 // deleteArgoCDCR deletes the ArgoCD CR and retries until it's fully removed
-func deleteArgoCDCR(ctx context.Context, c client.Client, gitopsNS string) error {
+func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 	klog.Info("Deleting ArgoCD CR with retry until fully removed")
 
 	argoCDKey := types.NamespacedName{
-		Name:      "openshift-gitops",
-		Namespace: gitopsNS,
+		Name:      GitOpsNamespace,
+		Namespace: GitOpsNamespace,
 	}
 
 	// Retry loop: 2 minutes total (24 iterations * 5 seconds)
@@ -167,7 +167,6 @@ func deleteArgoCDCR(ctx context.Context, c client.Client, gitopsNS string) error
 
 	return fmt.Errorf("timeout: ArgoCD CR still exists after %v", maxWait)
 }
-
 
 // deleteOperatorResources deletes openshift-gitops-operator resources
 // Resources from gitopsaddon/charts/openshift-gitops-operator/templates/ (excluding CRDs)
@@ -439,7 +438,7 @@ func IsPaused(ctx context.Context, c client.Client) bool {
 // resources stay deleted. If resources are recreated, it deletes them again.
 // This handles timing issues where the controller might be mid-reconciliation when cleanup starts.
 // Note: argocd-agent resources are handled by the argocd-operator when the ArgoCD CR is deleted.
-func waitAndVerifyCleanup(ctx context.Context, c client.Client, gitopsOperatorNS, gitopsNS string, waitDuration time.Duration) error {
+func waitAndVerifyCleanup(ctx context.Context, c client.Client, gitopsOperatorNS string, waitDuration time.Duration) error {
 	klog.Infof("Starting cleanup verification for %v", waitDuration)
 
 	checkInterval := 20 * time.Second

@@ -31,6 +31,7 @@ import (
 
 	coreV1 "k8s.io/api/core/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 const (
@@ -216,7 +217,7 @@ func prepareManifestWorkNS(appsubNS string) (string, error) {
 				"argocd.argoproj.io/sync-options": "Delete=false",
 			},
 			Labels: map[string]string{
-				"argocd.argoproj.io/managed-by": "openshift-gitops",
+				"argocd.argoproj.io/managed-by": utils.GitOpsNamespace,
 			},
 		},
 	}

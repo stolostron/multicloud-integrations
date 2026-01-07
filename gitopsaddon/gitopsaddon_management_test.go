@@ -134,8 +134,7 @@ func TestResourceManagement(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
-				Client:   getTestEnv().Client,
-				GitopsNS: "test-gitops-ns",
+				Client: getTestEnv().Client,
 			}
 
 			if tt.existingObj != nil {
@@ -235,8 +234,7 @@ func TestApplyManifestSelectivelyWithManagement(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
-				Client:   getTestEnv().Client,
-				GitopsNS: "test-gitops-ns",
+				Client: getTestEnv().Client,
 			}
 
 			if tt.existingObj != nil {

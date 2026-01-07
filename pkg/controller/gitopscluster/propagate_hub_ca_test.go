@@ -28,6 +28,7 @@ import (
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -47,7 +48,7 @@ func TestPropagateHubCA(t *testing.T) {
 	caSecret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "argocd-agent-ca",
-			Namespace: "openshift-gitops",
+			Namespace: utils.GitOpsNamespace,
 		},
 		Type: v1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -68,14 +69,11 @@ func TestPropagateHubCA(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -109,7 +107,7 @@ func TestPropagateHubCA(t *testing.T) {
 					err = json.Unmarshal(manifest.RawExtension.Raw, secret)
 					assert.NoError(t, err)
 					assert.Equal(t, "argocd-agent-ca", secret.Name)
-					assert.Equal(t, "openshift-gitops", secret.Namespace)
+					assert.Equal(t, utils.GitOpsNamespace, secret.Namespace)
 					assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
 				}
 			},
@@ -119,14 +117,11 @@ func TestPropagateHubCA(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -165,14 +160,11 @@ func TestPropagateHubCA(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -214,14 +206,11 @@ func TestPropagateHubCA(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -273,14 +262,11 @@ func TestPropagateHubCA(t *testing.T) {
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
+					Namespace: utils.GitOpsNamespace,
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -293,48 +279,6 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 			existingObjects: []client.Object{},
 			expectedError:   true,
-		},
-		{
-			name: "use custom GitOpsNamespace for managed clusters",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-cluster",
-					Namespace: "openshift-gitops",
-				},
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
-					},
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsNamespace: "custom-gitops-namespace",
-					},
-				},
-			},
-			managedClusters: []*spokeclusterv1.ManagedCluster{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-cluster",
-					},
-				},
-			},
-			existingObjects: []client.Object{caSecret},
-			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				mw := &workv1.ManifestWork{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Name:      "argocd-agent-ca-mw",
-					Namespace: "test-cluster",
-				}, mw)
-				assert.NoError(t, err)
-
-				// Verify the secret will be created in the custom namespace on managed cluster
-				manifest := mw.Spec.Workload.Manifests[0]
-				secret := &v1.Secret{}
-				err = json.Unmarshal(manifest.RawExtension.Raw, secret)
-				assert.NoError(t, err)
-				assert.Equal(t, "argocd-agent-ca", secret.Name)
-				assert.Equal(t, "custom-gitops-namespace", secret.Namespace)
-				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
-			},
 		},
 	}
 
@@ -377,12 +321,12 @@ func TestGetArgoCDAgentCACert(t *testing.T) {
 	}{
 		{
 			name:          "get CA cert from tls.crt field",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "argocd-agent-ca",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"tls.crt": []byte("test-ca-from-tls-crt"),
@@ -393,12 +337,12 @@ func TestGetArgoCDAgentCACert(t *testing.T) {
 		},
 		{
 			name:          "get CA cert from ca.crt field when tls.crt not available",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "argocd-agent-ca",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"ca.crt": []byte("test-ca-from-ca-crt"),
@@ -409,17 +353,17 @@ func TestGetArgoCDAgentCACert(t *testing.T) {
 		},
 		{
 			name:          "secret not found should return error",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			expectedError: true,
 		},
 		{
 			name:          "secret exists but no certificate data",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "argocd-agent-ca",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Data: map[string][]byte{
 						"other-field": []byte("other-data"),
@@ -464,7 +408,7 @@ func TestCreateArgoCDAgentManifestWork(t *testing.T) {
 		{
 			name:          "create ManifestWork with correct structure",
 			clusterName:   "test-cluster",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			caCert:        "test-ca-certificate",
 			validateFunc: func(t *testing.T, mw *workv1.ManifestWork) {
 				assert.Equal(t, "argocd-agent-ca-mw", mw.Name)
@@ -482,7 +426,7 @@ func TestCreateArgoCDAgentManifestWork(t *testing.T) {
 				assert.NoError(t, err)
 
 				assert.Equal(t, "argocd-agent-ca", secret.Name)
-				assert.Equal(t, "openshift-gitops", secret.Namespace)
+				assert.Equal(t, utils.GitOpsNamespace, secret.Namespace)
 				assert.Equal(t, v1.SecretTypeOpaque, secret.Type)
 				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
 			},

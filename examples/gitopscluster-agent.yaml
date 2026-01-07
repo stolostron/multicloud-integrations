@@ -18,7 +18,6 @@ spec:
     gitOpsImage: "registry.redhat.io/openshift-gitops-1/argocd@sha256:..."
     redisImage: "registry.redhat.io/rhel8/redis-6@sha256:..."
     gitOpsOperatorNamespace: openshift-gitops-operator
-    gitOpsNamespace: openshift-gitops
     reconcileScope: Single-Namespace
     argoCDAgent:
       enabled: true

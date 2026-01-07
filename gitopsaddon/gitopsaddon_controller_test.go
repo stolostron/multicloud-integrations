@@ -35,9 +35,7 @@ func TestSetupWithManager(t *testing.T) {
 		name                     string
 		interval                 int
 		gitopsOperatorImage      string
-		gitopsOperatorNS         string
 		gitopsImage              string
-		gitopsNS                 string
 		redisImage               string
 		gitOpsServiceImage       string
 		gitOpsConsolePluginImage string
@@ -56,9 +54,7 @@ func TestSetupWithManager(t *testing.T) {
 			name:                     "successful_setup_with_defaults",
 			interval:                 30,
 			gitopsOperatorImage:      "test-operator:latest",
-			gitopsOperatorNS:         "openshift-gitops-operator",
 			gitopsImage:              "test-gitops:latest",
-			gitopsNS:                 "openshift-gitops",
 			redisImage:               "test-redis:latest",
 			gitOpsServiceImage:       "test-gitops-service:latest",
 			gitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
@@ -77,9 +73,7 @@ func TestSetupWithManager(t *testing.T) {
 			name:                     "setup_with_proxy_settings",
 			interval:                 60,
 			gitopsOperatorImage:      "test-operator:v1.0.0",
-			gitopsOperatorNS:         "custom-operator-ns",
 			gitopsImage:              "test-gitops:v1.0.0",
-			gitopsNS:                 "custom-gitops-ns",
 			redisImage:               "test-redis:v1.0.0",
 			gitOpsServiceImage:       "test-gitops-service:v1.0.0",
 			gitOpsConsolePluginImage: "test-gitops-console-plugin:v1.0.0",
@@ -114,8 +108,8 @@ func TestSetupWithManager(t *testing.T) {
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 
 			// Test SetupWithManager
-			err = SetupWithManager(mgr, tt.interval, tt.gitopsOperatorImage, tt.gitopsOperatorNS,
-				tt.gitopsImage, tt.gitopsNS, tt.redisImage, tt.gitOpsServiceImage, tt.gitOpsConsolePluginImage, tt.reconcileScope,
+			err = SetupWithManager(mgr, tt.interval, tt.gitopsOperatorImage,
+				tt.gitopsImage, tt.redisImage, tt.gitOpsServiceImage, tt.gitOpsConsolePluginImage, tt.reconcileScope,
 				tt.httpProxy, tt.httpsProxy, tt.noProxy,
 				tt.argoCDAgentEnabled, tt.argoCDAgentImage, tt.argoCDAgentServerAddr,
 				tt.argoCDAgentServerPort, tt.argoCDAgentMode)
@@ -161,9 +155,7 @@ func TestGitopsAddonReconciler_Start(t *testing.T) {
 				Scheme:              getTestEnv().Scheme,
 				Interval:            tt.interval,
 				GitopsOperatorImage: "test-operator:latest",
-				GitopsOperatorNS:    "openshift-gitops-operator",
 				GitopsImage:         "test-gitops:latest",
-				GitopsNS:            "openshift-gitops",
 				RedisImage:          "test-redis:latest",
 				ReconcileScope:      "Single-Namespace",
 				ArgoCDAgentEnabled:  "false",
@@ -202,22 +194,16 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		gitopsOperatorNS   string
-		gitopsNS           string
 		argoCDAgentEnabled string
 		description        string
 	}{
 		{
 			name:               "housekeeping_install_with_agent_disabled",
-			gitopsOperatorNS:   "openshift-gitops-operator",
-			gitopsNS:           "openshift-gitops",
 			argoCDAgentEnabled: "false",
 			description:        "Normal install flow",
 		},
 		{
 			name:               "housekeeping_install_with_agent_enabled",
-			gitopsOperatorNS:   "custom-operator-ns",
-			gitopsNS:           "custom-gitops-ns",
 			argoCDAgentEnabled: "true",
 			description:        "Install flow with agent enabled",
 		},
@@ -229,24 +215,22 @@ func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
 				Client:                   getTestEnv().Client,
 				Scheme:                   getTestEnv().Scheme,
-				Config:                   getTestEnv().Config,
-				Interval:                 30,
-				GitopsOperatorImage:      "test-operator:latest",
-				GitopsOperatorNS:         tt.gitopsOperatorNS,
-				GitopsImage:              "test-gitops:latest",
-				GitopsNS:                 tt.gitopsNS,
-				RedisImage:               "test-redis:latest",
-				GitOpsServiceImage:       "test-gitops-service:latest",
+				Config:               getTestEnv().Config,
+				Interval:             30,
+				GitopsOperatorImage:  "test-operator:latest",
+				GitopsImage:          "test-gitops:latest",
+				RedisImage:           "test-redis:latest",
+				GitOpsServiceImage:   "test-gitops-service:latest",
 				GitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
 				ReconcileScope:           "Single-Namespace",
 				ArgoCDAgentEnabled:       tt.argoCDAgentEnabled,
 			}
 
-		// This test verifies that reconcile doesn't panic
-		// The actual functionality is tested in install/uninstall tests
-		g.Expect(func() {
-			reconciler.reconcile(context.TODO())
-		}).ToNot(gomega.Panic())
+			// This test verifies that reconcile doesn't panic
+			// The actual functionality is tested in install/uninstall tests
+			g.Expect(func() {
+				reconciler.reconcile(context.TODO())
+			}).ToNot(gomega.Panic())
 		})
 	}
 }
@@ -255,13 +239,11 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
-		Interval:                 30,
-		GitopsOperatorImage:      "test-operator:latest",
-		GitopsOperatorNS:         "openshift-gitops-operator",
-		GitopsImage:              "test-gitops:latest",
-		GitopsNS:                 "openshift-gitops",
-		RedisImage:               "test-redis:latest",
-		GitOpsServiceImage:       "test-gitops-service:latest",
+		Interval:            30,
+		GitopsOperatorImage: "test-operator:latest",
+		GitopsImage:         "test-gitops:latest",
+		RedisImage:          "test-redis:latest",
+		GitOpsServiceImage:  "test-gitops-service:latest",
 		GitOpsConsolePluginImage: "test-gitops-console-plugin:latest",
 		ReconcileScope:           "Single-Namespace",
 		HTTP_PROXY:               "http://proxy:8080",
@@ -277,9 +259,7 @@ func TestGitopsAddonReconciler_Fields(t *testing.T) {
 	// Verify all fields are set correctly
 	g.Expect(reconciler.Interval).To(gomega.Equal(30))
 	g.Expect(reconciler.GitopsOperatorImage).To(gomega.Equal("test-operator:latest"))
-	g.Expect(reconciler.GitopsOperatorNS).To(gomega.Equal("openshift-gitops-operator"))
 	g.Expect(reconciler.GitopsImage).To(gomega.Equal("test-gitops:latest"))
-	g.Expect(reconciler.GitopsNS).To(gomega.Equal("openshift-gitops"))
 	g.Expect(reconciler.RedisImage).To(gomega.Equal("test-redis:latest"))
 	g.Expect(reconciler.GitOpsServiceImage).To(gomega.Equal("test-gitops-service:latest"))
 	g.Expect(reconciler.GitOpsConsolePluginImage).To(gomega.Equal("test-gitops-console-plugin:latest"))

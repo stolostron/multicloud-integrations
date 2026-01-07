@@ -27,6 +27,7 @@ import (
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -44,12 +45,12 @@ func TestVerifyArgocdNamespace(t *testing.T) {
 	}{
 		{
 			name:          "valid ArgoCD namespace with server service",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-server",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app.kubernetes.io/component": "server",
 							"app.kubernetes.io/part-of":   "argocd",
@@ -61,12 +62,12 @@ func TestVerifyArgocdNamespace(t *testing.T) {
 		},
 		{
 			name:          "namespace without ArgoCD server service",
-			argoNamespace: "openshift-gitops",
+			argoNamespace: utils.GitOpsNamespace,
 			existingObjects: []client.Object{
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "other-service",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 						Labels: map[string]string{
 							"app": "other",
 						},
@@ -209,7 +210,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
@@ -231,7 +232,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -246,7 +247,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Spec: v1.ServiceSpec{
 						Ports: []v1.ServicePort{
@@ -277,7 +278,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
@@ -298,7 +299,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Spec: v1.ServiceSpec{
 						Ports: []v1.ServicePort{
@@ -329,7 +330,7 @@ func TestEnsureServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 				},
 			},
@@ -521,7 +522,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
@@ -532,7 +533,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Spec: v1.ServiceSpec{
 						Ports: []v1.ServicePort{
@@ -560,7 +561,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
@@ -571,7 +572,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Spec: v1.ServiceSpec{
 						Ports: []v1.ServicePort{
@@ -599,7 +600,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
@@ -622,7 +623,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
@@ -633,7 +634,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				&v1.Service{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "openshift-gitops-agent-principal",
-						Namespace: "openshift-gitops",
+						Namespace: utils.GitOpsNamespace,
 					},
 					Spec: v1.ServiceSpec{
 						ClusterIP: "10.0.0.100",
@@ -656,7 +657,7 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-						ArgoNamespace: "openshift-gitops",
+						ArgoNamespace: utils.GitOpsNamespace,
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},

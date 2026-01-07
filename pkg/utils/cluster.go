@@ -43,6 +43,12 @@ const (
 	ArgocdClusterSecretLabel = "apps.open-cluster-management.io/acm-cluster"
 	// #nosec G101
 	ACMClusterNameLabel = "apps.open-cluster-management.io/cluster-name"
+
+	// GitOpsNamespace is the fixed namespace for GitOps resources (no longer configurable)
+	GitOpsNamespace = "openshift-gitops"
+
+	// GitOpsOperatorNamespace is the fixed namespace for GitOps operator (no longer configurable)
+	GitOpsOperatorNamespace = "openshift-gitops-operator"
 )
 
 // ClusterPredicateFunc defines predicate function for cluster related watch, main purpose is to ignore heartbeat without change

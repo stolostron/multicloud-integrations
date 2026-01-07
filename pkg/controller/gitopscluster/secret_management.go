@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -38,7 +39,7 @@ import (
 func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string) error {
 	// Default to openshift-gitops if namespace is empty
 	if gitopsNamespace == "" {
-		gitopsNamespace = "openshift-gitops"
+		gitopsNamespace = utils.GitOpsNamespace
 	}
 
 	// Check if argocd-redis secret already exists
@@ -120,7 +121,7 @@ func (r *ReconcileGitOpsCluster) ensureArgoCDRedisSecret(gitopsNamespace string)
 func (r *ReconcileGitOpsCluster) ensureArgoCDAgentJWTSecret(gitopsNamespace string) error {
 	// Default to openshift-gitops if namespace is empty
 	if gitopsNamespace == "" {
-		gitopsNamespace = "openshift-gitops"
+		gitopsNamespace = utils.GitOpsNamespace
 	}
 
 	// Check if argocd-agent-jwt secret already exists

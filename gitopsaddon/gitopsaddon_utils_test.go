@@ -264,8 +264,8 @@ func TestApplyManifestSelectively(t *testing.T) {
 					"apiVersion": "argoproj.io/v1beta1",
 					"kind":       "ArgoCD",
 					"metadata": map[string]interface{}{
-						"name":      "openshift-gitops",
-						"namespace": "openshift-gitops",
+						"name":      GitOpsNamespace,
+						"namespace": GitOpsNamespace,
 					},
 				},
 			},
@@ -307,8 +307,7 @@ func TestApplyManifestSelectively(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reconciler := &GitopsAddonReconciler{
-				Client:   getTestEnv().Client,
-				GitopsNS: "openshift-gitops",
+				Client: getTestEnv().Client,
 			}
 
 			err := reconciler.applyManifestSelectively(tt.obj)

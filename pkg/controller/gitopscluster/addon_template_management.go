@@ -33,6 +33,7 @@ import (
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 const (
@@ -162,7 +163,7 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 // which are substituted by the addon framework using values from AddOnDeploymentConfig
 func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	if gitOpsNamespace == "" {
-		gitOpsNamespace = "openshift-gitops"
+		gitOpsNamespace = utils.GitOpsNamespace
 	}
 
 	manifests := []workv1.Manifest{

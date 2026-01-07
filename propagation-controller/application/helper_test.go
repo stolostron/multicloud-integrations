@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -531,7 +532,7 @@ func Test_generateManifestWork(t *testing.T) {
 		Kind:    "AppProject",
 	})
 	appProject.SetName("default")
-	appProject.SetNamespace("openshift-gitops")
+	appProject.SetNamespace(utils.GitOpsNamespace)
 	appProject.Object["spec"] = map[string]interface{}{
 		"sourceRepos": []interface{}{"*"},
 		"destinations": []interface{}{

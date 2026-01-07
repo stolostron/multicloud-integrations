@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.1
+    controller-gen.kubebuilder.io/version: v0.17.3
   name: gitopsclusters.apps.open-cluster-management.io
 spec:
   group: apps.open-cluster-management.io
@@ -96,13 +96,6 @@ spec:
                         description: ServerPort specifies the ArgoCD server port for
                           the agent. Default is empty.
                         type: string
-                      uninstall:
-                        default: false
-                        description: |-
-                          Uninstall indicates whether to uninstall only the ArgoCD agent component. Default is false.
-                          When set to true, only the agent component is uninstalled while keeping the gitopsAddon.
-                          This is different from GitOpsAddonSpec.Uninstall which removes everything.
-                        type: boolean
                     type: object
                   enabled:
                     default: false
@@ -114,17 +107,9 @@ spec:
                     description: GitOpsImage specifies the GitOps (ArgoCD) container
                       image. Default is empty.
                     type: string
-                  gitOpsNamespace:
-                    description: GitOpsNamespace specifies the GitOps namespace. Default
-                      is empty.
-                    type: string
                   gitOpsOperatorImage:
                     description: GitOpsOperatorImage specifies the GitOps operator
                       container image. Default is empty.
-                    type: string
-                  gitOpsOperatorNamespace:
-                    description: GitOpsOperatorNamespace specifies the GitOps operator
-                      namespace. Default is empty.
                     type: string
                   olmSubscription:
                     description: |-
@@ -184,13 +169,6 @@ spec:
                     description: RedisImage specifies the Redis container image. Default
                       is empty.
                     type: string
-                  uninstall:
-                    default: false
-                    description: |-
-                      Uninstall indicates whether to uninstall the gitopsaddon. Default is false.
-                      When set to true, performs uninstall operations instead of install.
-                      When uninstall is true, OverrideExistingConfigs is automatically set to true.
-                    type: boolean
                 type: object
               managedServiceAccountRef:
                 description: ManagedServiceAccountRef defines managed service account

@@ -37,6 +37,7 @@ import (
 	"k8s.io/klog"
 	workv1client "open-cluster-management.io/api/client/work/clientset/versioned/typed/work/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/grpc"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -164,7 +165,7 @@ func generateAppNamespace(namespace string, annos map[string]string) string {
 		return appNamespace
 	}
 
-	return "openshift-gitops"
+	return utils.GitOpsNamespace
 }
 
 // generateMaestroManifestWorkName returns the ManifestWork name for a given application.

@@ -173,20 +173,8 @@ type GitOpsAddonSpec struct {
 	// RedisImage specifies the Redis container image. Default is empty.
 	RedisImage string `json:"redisImage,omitempty"`
 
-	// GitOpsOperatorNamespace specifies the GitOps operator namespace. Default is empty.
-	GitOpsOperatorNamespace string `json:"gitOpsOperatorNamespace,omitempty"`
-
-	// GitOpsNamespace specifies the GitOps namespace. Default is empty.
-	GitOpsNamespace string `json:"gitOpsNamespace,omitempty"`
-
 	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
 	ReconcileScope string `json:"reconcileScope,omitempty"`
-
-	// Uninstall indicates whether to uninstall the gitopsaddon. Default is false.
-	// When set to true, performs uninstall operations instead of install.
-	// When uninstall is true, OverrideExistingConfigs is automatically set to true.
-	// +kubebuilder:default=false
-	Uninstall *bool `json:"uninstall,omitempty"`
 
 	// ArgoCDAgent defines the configuration for the ArgoCD agent.
 	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
@@ -263,12 +251,6 @@ type ArgoCDAgentSpec struct {
 
 	// Mode specifies the ArgoCD agent mode. Default is empty.
 	Mode string `json:"mode,omitempty"`
-
-	// Uninstall indicates whether to uninstall only the ArgoCD agent component. Default is false.
-	// When set to true, only the agent component is uninstalled while keeping the gitopsAddon.
-	// This is different from GitOpsAddonSpec.Uninstall which removes everything.
-	// +kubebuilder:default=false
-	Uninstall *bool `json:"uninstall,omitempty"`
 }
 
 // GitOpsClusterStatus defines the observed state of GitOpsCluster.
