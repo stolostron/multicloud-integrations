@@ -33,6 +33,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"open-cluster-management.io/multicloud-integrations/gitopsaddon"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -63,18 +64,19 @@ var (
 	metricsHost = "0.0.0.0"
 	metricsPort = 8387
 
-	// The default values for the latest openshift gitops operator. It requires to refresh in each ACM major release GA
-	GitopsOperatorImage = "registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator@sha256:1b86eb4e071b1c526931b6d18c3d8f51522293699059c514488602c320271049"
-	GitopsImage         = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
-	RedisImage                  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
-	GitOpsServiceImage          = "registry.redhat.io/openshift-gitops-1/gitops-rhel8@sha256:01883ebbe93f97a8196204adcd1749280b697e4c81f80658fdba507301f033aa"
-	GitOpsConsolePluginImage    = "registry.redhat.io/openshift-gitops-1/console-plugin-rhel8@sha256:fe57b69fc1570f7ea28530a67ceb44a58537dec419e7d5aa77e8e13fa61cccfc"
+	// Default image values are defined in pkg/utils/images.go
+	// These variables can be overridden by environment variables at runtime
+	GitopsOperatorImage         = utils.DefaultGitOpsOperatorImage
+	GitopsImage                 = utils.DefaultGitOpsImage
+	RedisImage                  = utils.DefaultRedisImage
+	GitOpsServiceImage          = utils.DefaultGitOpsServiceImage
+	GitOpsConsolePluginImage    = utils.DefaultGitOpsConsolePluginImage
 	ReconcileScope              = "Single-Namespace"
 	HTTP_PROXY                  = ""
 	HTTPS_PROXY                 = ""
 	NO_PROXY                    = ""
 	ARGOCD_AGENT_ENABLED        = "false"
-	ARGOCD_AGENT_IMAGE          = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:d17069d475959a5fca31dc4cd2c2dce4f3d895f2c2b97906261791674a889079"
+	ARGOCD_AGENT_IMAGE          = utils.DefaultArgoCDAgentImage
 	ARGOCD_AGENT_SERVER_ADDRESS = ""
 	ARGOCD_AGENT_SERVER_PORT    = ""
 	ARGOCD_AGENT_MODE           = "managed"

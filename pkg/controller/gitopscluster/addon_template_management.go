@@ -40,13 +40,11 @@ const (
 	// DefaultAddonImage is the default image to use if controller image cannot be determined
 	DefaultAddonImage = "quay.io/stolostron/multicloud-integrations"
 
-	// DefaultArgoCDAgentImage is the default ArgoCD agent image
-	// This should match the default in cmd/gitopsaddon/main.go
-	DefaultArgoCDAgentImage = "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8@sha256:d17069d475959a5fca31dc4cd2c2dce4f3d895f2c2b97906261791674a889079"
-
 	// ControllerImageEnvVar is the environment variable name for the controller image
 	ControllerImageEnvVar = "CONTROLLER_IMAGE"
 )
+
+// Note: Default GitOps images (including DefaultArgoCDAgentImage) are defined in pkg/utils/images.go
 
 // getControllerImage retrieves the controller's image from environment variable or auto-detects it
 // Auto-detection: queries the Kubernetes API to find its own pod and reads the image

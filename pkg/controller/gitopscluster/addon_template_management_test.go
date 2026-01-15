@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -285,8 +286,8 @@ func TestNewManifestWithoutStatus(t *testing.T) {
 }
 
 func TestDefaultArgoCDAgentImage(t *testing.T) {
-	// Verify the constant is set
-	if DefaultArgoCDAgentImage == "" {
+	// Verify the constant is set (defined in pkg/utils/images.go)
+	if utils.DefaultArgoCDAgentImage == "" {
 		t.Error("DefaultArgoCDAgentImage should not be empty")
 	}
 }

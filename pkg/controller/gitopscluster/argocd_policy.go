@@ -23,16 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
-)
-
-// Default images for ArgoCD components when OLM subscription mode is disabled
-// and no custom images are specified in GitOpsCluster spec.
-// These are the official Red Hat registry images, pinned to specific SHA digests.
-// Note: registry.redhat.io requires authentication, so for public e2e tests,
-// custom images should be specified in the GitOpsCluster spec.
-const (
-	DefaultGitOpsImage = "registry.redhat.io/openshift-gitops-1/argocd-rhel8@sha256:5c9ea426cd60e7b8d1d8e4fe763909200612434c65596855334054e26cbfe3d0"
-	DefaultRedisImage  = "registry.redhat.io/rhel9/redis-7@sha256:2fca0decc49230122f044afb2e7cd8f64921a00141c8c22c2f1402f3564f87f8"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // ErrPolicyFrameworkNotAvailable is returned when the governance-policy-framework is not installed.
@@ -217,8 +208,9 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 	// Add image override only when OLM subscription is disabled
 	if !olmSubscriptionEnabled {
 		// Get image configurations - use defaults if not specified
-		gitOpsImage := DefaultGitOpsImage
-		redisImage := DefaultRedisImage
+		// Default images are defined in pkg/utils/images.go
+		gitOpsImage := utils.DefaultGitOpsImage
+		redisImage := utils.DefaultRedisImage
 
 		if gitOpsCluster.Spec.GitOpsAddon != nil {
 			if gitOpsCluster.Spec.GitOpsAddon.GitOpsImage != "" {
