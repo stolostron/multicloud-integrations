@@ -152,8 +152,8 @@ echo "Step 4: Verifying ArgoCD CR still exists (managed by Policy, not deleted w
 # ArgoCD CR is managed by OCM Policy without ownerReferences
 # It should NOT be automatically deleted when GitOpsCluster is deleted
 # Users must manually delete the Policy to remove ArgoCD CR
-if kubectl get argocd openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
-  echo "✓ ArgoCD CR 'openshift-gitops' still exists (expected - managed by Policy)"
+if kubectl get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+  echo "✓ ArgoCD CR 'acm-openshift-gitops' still exists (expected - managed by Policy)"
 else
   echo "✗ ERROR: ArgoCD CR was unexpectedly deleted"
   exit 1

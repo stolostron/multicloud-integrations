@@ -108,24 +108,14 @@ func TestValidateGitOpsAddonSpec(t *testing.T) {
 			gitOpsAddon: nil,
 		},
 		{
-			name: "valid All-Namespaces scope",
-			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				ReconcileScope: "All-Namespaces",
-			},
+			name: "empty spec is valid",
+			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{},
 		},
 		{
-			name: "valid Single-Namespace scope",
+			name: "spec with operator image is valid",
 			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				ReconcileScope: "Single-Namespace",
+				GitOpsOperatorImage: "test-operator:latest",
 			},
-		},
-		{
-			name: "invalid reconcile scope",
-			gitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				ReconcileScope: "Invalid-Scope",
-			},
-			expectedError: true,
-			errorContains: "invalid ReconcileScope 'Invalid-Scope'",
 		},
 		{
 			name: "invalid nested ArgoCDAgent",

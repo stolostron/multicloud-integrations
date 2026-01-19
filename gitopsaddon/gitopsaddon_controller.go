@@ -33,8 +33,6 @@ import (
 
 //nolint:all
 //go:embed charts/openshift-gitops-operator/**
-//go:embed charts/openshift-gitops-dependency/**
-//go:embed charts/dep-crds/**
 var ChartFS embed.FS
 
 // GitOpsNamespace is exported from pkg/utils for backward compatibility
@@ -46,58 +44,32 @@ const GitOpsOperatorNamespace = utils.GitOpsOperatorNamespace
 // GitopsAddonReconciler reconciles a openshift gitops operator
 type GitopsAddonReconciler struct {
 	client.Client
-	Scheme                   *runtime.Scheme
-	Config                   *rest.Config
-	Interval                 int
-	GitopsOperatorImage      string
-	GitopsImage              string
-	RedisImage               string
-	GitOpsServiceImage       string
-	GitOpsConsolePluginImage string
-	ReconcileScope           string
-	HTTP_PROXY               string
-	HTTPS_PROXY              string
-	NO_PROXY                 string
-	ArgoCDAgentEnabled       string
-	ArgoCDAgentImage         string
-	ArgoCDAgentServerAddress string
-	ArgoCDAgentServerPort    string
-	ArgoCDAgentMode          string
+	Scheme   *runtime.Scheme
+	Config   *rest.Config
+	Interval int
+
+	// Config holds all image and configuration settings
+	AddonConfig *utils.GitOpsAddonConfig
 }
 
 // GitopsAddonCleanupReconciler handles cleanup/uninstall of Gitops agent addon
 type GitopsAddonCleanupReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	Config              *rest.Config
-	GitopsOperatorImage string
-	GitopsImage         string
-	ArgoCDAgentImage    string
+	Scheme *runtime.Scheme
+	Config *rest.Config
+
+	// Config holds all image and configuration settings
+	AddonConfig *utils.GitOpsAddonConfig
 }
 
 // SetupWithManager sets up the addon with the Manager
-func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage,
-	gitopsImage, redisImage, gitOpsServiceImage, gitOpsConsolePluginImage, reconcileScope,
-	HTTP_PROXY, HTTPS_PROXY, NO_PROXY, argoCDAgentEnabled, argoCDAgentImage, argoCDAgentServerAddress, argoCDAgentServerPort, argoCDAgentMode string) error {
+func SetupWithManager(mgr manager.Manager, interval int, config *utils.GitOpsAddonConfig) error {
 	reconciler := &GitopsAddonReconciler{
-		Client:                   mgr.GetClient(),
-		Scheme:                   mgr.GetScheme(),
-		Config:                   mgr.GetConfig(),
-		Interval:                 interval,
-		GitopsOperatorImage:      gitopsOperatorImage,
-		GitopsImage:              gitopsImage,
-		RedisImage:               redisImage,
-		GitOpsServiceImage:       gitOpsServiceImage,
-		GitOpsConsolePluginImage: gitOpsConsolePluginImage,
-		ReconcileScope:           reconcileScope,
-		HTTP_PROXY:               HTTP_PROXY,
-		HTTPS_PROXY:              HTTPS_PROXY,
-		NO_PROXY:                 NO_PROXY,
-		ArgoCDAgentEnabled:       argoCDAgentEnabled,
-		ArgoCDAgentImage:         argoCDAgentImage,
-		ArgoCDAgentServerAddress: argoCDAgentServerAddress,
-		ArgoCDAgentServerPort:    argoCDAgentServerPort,
-		ArgoCDAgentMode:          argoCDAgentMode,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Config:      mgr.GetConfig(),
+		Interval:    interval,
+		AddonConfig: config,
 	}
 
 	// Setup the secret controller to watch and copy ArgoCD agent client cert secrets
@@ -109,14 +81,12 @@ func SetupWithManager(mgr manager.Manager, interval int, gitopsOperatorImage,
 }
 
 // SetupCleanupWithManager sets up the cleanup reconciler with the Manager
-func SetupCleanupWithManager(mgr manager.Manager, gitopsOperatorImage, gitopsImage, argoCDAgentImage string) error {
+func SetupCleanupWithManager(mgr manager.Manager, config *utils.GitOpsAddonConfig) error {
 	reconciler := &GitopsAddonCleanupReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		Config:              mgr.GetConfig(),
-		GitopsOperatorImage: gitopsOperatorImage,
-		GitopsImage:         gitopsImage,
-		ArgoCDAgentImage:    argoCDAgentImage,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Config:      mgr.GetConfig(),
+		AddonConfig: config,
 	}
 
 	return mgr.Add(reconciler)

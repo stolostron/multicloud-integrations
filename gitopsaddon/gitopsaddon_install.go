@@ -25,54 +25,47 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process
+// Note: ArgoCD CR is now created by Policy (argocd_policy.go on the hub), not by this addon.
+// The addon's job is to install the operator and prepare the namespace.
 func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	klog.Info("Start templating and applying openshift gitops operator and its instance...")
 
-	// 1. Always template and apply the openshift gitops operator manifest
+	// 1. Create operator namespace with proper labels for pull secret sync
 	gitopsOperatorNsKey := types.NamespacedName{
 		Name: GitOpsOperatorNamespace,
 	}
 
-	// install dependency CRDs if it doesn't exist
-	err := r.applyCRDIfNotExists("gitopsservices", "pipelines.openshift.io/v1alpha1", "charts/dep-crds/gitopsservices.pipelines.openshift.io.crd.yaml")
+	// Install dependency CRDs if they don't already exist
+	// These stub CRDs are needed for Kind/EKS clusters that don't have OCP-specific resources
+	err := r.applyCRDIfNotExists("gitopsservices", "pipelines.openshift.io/v1alpha1", "charts/openshift-gitops-operator/templates/crds/gitopsservices.pipelines.openshift.io.crd.yaml")
 	if err != nil {
 		return err
 	}
 
-	err = r.applyCRDIfNotExists("routes", "route.openshift.io/v1", "charts/dep-crds/routes.route.openshift.io.crd.yaml")
+	err = r.applyCRDIfNotExists("routes", "route.openshift.io/v1", "charts/openshift-gitops-operator/templates/crds/routes.route.openshift.io.crd.yaml")
 	if err != nil {
 		return err
-	}
-
-	// Only install clusterversions CRD if we're on OpenShift (i.e., it already exists).
-	// On non-OpenShift clusters (like kind), installing this CRD would cause the argocd-operator
-	// to incorrectly detect the cluster as OpenShift and apply incorrect security contexts.
-	// We check if the CRD already exists first - if it does, it's a real OpenShift cluster.
-	if r.crdExists("clusterversions", "config.openshift.io/v1") {
-		klog.Info("ClusterVersion CRD already exists (OpenShift cluster detected), skipping installation")
-	} else {
-		klog.Info("ClusterVersion CRD does not exist (non-OpenShift cluster), skipping installation to avoid operator misconfiguration")
 	}
 
 	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
+		// 2. Template and apply the openshift gitops operator manifest
 		err := r.templateAndApplyChart("charts/openshift-gitops-operator", GitOpsOperatorNamespace, "openshift-gitops-operator")
 		if err != nil {
 			klog.Errorf("Failed to template and apply openshift-gitops-operator: %v", err)
 			return err
-		} else {
-			klog.Info("Successfully templated and applied openshift-gitops-operator")
 		}
+		klog.Info("Successfully templated and applied openshift-gitops-operator")
 	}
 
-	// 2. Wait for the operator deployment to be ready before creating the ArgoCD CR
+	// 3. Wait for the operator deployment to be ready before creating the ArgoCD CR
 	klog.Info("Waiting for ArgoCD operator deployment to be ready...")
 	timeout := 2 * time.Minute
 	err = r.waitForOperatorReady(timeout)
@@ -82,23 +75,29 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	}
 	klog.Info("ArgoCD operator is ready")
 
-	// 3. Create or update the ArgoCD CR via openshift-gitops-dependency helm chart
+	// 4. Create the openshift-gitops namespace (ArgoCD CR is created by Policy from the hub)
 	gitopsNsKey := types.NamespacedName{
 		Name: GitOpsNamespace,
 	}
-
 	if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-		err := r.renderAndApplyDependencyManifests("charts/openshift-gitops-dependency", GitOpsNamespace)
-		if err != nil {
-			klog.Errorf("Failed to process openshift-gitops-dependency manifests: %v", err)
-			return err
-		} else {
-			klog.Info("Successfully templated and applied openshift-gitops-dependency")
-		}
+		klog.Info("Successfully created/updated openshift-gitops namespace")
 	}
 
-	// 4. Log ArgoCD Agent status (operator handles deployment via ArgoCD CR)
-	if r.ArgoCDAgentEnabled == "true" {
+	// 5. Patch ArgoCD ServiceAccounts with imagePullSecrets
+	// The ArgoCD operator creates ServiceAccounts without imagePullSecrets, so we need to patch them
+	// This is needed for non-OCP clusters (like Kind, EKS) where node-level pull secrets don't exist
+	if err := r.patchArgoCDServiceAccountsWithImagePullSecrets(); err != nil {
+		klog.Warningf("Failed to patch ArgoCD ServiceAccounts: %v (continuing anyway)", err)
+	}
+
+	// 6. Check and delete pods with image pull issues on every reconcile cycle
+	// This handles the case where pods were already in ImagePullBackOff from a previous cycle
+	if err := r.deletePodsWithImagePullIssues(); err != nil {
+		klog.Warningf("Failed to delete pods with image pull issues: %v", err)
+	}
+
+	// 7. Log ArgoCD Agent status (operator handles deployment via ArgoCD CR)
+	if r.AddonConfig.ArgoCDAgentEnabled {
 		klog.Info("ArgoCD Agent is enabled - deployment is handled by the argocd-operator via the ArgoCD CR spec.argoCDAgent.agent")
 	} else {
 		klog.Info("ArgoCD Agent not enabled")
@@ -115,7 +114,7 @@ func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) erro
 		return nil
 	}
 
-	deploymentName := "argocd-operator-controller-manager"
+	deploymentName := "openshift-gitops-operator-controller-manager"
 	deploymentKey := types.NamespacedName{
 		Name:      deploymentName,
 		Namespace: GitOpsOperatorNamespace,
@@ -152,6 +151,8 @@ func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) erro
 }
 
 // CreateUpdateNamespace creates or updates a namespace with proper labels
+// The addon.open-cluster-management.io/namespace: true label enables the klusterlet addon
+// to automatically copy the image pull secret to this namespace
 func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.NamespacedName) error {
 	namespace := &corev1.Namespace{}
 	err := r.Get(context.TODO(), nameSpaceKey, namespace)
@@ -169,11 +170,12 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 			}
 
 			if err := r.Create(context.TODO(), namespace); err != nil {
-				klog.Errorf("Failed to create the openshift-gitops-operator namespace, err: %v", err)
+				klog.Errorf("Failed to create the %s namespace, err: %v", nameSpaceKey.Name, err)
 				return err
 			}
+			klog.Infof("Successfully created namespace %s", nameSpaceKey.Name)
 		} else {
-			klog.Errorf("Failed to get the openshift-gitops-operator namespace, err: %v", err)
+			klog.Errorf("Failed to get the %s namespace, err: %v", nameSpaceKey.Name, err)
 			return err
 		}
 	}
@@ -185,6 +187,7 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 		return nil
 	}
 
+	// Ensure the labels are set (in case namespace already existed without them)
 	if namespace.Labels == nil {
 		namespace.Labels = make(map[string]string)
 	}
@@ -192,7 +195,7 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 
 	if err := r.Update(context.TODO(), namespace); err != nil {
-		klog.Errorf("Failed to update the labels to the openshift-gitops-operator namespace, err: %v", err)
+		klog.Errorf("Failed to update the labels to the %s namespace, err: %v", nameSpaceKey.Name, err)
 		return err
 	}
 
@@ -203,11 +206,12 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	// open-cluster-management-image-pull-credentials secret to the new namespace
 	err = r.copyImagePullSecret(nameSpaceKey)
 	if err != nil {
-		return err
+		// If we couldn't copy the secret (e.g., source not found), don't wait for it
+		// The klusterlet addon label should trigger automatic copy if available
+		return nil
 	}
 
-	// Wait 1 min for the image pull secret `open-cluster-management-image-pull-credentials`
-	// to be generated
+	// Wait for the image pull secret to be generated (either by klusterlet label or our copy)
 	secretName := "open-cluster-management-image-pull-credentials"
 	secret := &corev1.Secret{}
 	timeout := time.Minute
@@ -216,6 +220,101 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 
 	for time.Since(start) < timeout {
 		err = r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: nameSpaceKey.Name}, secret)
+		if err == nil {
+			// Secret found
+			klog.Infof("Secret %s found in namespace %s", secretName, nameSpaceKey.Name)
+			return nil
+		}
+
+		if !errors.IsNotFound(err) {
+			klog.Errorf("Error while waiting for secret %s in namespace %s: %v", secretName, nameSpaceKey.Name, err)
+			return err
+		}
+
+		klog.Infof("the image pull credentials secret is NOT found in %s, wait for the next check, err: %v", nameSpaceKey.Name, err)
+
+		time.Sleep(interval)
+	}
+
+	// Timeout reached
+	klog.Errorf("Timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
+
+	return fmt.Errorf("timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
+}
+
+// copyImagePullSecret copies the image pull secret to the target namespace
+// This is a fallback for HCP hosted clusters where klusterlet doesn't automatically sync secrets
+func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.NamespacedName) error {
+	secretName := "open-cluster-management-image-pull-credentials"
+	secret := &corev1.Secret{}
+	gitopsAddonNs := utils.GetComponentNamespace("open-cluster-management-agent-addon")
+
+	// Get the original gitops addon image pull secret
+	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: gitopsAddonNs}, secret)
+	if err != nil {
+		klog.Errorf("gitops addon image pull secret not found. secret: %v/%v, err: %v", gitopsAddonNs, secretName, err)
+		return err
+	}
+
+	// Prepare the new Secret
+	newSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        secretName,
+			Namespace:   nameSpaceKey.Name,
+			Labels:      secret.Labels,
+			Annotations: secret.Annotations,
+		},
+		Data:       secret.Data,
+		StringData: secret.StringData,
+		Type:       secret.Type,
+	}
+
+	newSecret.ObjectMeta.UID = ""
+	newSecret.ObjectMeta.ResourceVersion = ""
+	newSecret.ObjectMeta.CreationTimestamp = metav1.Time{}
+	newSecret.ObjectMeta.DeletionTimestamp = nil
+
+	// Create/update the secret in target namespace
+	existingSecret := &corev1.Secret{}
+	err = r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: nameSpaceKey.Name}, existingSecret)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Create the secret
+			if err := r.Create(context.TODO(), newSecret); err != nil {
+				if !errors.IsAlreadyExists(err) {
+					klog.Errorf("Failed to create image pull secret in namespace %s: %v", nameSpaceKey.Name, err)
+					return err
+				}
+			}
+			klog.Infof("Created image pull secret in namespace %s", nameSpaceKey.Name)
+			return nil
+		}
+		return err
+	}
+
+	// Update existing secret
+	existingSecret.Data = newSecret.Data
+	existingSecret.Type = newSecret.Type
+	if err := r.Update(context.TODO(), existingSecret); err != nil {
+		klog.Errorf("Failed to update image pull secret in namespace %s: %v", nameSpaceKey.Name, err)
+		return err
+	}
+	klog.Infof("Updated image pull secret in namespace %s", nameSpaceKey.Name)
+	return nil
+}
+
+// WaitForImagePullSecret waits for the image pull credentials secret to exist in the addon namespace
+// This secret is propagated by ACM from the hub's multiclusterhub-operator-pull-secret
+func (r *GitopsAddonReconciler) WaitForImagePullSecret(nameSpaceKey types.NamespacedName) error {
+	secretName := "open-cluster-management-image-pull-credentials"
+	timeout := 2 * time.Minute
+	interval := 5 * time.Second
+
+	secret := &corev1.Secret{}
+	start := time.Now()
+
+	for time.Since(start) < timeout {
+		err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: nameSpaceKey.Name}, secret)
 		if err == nil {
 			// Secret found
 			klog.Infof("Secret %s found in namespace %s", secretName, nameSpaceKey.Name)
@@ -238,187 +337,117 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	return fmt.Errorf("timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
 }
 
-// copyImagePullSecret copies the image pull secret to the target namespace
-func (r *GitopsAddonReconciler) copyImagePullSecret(nameSpaceKey types.NamespacedName) error {
+// patchArgoCDServiceAccountsWithImagePullSecrets patches ArgoCD ServiceAccounts with imagePullSecrets
+// This is needed for non-OCP clusters (like Kind, EKS) where node-level pull secrets don't exist.
+// The ArgoCD operator creates ServiceAccounts without imagePullSecrets, so pods can't authenticate
+// to registry.redhat.io. This function adds the pull secret reference to allow image pulls.
+//
+// Note: The ArgoCD CRD does NOT have an imagePullSecrets field, so SA patching is the only option.
+// We dynamically list all SAs in the namespace to catch all ArgoCD-managed SAs including:
+// - application-controller, server, repo-server, redis, redis-ha, redis-ha-haproxy
+// - dex-server (if SSO enabled), applicationset-controller, notifications-controller
+func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets() error {
 	secretName := "open-cluster-management-image-pull-credentials"
+
+	// First check if the secret exists in the namespace
 	secret := &corev1.Secret{}
-	gitopsAddonNs := utils.GetComponentNamespace("open-cluster-management-agent-addon")
-
-	// Get the original gitops addon image pull secret
-	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: gitopsAddonNs}, secret)
+	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: GitOpsNamespace}, secret)
 	if err != nil {
-		klog.Errorf("gitops addon image pull secret no found. secret: %v/%v, err: %v", gitopsAddonNs, secretName, err)
-		return err
-	}
-
-	// Prepare the new Secret
-	newSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        secretName,
-			Namespace:   nameSpaceKey.Name,
-			Labels:      secret.Labels,
-			Annotations: secret.Annotations,
-		},
-		Data:       secret.Data,
-		StringData: secret.StringData,
-		Type:       secret.Type,
-	}
-
-	newSecret.ObjectMeta.UID = ""
-	newSecret.ObjectMeta.ResourceVersion = ""
-	newSecret.ObjectMeta.CreationTimestamp = metav1.Time{}
-	newSecret.ObjectMeta.DeletionTimestamp = nil
-	newSecret.ObjectMeta.DeletionGracePeriodSeconds = nil
-	newSecret.ObjectMeta.OwnerReferences = nil
-	newSecret.ObjectMeta.ManagedFields = nil
-
-	// Create the new Secret in the target namespace
-	err = r.Create(context.TODO(), newSecret)
-	if err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create target secret %s/%s: %w", nameSpaceKey.Name, secretName, err)
+		if errors.IsNotFound(err) {
+			klog.V(2).Infof("Image pull secret %s not found in namespace %s, skipping SA patching", secretName, GitOpsNamespace)
+			return nil // Not an error - secret might not exist in OCP environments where node-level secrets work
 		}
+		return fmt.Errorf("failed to check for image pull secret: %v", err)
 	}
 
-	klog.Infof("Successfully copied secret %s/%s to %s/%s", gitopsAddonNs, secretName, nameSpaceKey.Name, secretName)
-
-	return nil
-}
-
-// handleDefaultServiceAccount waits for the default service account and appends imagePullSecrets
-func (r *GitopsAddonReconciler) handleDefaultServiceAccount(obj *unstructured.Unstructured) error {
-	klog.Info("Handling default ServiceAccount - waiting for existence and appending imagePullSecrets")
-
-	saKey := types.NamespacedName{
-		Name:      "default",
-		Namespace: obj.GetNamespace(),
+	// List all ServiceAccounts in the namespace
+	saList := &corev1.ServiceAccountList{}
+	if err := r.List(context.TODO(), saList, &client.ListOptions{Namespace: GitOpsNamespace}); err != nil {
+		return fmt.Errorf("failed to list ServiceAccounts: %v", err)
 	}
 
-	return r.waitAndAppendImagePullSecrets(saKey, obj)
-}
+	secretRef := corev1.LocalObjectReference{Name: secretName}
+	patchedCount := 0
 
-// handleRedisServiceAccount waits for the redis service account and appends imagePullSecrets
-func (r *GitopsAddonReconciler) handleRedisServiceAccount(obj *unstructured.Unstructured) error {
-	klog.Info("Handling Redis ServiceAccount - waiting for ArgoCD deployment and appending imagePullSecrets")
+	for i := range saList.Items {
+		sa := &saList.Items[i]
 
-	saKey := types.NamespacedName{
-		Name:      "openshift-gitops-argocd-redis",
-		Namespace: obj.GetNamespace(),
-	}
-
-	return r.waitAndAppendImagePullSecrets(saKey, obj)
-}
-
-// handleApplicationControllerServiceAccount waits for the application controller service account and appends imagePullSecrets
-func (r *GitopsAddonReconciler) handleApplicationControllerServiceAccount(obj *unstructured.Unstructured) error {
-	klog.Info("Handling Application Controller ServiceAccount - waiting for ArgoCD deployment and appending imagePullSecrets")
-
-	saKey := types.NamespacedName{
-		Name:      "openshift-gitops-argocd-application-controller",
-		Namespace: obj.GetNamespace(),
-	}
-
-	return r.waitAndAppendImagePullSecrets(saKey, obj)
-}
-
-// handleDefaultAppProject applies the default AppProject directly
-func (r *GitopsAddonReconciler) handleDefaultAppProject(obj *unstructured.Unstructured) error {
-	klog.Info("Handling default AppProject - applying directly")
-
-	return r.applyManifest(obj)
-}
-
-// handleApplicationControllerClusterRoleBinding applies the ClusterRoleBinding directly
-func (r *GitopsAddonReconciler) handleApplicationControllerClusterRoleBinding(obj *unstructured.Unstructured) error {
-	klog.Info("Handling Application Controller ClusterRoleBinding - applying directly")
-
-	return r.applyManifest(obj)
-}
-
-// waitAndAppendImagePullSecrets waits for a service account to exist and appends imagePullSecrets
-func (r *GitopsAddonReconciler) waitAndAppendImagePullSecrets(saKey types.NamespacedName, renderedObj *unstructured.Unstructured) error {
-	// Wait for the service account to exist (up to 3 minutes - ArgoCD operator needs time to create resources)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	var existingSA *corev1.ServiceAccount
-	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
-		sa := &corev1.ServiceAccount{}
-		err := r.Get(ctx, saKey, sa)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				klog.Infof("ServiceAccount %s not found yet, continuing to wait...", saKey.Name)
-				return false, nil
-			}
-			return false, err
-		}
-
-		existingSA = sa
-		return true, nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to wait for ServiceAccount %s: %w", saKey.Name, err)
-	}
-
-	// Get imagePullSecrets from the rendered manifest
-	renderedImagePullSecrets, found, err := unstructured.NestedSlice(renderedObj.Object, "imagePullSecrets")
-	if err != nil {
-		return fmt.Errorf("failed to get rendered imagePullSecrets: %w", err)
-	}
-	if !found || len(renderedImagePullSecrets) == 0 {
-		klog.Infof("No imagePullSecrets to append for ServiceAccount %s", saKey.Name)
-		return nil
-	}
-
-	// Convert rendered imagePullSecrets to the correct format
-	var secretRefs []corev1.LocalObjectReference
-	for _, secret := range renderedImagePullSecrets {
-		secretMap, ok := secret.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if name, exists := secretMap["name"]; exists {
-			if nameStr, ok := name.(string); ok {
-				secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: nameStr})
-			}
-		}
-	}
-
-	if len(secretRefs) == 0 {
-		klog.Infof("No valid imagePullSecrets found to append for ServiceAccount %s", saKey.Name)
-		return nil
-	}
-
-	// Check if the secrets are already present
-	secretsToAdd := []corev1.LocalObjectReference{}
-	for _, newSecret := range secretRefs {
+		// Check if the secret is already in imagePullSecrets
 		found := false
-		for _, existingSecret := range existingSA.ImagePullSecrets {
-			if existingSecret.Name == newSecret.Name {
+		for _, ref := range sa.ImagePullSecrets {
+			if ref.Name == secretName {
 				found = true
 				break
 			}
 		}
+
 		if !found {
-			secretsToAdd = append(secretsToAdd, newSecret)
+			// Add the secret reference
+			sa.ImagePullSecrets = append(sa.ImagePullSecrets, secretRef)
+			if err := r.Update(context.TODO(), sa); err != nil {
+				klog.Warningf("Failed to patch ServiceAccount %s/%s: %v", GitOpsNamespace, sa.Name, err)
+				continue
+			}
+			klog.Infof("Patched ServiceAccount %s/%s with imagePullSecrets", GitOpsNamespace, sa.Name)
+			patchedCount++
 		}
 	}
 
-	if len(secretsToAdd) == 0 {
-		klog.Infof("All imagePullSecrets already exist for ServiceAccount %s", saKey.Name)
-		return nil
+	if patchedCount > 0 {
+		klog.Infof("Patched %d ServiceAccounts with imagePullSecrets", patchedCount)
 	}
 
-	// Append new secrets to existing ones
-	existingSA.ImagePullSecrets = append(existingSA.ImagePullSecrets, secretsToAdd...)
+	return nil
+}
 
-	// Update the service account
-	err = r.Update(context.TODO(), existingSA)
-	if err != nil {
-		return fmt.Errorf("failed to update ServiceAccount %s with imagePullSecrets: %w", saKey.Name, err)
+// deletePodsWithImagePullIssues deletes pods in the GitOps namespace that have ImagePullBackOff or ErrImagePull status
+// This forces Kubernetes to recreate them, and the new pods will use the patched ServiceAccounts with imagePullSecrets
+func (r *GitopsAddonReconciler) deletePodsWithImagePullIssues() error {
+	podList := &corev1.PodList{}
+	if err := r.List(context.TODO(), podList, &client.ListOptions{Namespace: GitOpsNamespace}); err != nil {
+		return fmt.Errorf("failed to list pods: %v", err)
 	}
 
-	klog.Infof("Successfully appended %d imagePullSecrets to ServiceAccount %s", len(secretsToAdd), saKey.Name)
+	deletedCount := 0
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Check if any container has ImagePullBackOff or ErrImagePull status
+		hasImagePullIssue := false
+		for _, containerStatus := range pod.Status.ContainerStatuses {
+			if containerStatus.State.Waiting != nil {
+				reason := containerStatus.State.Waiting.Reason
+				if reason == "ImagePullBackOff" || reason == "ErrImagePull" {
+					hasImagePullIssue = true
+					break
+				}
+			}
+		}
+		// Also check init containers
+		for _, containerStatus := range pod.Status.InitContainerStatuses {
+			if containerStatus.State.Waiting != nil {
+				reason := containerStatus.State.Waiting.Reason
+				if reason == "ImagePullBackOff" || reason == "ErrImagePull" {
+					hasImagePullIssue = true
+					break
+				}
+			}
+		}
+
+		if hasImagePullIssue {
+			klog.Infof("Deleting pod %s/%s with image pull issues to force restart", pod.Namespace, pod.Name)
+			if err := r.Delete(context.TODO(), pod); err != nil {
+				if !errors.IsNotFound(err) {
+					klog.Warningf("Failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
+				}
+			} else {
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 {
+		klog.Infof("Deleted %d pods with image pull issues", deletedCount)
+	}
+
 	return nil
 }

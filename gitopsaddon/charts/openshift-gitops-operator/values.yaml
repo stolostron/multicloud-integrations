@@ -3,16 +3,34 @@ org: open-cluster-management
 nameOverride: openshift-gitops-operator
 fullnameOverride: openshift-gitops-operator
 
-global: 
-  openshift_gitops_operator:
-    image: ""
-    tag: ""
-  gitops_service:
-    image: ""
-    tag: ""
-  gitops_console_plugin:
-    image: ""
-    tag: ""
+global:
+  # Image values are injected at runtime from pkg/utils/config.go
+  # DO NOT set default values here - they are passed by the Go code
+  # These match the environment variable names expected by the GitOps operator
+  operatorImages:
+    # GitOps Operator image (container image for the operator itself)
+    GITOPS_OPERATOR_IMAGE: ""
+    # ArgoCD core images
+    ARGOCD_IMAGE: ""
+    ARGOCD_REPOSERVER_IMAGE: ""
+    # Redis images
+    ARGOCD_REDIS_IMAGE: ""
+    ARGOCD_REDIS_HA_IMAGE: ""
+    ARGOCD_REDIS_HA_PROXY_IMAGE: ""
+    # SSO / Dex image
+    ARGOCD_DEX_IMAGE: ""
+    # Backend / GitOps Service image
+    BACKEND_IMAGE: ""
+    # Console plugin image
+    GITOPS_CONSOLE_PLUGIN_IMAGE: ""
+    # Extension image
+    ARGOCD_EXTENSION_IMAGE: ""
+    # Argo Rollouts image
+    ARGO_ROLLOUTS_IMAGE: ""
+    # ArgoCD Agent (Principal) image
+    ARGOCD_PRINCIPAL_IMAGE: ""
+    # ArgoCD Image Updater image
+    ARGOCD_IMAGE_UPDATER_IMAGE: ""
   proxyConfig:
     HTTP_PROXY: ""
     HTTPS_PROXY: ""

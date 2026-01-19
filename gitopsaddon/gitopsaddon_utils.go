@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/klog"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	k8syaml "sigs.k8s.io/yaml"
 )
 
@@ -65,42 +66,31 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 	// Populate values based on chart path
 	switch chartPath {
 	case "charts/openshift-gitops-operator":
-		// Parse the operator image
-		image, tag, err := ParseImageReference(r.GitopsOperatorImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse GitopsOperatorImage: %w", err)
-		}
+		operatorImages := make(map[string]interface{})
 
-		// Parse the gitops service image
-		gitOpsServiceImage, gitOpsServiceTag, err := ParseImageReference(r.GitOpsServiceImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse GitOpsServiceImage: %w", err)
-		}
+		// Get the operator image
+		operatorImage := r.AddonConfig.OperatorImages[utils.EnvGitOpsOperatorImage]
+		operatorImages[utils.EnvGitOpsOperatorImage] = operatorImage
 
-		// Parse the gitops console plugin image
-		gitOpsConsolePluginImage, gitOpsConsolePluginTag, err := ParseImageReference(r.GitOpsConsolePluginImage)
-		if err != nil {
-			return fmt.Errorf("failed to parse GitOpsConsolePluginImage: %w", err)
+		// Only pass component image overrides for the Red Hat operator
+		// The community argocd-operator uses its own built-in defaults
+		// and doesn't support the same environment variable names
+		if !strings.Contains(operatorImage, "argoprojlabs") {
+			// This is the Red Hat operator, pass all image overrides
+			for key, value := range r.AddonConfig.OperatorImages {
+				operatorImages[key] = value
+			}
+		} else {
+			klog.Info("Using community argocd-operator - skipping Red Hat image overrides")
 		}
 
 		// Set up global values for openshift-gitops-operator chart
 		global := map[string]interface{}{
-			"openshift_gitops_operator": map[string]interface{}{
-				"image": image,
-				"tag":   tag,
-			},
-			"gitops_service": map[string]interface{}{
-				"image": gitOpsServiceImage,
-				"tag":   gitOpsServiceTag,
-			},
-			"gitops_console_plugin": map[string]interface{}{
-				"image": gitOpsConsolePluginImage,
-				"tag":   gitOpsConsolePluginTag,
-			},
+			"operatorImages": operatorImages,
 			"proxyConfig": map[string]interface{}{
-				"HTTP_PROXY":  r.HTTP_PROXY,
-				"HTTPS_PROXY": r.HTTPS_PROXY,
-				"NO_PROXY":    r.NO_PROXY,
+				"HTTP_PROXY":  r.AddonConfig.HTTPProxy,
+				"HTTPS_PROXY": r.AddonConfig.HTTPSProxy,
+				"NO_PROXY":    r.AddonConfig.NoProxy,
 			},
 		}
 		values["global"] = global
@@ -149,6 +139,32 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 			// Skip if no kind or metadata
 			if obj.GetKind() == "" || obj.GetName() == "" {
 				continue
+			}
+
+			// Skip certain CRDs if they already exist (don't overwrite OCP-provided CRDs)
+			// These CRDs are provided by OCP and should not be replaced
+			if obj.GetKind() == "CustomResourceDefinition" {
+				crdName := obj.GetName()
+				skipIfExists := []string{
+					"gitopsservices.pipelines.openshift.io",
+					"routes.route.openshift.io",
+				}
+				shouldSkip := false
+				for _, skipCRD := range skipIfExists {
+					if crdName == skipCRD {
+						shouldSkip = true
+						break
+					}
+				}
+				if shouldSkip {
+					// Check if CRD already exists
+					existing := &apiextensionsv1.CustomResourceDefinition{}
+					err := r.Get(context.TODO(), types.NamespacedName{Name: crdName}, existing)
+					if err == nil {
+						klog.Infof("CRD %s already exists, skipping (not overwriting OCP-provided CRD)", crdName)
+						continue
+					}
+				}
 			}
 
 			// Set the namespace if it's a namespaced resource and doesn't have one
@@ -206,113 +222,6 @@ func (r *GitopsAddonReconciler) copyEmbeddedToTemp(fs embed.FS, srcPath, destPat
 	return nil
 }
 
-// renderAndApplyDependencyManifests renders and applies dependency YAML manifests
-func (r *GitopsAddonReconciler) renderAndApplyDependencyManifests(chartPath, namespace string) error {
-	klog.Info("Rendering openshift-gitops-dependency helm chart manifests...")
-
-	tempDir, err := os.MkdirTemp("", "gitops-dependency-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Copy chart files to temp directory
-	if err := r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir); err != nil {
-		return fmt.Errorf("failed to copy chart files: %v", err)
-	}
-
-	// Load and render the chart
-	chart, err := loader.Load(tempDir)
-	if err != nil {
-		return fmt.Errorf("failed to load chart: %v", err)
-	}
-
-	// Prepare values for templating
-	values := map[string]interface{}{}
-
-	// Parse the gitops and redis images
-	gitopsImage, gitopsTag, err := ParseImageReference(r.GitopsImage)
-	if err != nil {
-		return fmt.Errorf("failed to parse GitopsImage: %w", err)
-	}
-
-	redisImage, redisTag, err := ParseImageReference(r.RedisImage)
-	if err != nil {
-		return fmt.Errorf("failed to parse RedisImage: %w", err)
-	}
-
-	// Set up global values for openshift-gitops-dependency chart
-	// Note: ArgoCD CR is managed by OCM Policy from hub cluster, not by this chart
-	global := map[string]interface{}{
-		"application_controller": map[string]interface{}{
-			"image": gitopsImage,
-			"tag":   gitopsTag,
-		},
-		"redis": map[string]interface{}{
-			"image": redisImage,
-			"tag":   redisTag,
-		},
-		"reconcile_scope": r.ReconcileScope,
-		"proxyConfig": map[string]interface{}{
-			"HTTP_PROXY":  r.HTTP_PROXY,
-			"HTTPS_PROXY": r.HTTPS_PROXY,
-			"NO_PROXY":    r.NO_PROXY,
-		},
-	}
-	values["global"] = global
-
-	options := chartutil.ReleaseOptions{
-		Name:      "openshift-gitops-dependency",
-		Namespace: namespace,
-	}
-
-	valuesToRender, err := chartutil.ToRenderValues(chart, values, options, nil)
-	if err != nil {
-		return fmt.Errorf("failed to prepare chart values: %v", err)
-	}
-
-	files, err := engine.Engine{}.Render(chart, valuesToRender)
-	if err != nil {
-		return fmt.Errorf("failed to render chart templates: %v", err)
-	}
-
-	// Apply rendered manifests selectively
-	for name, content := range files {
-		if len(strings.TrimSpace(content)) == 0 || strings.HasSuffix(name, "NOTES.txt") {
-			continue
-		}
-
-		yamlDocs := strings.Split(content, "\n---\n")
-		for _, doc := range yamlDocs {
-			doc = strings.TrimSpace(doc)
-			if len(doc) == 0 {
-				continue
-			}
-
-			var obj unstructured.Unstructured
-			if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
-				klog.Warningf("Failed to parse YAML document in %s: %v", name, err)
-				continue
-			}
-
-			if obj.GetKind() == "" || obj.GetName() == "" {
-				continue
-			}
-
-			if obj.GetNamespace() == "" {
-				obj.SetNamespace(namespace)
-			}
-
-			if err := r.applyManifestSelectively(&obj); err != nil {
-				klog.Errorf("Failed to apply manifest %s/%s: %v", obj.GetKind(), obj.GetName(), err)
-			}
-		}
-	}
-
-	klog.Info("Successfully rendered and applied openshift-gitops-dependency manifests")
-	return nil
-}
-
 // applyManifestSelectively applies manifests with special handling for certain resource types
 func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstructured) error {
 	// Check if the addon is paused before applying anything
@@ -352,27 +261,7 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
 	obj.SetLabels(labels)
 
-	switch kind {
-	case "ServiceAccount":
-		switch name {
-		case "default":
-			return r.handleDefaultServiceAccount(obj)
-		case "openshift-gitops-argocd-redis":
-			return r.handleRedisServiceAccount(obj)
-		case "openshift-gitops-argocd-application-controller":
-			return r.handleApplicationControllerServiceAccount(obj)
-		}
-	case "AppProject":
-		if name == "default" {
-			return r.handleDefaultAppProject(obj)
-		}
-	case "ClusterRoleBinding":
-		if name == "openshift-gitops-argocd-application-controller" {
-			return r.handleApplicationControllerClusterRoleBinding(obj)
-		}
-	}
-
-	// For all other resources, apply directly
+	// Apply the manifest directly
 	return r.applyManifest(obj)
 }
 

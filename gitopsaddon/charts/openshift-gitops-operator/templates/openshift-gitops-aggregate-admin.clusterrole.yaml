@@ -3,7 +3,7 @@ kind: ClusterRole
 metadata:
   labels:
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
-  name: argocd-aggregate-admin
+  name: openshift-gitops-aggregate-admin
 rules:
 - apiGroups:
   - argoproj.io

@@ -120,7 +120,7 @@ func TestEnsureAddOnTemplate(t *testing.T) {
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 				GitOpsOperatorImage: "test-operator:v1",
 				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-					Image: "test-agent:v1",
+					ServerAddress: "test-server:443",
 				},
 			},
 		},
@@ -285,9 +285,65 @@ func TestNewManifestWithoutStatus(t *testing.T) {
 	}
 }
 
-func TestDefaultArgoCDAgentImage(t *testing.T) {
-	// Verify the constant is set (defined in pkg/utils/images.go)
-	if utils.DefaultArgoCDAgentImage == "" {
-		t.Error("DefaultArgoCDAgentImage should not be empty")
+func TestDefaultOperatorImages(t *testing.T) {
+	// Verify the default images are set (defined in pkg/utils/config.go)
+	if utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage] == "" {
+		t.Error("Default ArgoCD Agent/Principal image should not be empty")
+	}
+	if utils.DefaultOperatorImages[utils.EnvGitOpsOperatorImage] == "" {
+		t.Error("Default GitOps Operator image should not be empty")
+	}
+}
+
+func TestBuildAddonEnvVars(t *testing.T) {
+	envVars := buildAddonEnvVars()
+
+	// Should have all image env vars (excluding hub-only) + proxy + ArgoCD agent vars
+	expectedMinCount := len(utils.DefaultOperatorImages) - 1 + 3 + 4 // -1 for hub-only, +3 proxy, +4 agent
+
+	if len(envVars) < expectedMinCount {
+		t.Errorf("Expected at least %d env vars, got %d", expectedMinCount, len(envVars))
+	}
+
+	// Check that all env vars have placeholder values like {{VAR_NAME}}
+	for _, env := range envVars {
+		if env.Name == "" {
+			t.Error("Env var name should not be empty")
+		}
+		if env.Value == "" {
+			t.Errorf("Env var %s value should not be empty", env.Name)
+		}
+		// Value should be a placeholder like {{VAR_NAME}}
+		if len(env.Value) < 4 || env.Value[:2] != "{{" || env.Value[len(env.Value)-2:] != "}}" {
+			t.Errorf("Env var %s value should be a placeholder like {{VAR_NAME}}, got %s", env.Name, env.Value)
+		}
+	}
+
+	// Check that hub-only vars are NOT included
+	for _, env := range envVars {
+		if env.Name == utils.EnvArgoCDPrincipalImage {
+			t.Errorf("Hub-only var %s should NOT be in buildAddonEnvVars()", utils.EnvArgoCDPrincipalImage)
+		}
+	}
+
+	// Check that key spoke vars ARE included
+	requiredVars := map[string]bool{
+		utils.EnvGitOpsOperatorImage:   false,
+		utils.EnvArgoCDImage:           false,
+		utils.EnvHTTPProxy:             false,
+		utils.EnvArgoCDAgentEnabled:    false,
+		utils.EnvArgoCDAgentMode:       false,
+	}
+
+	for _, env := range envVars {
+		if _, ok := requiredVars[env.Name]; ok {
+			requiredVars[env.Name] = true
+		}
+	}
+
+	for varName, found := range requiredVars {
+		if !found {
+			t.Errorf("Expected %s to be in buildAddonEnvVars()", varName)
+		}
 	}
 }

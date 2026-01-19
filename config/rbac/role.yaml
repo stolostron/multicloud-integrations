@@ -111,8 +111,25 @@ rules:
 - apiGroups:
   - cluster.open-cluster-management.io
   resources:
+  - managedclustersetbindings
+  - managedclustersets/bind
   - placements
   verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - policy.open-cluster-management.io
+  resources:
+  - placementbindings
+  - policies
+  verbs:
+  - create
+  - delete
   - get
   - list
   - patch

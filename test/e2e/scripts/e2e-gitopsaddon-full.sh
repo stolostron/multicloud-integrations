@@ -58,12 +58,12 @@ if [ "$POD_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-# Verify ArgoCD CR exists on managed cluster
+# Verify ArgoCD CR exists on managed cluster (created by Policy)
 echo ""
 echo "Step 3: Verifying ArgoCD CR on managed cluster..."
 for i in {1..60}; do
-  if kubectl --context ${SPOKE_CONTEXT} get argocd openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
-    echo "  ✓ ArgoCD CR 'openshift-gitops' exists (attempt $i/60)"
+  if kubectl --context ${SPOKE_CONTEXT} get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    echo "  ✓ ArgoCD CR 'acm-openshift-gitops' exists (attempt $i/60)"
     break
   fi
   if [ $i -eq 60 ]; then
@@ -78,11 +78,11 @@ done
 echo ""
 echo "Step 4: Verifying ArgoCD application controller pod on managed cluster..."
 for i in {1..60}; do
-  APP_CONTROLLER_PODS=$(kubectl --context ${SPOKE_CONTEXT} get pods -n ${GITOPS_NAMESPACE} -l app.kubernetes.io/name=openshift-gitops-application-controller --no-headers 2>/dev/null | wc -l)
+  APP_CONTROLLER_PODS=$(kubectl --context ${SPOKE_CONTEXT} get pods -n ${GITOPS_NAMESPACE} -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --no-headers 2>/dev/null | wc -l)
   if [ "$APP_CONTROLLER_PODS" -gt 0 ]; then
     echo "  ✓ Found $APP_CONTROLLER_PODS application controller pod(s)"
     kubectl --context ${SPOKE_CONTEXT} wait --for=condition=ready --timeout=300s \
-      pod -l app.kubernetes.io/name=openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} 2>/dev/null || echo "  Waiting for pod to be ready..."
+      pod -l app.kubernetes.io/name=acm-openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} 2>/dev/null || echo "  Waiting for pod to be ready..."
     break
   fi
   if [ $i -eq 60 ]; then
@@ -166,18 +166,18 @@ sleep 10
 # Verify AddOnDeploymentConfig was updated
 echo ""
 echo "Step 1.5: Verifying AddOnDeploymentConfig was updated..."
-for i in {1..30}; do
+for i in {1..60}; do
   AGENT_ENABLED=$(kubectl get addondeploymentconfig gitops-addon-config -n cluster1 --context ${HUB_CONTEXT} -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_ENABLED")].value}' 2>/dev/null || echo "false")
   if [ "${AGENT_ENABLED}" == "true" ]; then
     echo "  ✓ AddOnDeploymentConfig updated: ARGOCD_AGENT_ENABLED=true"
     break
   fi
-  if [ $i -eq 30 ]; then
-    echo "  ✗ ERROR: AddOnDeploymentConfig not updated after 30 attempts"
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: AddOnDeploymentConfig not updated after 60 attempts"
     kubectl get addondeploymentconfig gitops-addon-config -n cluster1 --context ${HUB_CONTEXT} -o yaml
     exit 1
   fi
-  echo "  Waiting for AddOnDeploymentConfig update... (attempt $i/30, current value: ${AGENT_ENABLED})"
+  echo "  Waiting for AddOnDeploymentConfig update... (attempt $i/60, current value: ${AGENT_ENABLED})"
   sleep 2
 done
 

@@ -167,6 +167,14 @@ func buildOLMSubscriptionManifests(name, namespace, channel, source, sourceNames
 				"source":              source,
 				"sourceNamespace":     sourceNamespace,
 				"installPlanApproval": installPlanApproval,
+				"config": map[string]interface{}{
+					"env": []map[string]interface{}{
+						{
+							"name":  "DISABLE_DEFAULT_ARGOCD_INSTANCE",
+							"value": "true",
+						},
+					},
+				},
 			},
 		},
 	}

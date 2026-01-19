@@ -17,6 +17,7 @@ package gitopscluster
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,9 @@ var ErrPolicyFrameworkNotAvailable = fmt.Errorf("governance-policy-framework is 
 
 // CreateArgoCDPolicy creates a Policy wrapping the ArgoCD CR for managed clusters.
 // The Policy uses ConfigurationPolicy to enforce the ArgoCD CR on managed clusters selected by the Placement.
+// All resources (Policy, PlacementBinding, ManagedClusterSetBinding) are created in the same namespace
+// as the GitOpsCluster CR. The GitOpsCluster CR should be in a non-managed-cluster namespace
+// (e.g., openshift-gitops) to avoid the policy propagator deleting policies.
 // Returns an error if the Policy CRD is not installed (governance-policy-framework not available).
 func (r *ReconcileGitOpsCluster) CreateArgoCDPolicy(instance *gitopsclusterV1beta1.GitOpsCluster) error {
 	// Only create ArgoCD Policy if GitOps addon is enabled
@@ -54,6 +58,13 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDPolicy(instance *gitopsclusterV1bet
 	if !r.isPolicyCRDAvailable() {
 		klog.Error("Policy CRD not available - governance-policy-framework must be installed for ArgoCD CR management")
 		return ErrPolicyFrameworkNotAvailable
+	}
+
+	// Ensure ManagedClusterSetBinding exists in the GitOpsCluster namespace
+	// This is required for the Placement to be able to select clusters from the default ClusterSet
+	if err := r.createNamespaceScopedResourceFromYAML(generateManagedClusterSetBindingYaml(*instance)); err != nil {
+		klog.Error("failed to create ManagedClusterSetBinding: ", err)
+		return err
 	}
 
 	// Create PlacementBinding to bind the Policy to the existing Placement
@@ -111,7 +122,22 @@ func (r *ReconcileGitOpsCluster) isPolicyCRDAvailable() bool {
 	return available
 }
 
+// generateManagedClusterSetBindingYaml generates a ManagedClusterSetBinding in the GitOpsCluster namespace
+// to allow Placements to select clusters from the default ClusterSet.
+func generateManagedClusterSetBindingYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
+	return fmt.Sprintf(`
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: default
+  namespace: %s
+spec:
+  clusterSet: default
+`, gitOpsCluster.Namespace)
+}
+
 // generateArgoCDPolicyPlacementBindingYaml generates the PlacementBinding YAML to bind the ArgoCD Policy to the Placement.
+// All resources are created in the same namespace as the GitOpsCluster CR.
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
 // They must be manually deleted by the user.
 func generateArgoCDPolicyPlacementBindingYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
@@ -137,7 +163,8 @@ subjects:
 	return yamlString
 }
 
-// generateArgoCDPolicyYaml generates the Policy YAML wrapping the ArgoCD CR.
+// generateArgoCDPolicyYaml generates the Policy YAML wrapping the ArgoCD CR and default AppProject.
+// The Policy is created in the same namespace as the GitOpsCluster CR.
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
 // They must be manually deleted by the user.
 // Note: pruneObjectBehavior is set to None to orphan the ArgoCD CR when the policy is deleted.
@@ -174,10 +201,26 @@ spec:
                 apiVersion: argoproj.io/v1beta1
                 kind: ArgoCD
                 metadata:
-                  name: openshift-gitops
+                  name: acm-openshift-gitops
                   namespace: openshift-gitops
                 spec:
 %s
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: argoproj.io/v1alpha1
+                kind: AppProject
+                metadata:
+                  name: default
+                  namespace: openshift-gitops
+                spec:
+                  clusterResourceWhitelist:
+                    - group: '*'
+                      kind: '*'
+                  destinations:
+                    - namespace: '*'
+                      server: '*'
+                  sourceRepos:
+                    - '*'
 `,
 		gitOpsCluster.Name+"-argocd-policy", gitOpsCluster.Namespace,
 		gitOpsCluster.Name+"-argocd-config-policy",
@@ -188,9 +231,8 @@ spec:
 
 // generateArgoCDSpec generates the ArgoCD spec based on GitOpsCluster configuration.
 // The spec is kept minimal, relying on operator defaults for most settings.
-// Image override behavior:
-//   - If OLM subscription is enabled: No image override (OLM handles it)
-//   - If OLM subscription is disabled: Use images from GitOpsCluster spec, or defaults if not specified
+// The operator handles all image selection via env vars, EXCEPT for the agent's agent
+// component which doesn't have an env var - we must set it in the CR spec.
 func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	// Check if ArgoCD agent is enabled
 	argoCDAgentEnabled := false
@@ -198,55 +240,19 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 		argoCDAgentEnabled = *gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
-	// Check if OLM subscription mode is enabled
-	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(&gitOpsCluster)
-
 	// Base spec: disable server (controller, repo, redis are enabled by default)
+	// No image overrides - let the operator use its bundled images
 	spec := `server:
   enabled: false`
 
-	// Add image override only when OLM subscription is disabled
-	if !olmSubscriptionEnabled {
-		// Get image configurations - use defaults if not specified
-		// Default images are defined in pkg/utils/images.go
-		gitOpsImage := utils.DefaultGitOpsImage
-		redisImage := utils.DefaultRedisImage
-
-		if gitOpsCluster.Spec.GitOpsAddon != nil {
-			if gitOpsCluster.Spec.GitOpsAddon.GitOpsImage != "" {
-				gitOpsImage = gitOpsCluster.Spec.GitOpsAddon.GitOpsImage
-			}
-			if gitOpsCluster.Spec.GitOpsAddon.RedisImage != "" {
-				redisImage = gitOpsCluster.Spec.GitOpsAddon.RedisImage
-			}
-		}
-
-		// Parse image and version
-		gitOpsImageRepo, gitOpsImageTag := parseImageRef(gitOpsImage)
-		redisImageRepo, redisImageTag := parseImageRef(redisImage)
-
-		// Add image and version to spec
-		spec = fmt.Sprintf(`image: %s
-version: %s
-%s`, gitOpsImageRepo, gitOpsImageTag, spec)
-
-		// Add redis image configuration
-		spec += fmt.Sprintf(`
-redis:
-  image: %s
-  version: %s`, redisImageRepo, redisImageTag)
-
-		// Add repo image configuration (uses same image as controller)
-		spec += fmt.Sprintf(`
-repo:
-  image: %s
-  version: %s`, gitOpsImageRepo, gitOpsImageTag)
-	}
-
 	// Add ArgoCD agent configuration if enabled
+	// NOTE: We must set the agent image explicitly because the operator only has
+	// ARGOCD_PRINCIPAL_IMAGE env var for the principal component, not the agent.
+	// The agent component uses hardcoded community defaults, so we override it here
+	// with the default Red Hat image (same as ARGOCD_PRINCIPAL_IMAGE).
+	// Users can override this directly in the ArgoCD CR if needed.
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 		agentConfig := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
-		agentImage := agentConfig.Image
 		serverAddress := agentConfig.ServerAddress
 		serverPort := agentConfig.ServerPort
 		if serverPort == "" {
@@ -257,11 +263,18 @@ repo:
 			mode = "managed"
 		}
 
+		// Use the default Red Hat agent image from utils, or allow override via environment variable
+		// for e2e testing (registry.redhat.io requires authentication which may not be available in test environments)
+		agentImage := os.Getenv("ARGOCD_AGENT_IMAGE_OVERRIDE")
+		if agentImage == "" {
+			agentImage = utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage]
+		}
+
 		spec += fmt.Sprintf(`
 argoCDAgent:
   agent:
     enabled: true
-    image: %s
+    image: "%s"
     client:
       principalServerAddress: "%s"
       principalServerPort: "%s"
@@ -270,29 +283,6 @@ argoCDAgent:
 	}
 
 	return spec
-}
-
-// parseImageRef parses an image reference into repository and tag/digest components.
-func parseImageRef(imageRef string) (string, string) {
-	// Handle digest format (image@sha256:...)
-	if strings.Contains(imageRef, "@") {
-		parts := strings.SplitN(imageRef, "@", 2)
-		return parts[0], parts[1]
-	}
-	// Handle tag format (image:tag)
-	if strings.Contains(imageRef, ":") {
-		// Find the last colon - handles registry URLs with ports like localhost:5000/image:tag
-		lastColonIdx := strings.LastIndex(imageRef, ":")
-		beforeColon := imageRef[:lastColonIdx]
-		afterColon := imageRef[lastColonIdx+1:]
-
-		// Check if this looks like a tag (no slashes after the colon)
-		if !strings.Contains(afterColon, "/") {
-			return beforeColon, afterColon
-		}
-	}
-	// No tag or digest, use latest
-	return imageRef, "latest"
 }
 
 // indentYaml indents a YAML string by the specified number of spaces.

@@ -115,6 +115,10 @@ fi
 ARGOCD_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-operator:latest}"
 echo "  Setting GITOPS_OPERATOR_IMAGE to ${ARGOCD_OPERATOR_IMAGE} for e2e tests..."
 kubectl set env deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} GITOPS_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE}
+# Set public ArgoCD agent image for e2e tests (registry.redhat.io requires auth)
+ARGOCD_AGENT_IMAGE="${ARGOCD_AGENT_IMAGE:-ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest}"
+echo "  Setting ARGOCD_AGENT_IMAGE_OVERRIDE to ${ARGOCD_AGENT_IMAGE} for e2e tests..."
+kubectl set env deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} ARGOCD_AGENT_IMAGE_OVERRIDE=${ARGOCD_AGENT_IMAGE}
 echo "  Waiting for controller to be ready..."
 kubectl wait --for=condition=available --timeout=180s deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} || {
   echo "✗ ERROR: Controller not ready after 180s"
@@ -151,15 +155,12 @@ spec:
   gitopsAddon:
     enabled: true
     gitOpsOperatorImage: "quay.io/argoprojlabs/argocd-operator:latest"
-    gitOpsImage: "quay.io/argoproj/argocd@sha256:bbdb994007855fed9adfbef31cd58c49f867e652c0e16654bf6579ff037e13e2"
-    redisImage: "public.ecr.aws/docker/library/redis@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
     argoCDAgent:
       enabled: ${ENABLE_ARGOCD_AGENT}
       propagateHubCA: true
       serverAddress: ""
       serverPort: ""
       mode: "managed"
-      image: "ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest"
 EOF
 
 echo "  Waiting for GitOpsCluster to be created..."
@@ -261,12 +262,12 @@ kubectl create namespace ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} || true
 
 echo "  Waiting for ArgoCD operator deployment to be ready..."
 for i in {1..90}; do
-  if kubectl --context ${SPOKE_CONTEXT} get deployment argocd-operator-controller-manager -n openshift-gitops-operator &>/dev/null; then
+  if kubectl --context ${SPOKE_CONTEXT} get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null; then
     echo "  ✓ ArgoCD operator deployment found (attempt $i/90)"
-    kubectl --context ${SPOKE_CONTEXT} wait --for=condition=available --timeout=300s deployment/argocd-operator-controller-manager -n openshift-gitops-operator || {
+    kubectl --context ${SPOKE_CONTEXT} wait --for=condition=available --timeout=300s deployment/openshift-gitops-operator-controller-manager -n openshift-gitops-operator || {
       echo "  ✗ ERROR: ArgoCD operator deployment not available after 300s"
       echo "  Checking deployment status..."
-      kubectl --context ${SPOKE_CONTEXT} describe deployment argocd-operator-controller-manager -n openshift-gitops-operator || true
+      kubectl --context ${SPOKE_CONTEXT} describe deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator || true
       kubectl --context ${SPOKE_CONTEXT} get pods -n openshift-gitops-operator || true
       exit 1
     }
@@ -300,10 +301,10 @@ done
 echo "  Waiting for ArgoCD CR on managed cluster..."
 echo "  (ArgoCD CR is created by gitops-addon directly, with Policy framework as optional enhancement)"
 
-# Wait for ArgoCD CR to be created on managed cluster (by gitops-addon or Policy)
+# Wait for ArgoCD CR to be created on managed cluster (by Policy)
 for i in {1..60}; do
-  if kubectl --context ${SPOKE_CONTEXT} get argocd openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
-    echo "  ✓ ArgoCD CR 'openshift-gitops' found (attempt $i/60)"
+  if kubectl --context ${SPOKE_CONTEXT} get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    echo "  ✓ ArgoCD CR 'acm-openshift-gitops' found (attempt $i/60)"
     break
   fi
   if [ $i -eq 60 ]; then
@@ -320,9 +321,9 @@ done
 echo ""
 echo "Step 7: Waiting for ArgoCD application controller to be ready..."
 for i in {1..60}; do
-  if kubectl --context ${SPOKE_CONTEXT} get statefulset openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} &>/dev/null; then
+  if kubectl --context ${SPOKE_CONTEXT} get statefulset acm-openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} &>/dev/null; then
     echo "  ✓ ArgoCD application controller found"
-    kubectl --context ${SPOKE_CONTEXT} wait --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s statefulset/openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} || {
+    kubectl --context ${SPOKE_CONTEXT} wait --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s statefulset/acm-openshift-gitops-application-controller -n ${GITOPS_NAMESPACE} || {
       echo "  Warning: Application controller not ready yet"
     }
     break
@@ -376,9 +377,9 @@ if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
   echo "Step 8.2: Waiting for agent deployment on managed cluster..."
   sleep 10
   for i in {1..60}; do
-    if kubectl --context ${SPOKE_CONTEXT} get deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} &>/dev/null; then
+    if kubectl --context ${SPOKE_CONTEXT} get deployment acm-openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} &>/dev/null; then
       echo "  ✓ Agent deployment found on managed cluster"
-      kubectl --context ${SPOKE_CONTEXT} rollout restart deployment openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} 2>/dev/null || true
+      kubectl --context ${SPOKE_CONTEXT} rollout restart deployment acm-openshift-gitops-agent-agent -n ${GITOPS_NAMESPACE} 2>/dev/null || true
       sleep 5
       break
     fi
@@ -398,6 +399,14 @@ fi
 # Step 9: Deploy test application
 echo ""
 echo "Step 9: Deploying test application..."
+
+# Create and label guestbook namespace on managed cluster for ArgoCD permission
+# The namespace must be labeled with the ArgoCD instance name to allow deployments
+echo "  Creating and labeling guestbook namespace on managed cluster..."
+kubectl create namespace guestbook --context ${SPOKE_CONTEXT} 2>/dev/null || true
+kubectl label namespace guestbook argocd.argoproj.io/managed-by=acm-openshift-gitops --overwrite --context ${SPOKE_CONTEXT}
+echo "  ✓ Guestbook namespace labeled for ArgoCD permission"
+
 kubectl apply -f test/e2e/fixtures/app.yaml --context ${HUB_CONTEXT}
 sleep 30s
 

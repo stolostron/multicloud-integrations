@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    control-plane: gitops-operator
+  name: openshift-gitops-operator-controller-manager
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: gitops-operator
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: gitops-operator
+    spec:
+      containers:
+      - args:
+        - --leader-elect
+        command:
+        {{- if contains "argoprojlabs" .Values.global.operatorImages.GITOPS_OPERATOR_IMAGE }}
+        - /manager
+        {{- else }}
+        - /usr/local/bin/manager
+        {{- end }}
+        env:
+        # Operator configuration
+        - name: WATCH_NAMESPACE
+          value: ""
+        - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
+          value: "*"
+        - name: DISABLE_DEFAULT_ARGOCD_INSTANCE
+          value: "true"
+        # Image environment variables - only set if values are provided
+        # If not set, the operator will use its built-in defaults
+        {{- if .Values.global.operatorImages.ARGOCD_IMAGE }}
+        - name: ARGOCD_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_REPOSERVER_IMAGE }}
+        - name: ARGOCD_REPOSERVER_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_REPOSERVER_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_REDIS_IMAGE }}
+        - name: ARGOCD_REDIS_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_REDIS_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_REDIS_HA_IMAGE }}
+        - name: ARGOCD_REDIS_HA_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_REDIS_HA_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_REDIS_HA_PROXY_IMAGE }}
+        - name: ARGOCD_REDIS_HA_PROXY_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_REDIS_HA_PROXY_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_DEX_IMAGE }}
+        - name: ARGOCD_DEX_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_DEX_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.BACKEND_IMAGE }}
+        - name: BACKEND_IMAGE
+          value: {{ .Values.global.operatorImages.BACKEND_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.GITOPS_CONSOLE_PLUGIN_IMAGE }}
+        - name: GITOPS_CONSOLE_PLUGIN_IMAGE
+          value: {{ .Values.global.operatorImages.GITOPS_CONSOLE_PLUGIN_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_EXTENSION_IMAGE }}
+        - name: ARGOCD_EXTENSION_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_EXTENSION_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGO_ROLLOUTS_IMAGE }}
+        - name: ARGO_ROLLOUTS_IMAGE
+          value: {{ .Values.global.operatorImages.ARGO_ROLLOUTS_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_PRINCIPAL_IMAGE }}
+        - name: ARGOCD_PRINCIPAL_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_PRINCIPAL_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_IMAGE_UPDATER_IMAGE }}
+        - name: ARGOCD_IMAGE_UPDATER_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_IMAGE_UPDATER_IMAGE | quote }}
+        {{- end }}
+        {{- if .Values.global.proxyConfig.HTTP_PROXY }}
+        - name: HTTP_PROXY
+          value: {{ .Values.global.proxyConfig.HTTP_PROXY }}
+        {{- end }}
+        {{- if .Values.global.proxyConfig.HTTPS_PROXY }}
+        - name: HTTPS_PROXY
+          value: {{ .Values.global.proxyConfig.HTTPS_PROXY }}
+        {{- end }}
+        {{- if .Values.global.proxyConfig.NO_PROXY }}
+        - name: NO_PROXY
+          value: {{ .Values.global.proxyConfig.NO_PROXY }}
+        {{- end }}
+        image: {{ .Values.global.operatorImages.GITOPS_OPERATOR_IMAGE | quote }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: openshift-gitops-operator-controller-manager
+      terminationGracePeriodSeconds: 10
