@@ -11,8 +11,8 @@ data:
       port: 9443
     leaderElection:
       leaderElect: true
-      resourceName: b674928d.argoproj.io
+      resourceName: 2b63967d.openshift.io
 kind: ConfigMap
 metadata:
-  name: argocd-operator-manager-config
+  name: openshift-gitops-operator-manager-config
   namespace: {{ .Release.Namespace }}

@@ -20,24 +20,26 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
-func TestEnvironmentVariables(t *testing.T) {
+func TestGitOpsAddonConfig(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	// Test default values
 	t.Run("DefaultValues", func(t *testing.T) {
-		g.Expect(GitopsOperatorImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator"))
-		g.Expect(GitopsImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel8"))
-		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
-		g.Expect(GitOpsServiceImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
-		g.Expect(GitOpsConsolePluginImage).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
-		g.Expect(ReconcileScope).To(gomega.Equal("Single-Namespace"))
-		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("false"))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8"))
-		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal(""))
-		g.Expect(ARGOCD_AGENT_SERVER_PORT).To(gomega.Equal(""))
-		g.Expect(ARGOCD_AGENT_MODE).To(gomega.Equal("managed"))
+		config := utils.NewGitOpsAddonConfig()
+
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel8"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
+		g.Expect(config.OperatorImages[utils.EnvBackendImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
+		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePlugin]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
+		g.Expect(config.ArgoCDAgentEnabled).To(gomega.BeFalse())
+		g.Expect(config.OperatorImages[utils.EnvArgoCDPrincipalImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8"))
+		g.Expect(config.ArgoCDAgentServerAddress).To(gomega.Equal(""))
+		g.Expect(config.ArgoCDAgentServerPort).To(gomega.Equal(""))
+		g.Expect(config.ArgoCDAgentMode).To(gomega.Equal("managed"))
 	})
 }
 
@@ -79,125 +81,22 @@ func TestGitopsAddonAgentOptions(t *testing.T) {
 func TestEnvironmentVariableOverrides(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	// Store original values to restore later
-	originalValues := map[string]string{
-		"ARGOCD_AGENT_ENABLED":        ARGOCD_AGENT_ENABLED,
-		"ARGOCD_AGENT_IMAGE":          ARGOCD_AGENT_IMAGE,
-		"ARGOCD_AGENT_SERVER_ADDRESS": ARGOCD_AGENT_SERVER_ADDRESS,
-		"ARGOCD_AGENT_SERVER_PORT":    ARGOCD_AGENT_SERVER_PORT,
-		"ARGOCD_AGENT_MODE":           ARGOCD_AGENT_MODE,
-	}
-
 	// Test overriding ArgoCD Agent environment variables
 	t.Run("ArgoCDAgentEnvironmentOverrides", func(t *testing.T) {
 		// Set environment variables
-		testEnvVars := map[string]string{
-			"ARGOCD_AGENT_ENABLED":        "true",
-			"ARGOCD_AGENT_IMAGE":          "custom.registry.io/argocd-agent:v1.2.3",
-			"ARGOCD_AGENT_SERVER_ADDRESS": "custom.argocd.example.com",
-			"ARGOCD_AGENT_SERVER_PORT":    "8443",
-			"ARGOCD_AGENT_MODE":           "autonomous",
-		}
+		t.Setenv("ARGOCD_AGENT_ENABLED", "true")
+		t.Setenv("ARGOCD_AGENT_SERVER_ADDRESS", "custom.argocd.example.com")
+		t.Setenv("ARGOCD_AGENT_SERVER_PORT", "8443")
+		t.Setenv("ARGOCD_AGENT_MODE", "autonomous")
 
-		for key, value := range testEnvVars {
-			t.Setenv(key, value)
-		}
-
-		// Simulate the environment variable processing logic from main()
-		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
-			ARGOCD_AGENT_ENABLED = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_IMAGE"); found && val > "" {
-			ARGOCD_AGENT_IMAGE = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_ADDRESS"); found && val > "" {
-			ARGOCD_AGENT_SERVER_ADDRESS = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_PORT"); found && val > "" {
-			ARGOCD_AGENT_SERVER_PORT = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_MODE"); found && val > "" {
-			ARGOCD_AGENT_MODE = val
-		}
+		// Create config with environment overrides
+		config := utils.NewGitOpsAddonConfig()
 
 		// Verify the values were updated
-		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("true"))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.Equal("custom.registry.io/argocd-agent:v1.2.3"))
-		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal("custom.argocd.example.com"))
-		g.Expect(ARGOCD_AGENT_SERVER_PORT).To(gomega.Equal("8443"))
-		g.Expect(ARGOCD_AGENT_MODE).To(gomega.Equal("autonomous"))
-
-		// Restore original values
-		for key, value := range originalValues {
-			switch key {
-			case "ARGOCD_AGENT_ENABLED":
-				ARGOCD_AGENT_ENABLED = value
-			case "ARGOCD_AGENT_IMAGE":
-				ARGOCD_AGENT_IMAGE = value
-			case "ARGOCD_AGENT_SERVER_ADDRESS":
-				ARGOCD_AGENT_SERVER_ADDRESS = value
-			case "ARGOCD_AGENT_SERVER_PORT":
-				ARGOCD_AGENT_SERVER_PORT = value
-			case "ARGOCD_AGENT_MODE":
-				ARGOCD_AGENT_MODE = value
-			}
-		}
-	})
-
-	t.Run("EmptyEnvironmentVariables", func(t *testing.T) {
-		// Test with empty environment variables (should not override defaults)
-		testEnvVars := map[string]string{
-			"ARGOCD_AGENT_ENABLED":        "",
-			"ARGOCD_AGENT_IMAGE":          "",
-			"ARGOCD_AGENT_SERVER_ADDRESS": "",
-			"ARGOCD_AGENT_SERVER_PORT":    "",
-			"ARGOCD_AGENT_MODE":           "",
-		}
-
-		for key, value := range testEnvVars {
-			t.Setenv(key, value)
-		}
-
-		// Store current values
-		currentValues := map[string]string{
-			"ARGOCD_AGENT_ENABLED":        ARGOCD_AGENT_ENABLED,
-			"ARGOCD_AGENT_IMAGE":          ARGOCD_AGENT_IMAGE,
-			"ARGOCD_AGENT_SERVER_ADDRESS": ARGOCD_AGENT_SERVER_ADDRESS,
-			"ARGOCD_AGENT_SERVER_PORT":    ARGOCD_AGENT_SERVER_PORT,
-			"ARGOCD_AGENT_MODE":           ARGOCD_AGENT_MODE,
-		}
-
-		// Simulate the environment variable processing logic (empty values should not override)
-		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
-			ARGOCD_AGENT_ENABLED = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_IMAGE"); found && val > "" {
-			ARGOCD_AGENT_IMAGE = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_ADDRESS"); found && val > "" {
-			ARGOCD_AGENT_SERVER_ADDRESS = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_PORT"); found && val > "" {
-			ARGOCD_AGENT_SERVER_PORT = val
-		}
-
-		if val, found := os.LookupEnv("ARGOCD_AGENT_MODE"); found && val > "" {
-			ARGOCD_AGENT_MODE = val
-		}
-
-		// Values should remain unchanged
-		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal(currentValues["ARGOCD_AGENT_ENABLED"]))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.Equal(currentValues["ARGOCD_AGENT_IMAGE"]))
-		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal(currentValues["ARGOCD_AGENT_SERVER_ADDRESS"]))
-		g.Expect(ARGOCD_AGENT_SERVER_PORT).To(gomega.Equal(currentValues["ARGOCD_AGENT_SERVER_PORT"]))
-		g.Expect(ARGOCD_AGENT_MODE).To(gomega.Equal(currentValues["ARGOCD_AGENT_MODE"]))
+		g.Expect(config.ArgoCDAgentEnabled).To(gomega.BeTrue())
+		g.Expect(config.ArgoCDAgentServerAddress).To(gomega.Equal("custom.argocd.example.com"))
+		g.Expect(config.ArgoCDAgentServerPort).To(gomega.Equal("8443"))
+		g.Expect(config.ArgoCDAgentMode).To(gomega.Equal("autonomous"))
 	})
 }
 
@@ -218,83 +117,56 @@ func TestGlobalVariables(t *testing.T) {
 	})
 }
 
-func TestAdditionalEnvironmentVariables(t *testing.T) {
+func TestOperatorImageOverrides(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	t.Run("AdditionalGitOpsVariables", func(t *testing.T) {
-		// Store original values
-		originalGitopsOperatorImage := GitopsOperatorImage
-		originalGitopsImage := GitopsImage
-		originalRedisImage := RedisImage
-
-		// Set environment variables
+	t.Run("GitOpsOperatorImageOverride", func(t *testing.T) {
+		// Set environment variable
 		t.Setenv("GITOPS_OPERATOR_IMAGE", "custom.registry.io/gitops-operator:v1.0.0")
-		t.Setenv("GITOPS_IMAGE", "custom.registry.io/argocd:v2.0.0")
-		t.Setenv("REDIS_IMAGE", "custom.registry.io/redis:v6.0.0")
 
-		// Simulate the environment variable processing logic from main()
-		if val, found := os.LookupEnv("GITOPS_OPERATOR_IMAGE"); found && val > "" {
-			GitopsOperatorImage = val
-		}
-		if val, found := os.LookupEnv("GITOPS_IMAGE"); found && val > "" {
-			GitopsImage = val
-		}
-		if val, found := os.LookupEnv("REDIS_IMAGE"); found && val > "" {
-			RedisImage = val
-		}
+		// Create config with environment overrides
+		config := utils.NewGitOpsAddonConfig()
 
-		// Verify the values were updated
-		g.Expect(GitopsOperatorImage).To(gomega.Equal("custom.registry.io/gitops-operator:v1.0.0"))
-		g.Expect(GitopsImage).To(gomega.Equal("custom.registry.io/argocd:v2.0.0"))
-		g.Expect(RedisImage).To(gomega.Equal("custom.registry.io/redis:v6.0.0"))
+		// Verify the value was updated
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.Equal("custom.registry.io/gitops-operator:v1.0.0"))
+	})
 
-		// Restore original values
-		GitopsOperatorImage = originalGitopsOperatorImage
-		GitopsImage = originalGitopsImage
-		RedisImage = originalRedisImage
+	t.Run("AllOperatorImagesOverride", func(t *testing.T) {
+		// Set all operator image environment variables
+		t.Setenv("GITOPS_OPERATOR_IMAGE", "custom.registry.io/gitops-operator:test")
+		t.Setenv("ARGOCD_IMAGE", "custom.registry.io/argocd:test")
+		t.Setenv("ARGOCD_REDIS_IMAGE", "custom.registry.io/redis:test")
+		t.Setenv("BACKEND_IMAGE", "custom.registry.io/backend:test")
+		t.Setenv("GITOPS_CONSOLE_PLUGIN_IMAGE", "custom.registry.io/console-plugin:test")
+
+		// Create config with environment overrides
+		config := utils.NewGitOpsAddonConfig()
+
+		// Verify all values were updated
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.Equal("custom.registry.io/gitops-operator:test"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.Equal("custom.registry.io/argocd:test"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.Equal("custom.registry.io/redis:test"))
+		g.Expect(config.OperatorImages[utils.EnvBackendImage]).To(gomega.Equal("custom.registry.io/backend:test"))
+		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePlugin]).To(gomega.Equal("custom.registry.io/console-plugin:test"))
 	})
 }
 
-func TestExtendedProxyEnvironmentVariables(t *testing.T) {
+func TestProxyEnvironmentVariables(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	t.Run("ProxyEnvironmentOverrides", func(t *testing.T) {
-		// Store original values
-		originalHTTP_PROXY := HTTP_PROXY
-		originalHTTPS_PROXY := HTTPS_PROXY
-		originalNO_PROXY := NO_PROXY
-		originalReconcileScope := ReconcileScope
-
 		// Set environment variables
 		t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
 		t.Setenv("HTTPS_PROXY", "https://proxy.example.com:8443")
 		t.Setenv("NO_PROXY", "localhost,127.0.0.1,.example.com")
-		t.Setenv("RECONCILE_SCOPE", "Multi-Namespace")
 
-		// Simulate the environment variable processing logic from main()
-		if val, found := os.LookupEnv("HTTP_PROXY"); found && val > "" {
-			HTTP_PROXY = val
-		}
-		if val, found := os.LookupEnv("HTTPS_PROXY"); found && val > "" {
-			HTTPS_PROXY = val
-		}
-		if val, found := os.LookupEnv("NO_PROXY"); found && val > "" {
-			NO_PROXY = val
-		}
-		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
-			ReconcileScope = val
-		}
+		// Create config with environment overrides
+		config := utils.NewGitOpsAddonConfig()
 
 		// Verify the values were updated
-		g.Expect(HTTP_PROXY).To(gomega.Equal("http://proxy.example.com:8080"))
-		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://proxy.example.com:8443"))
-		g.Expect(NO_PROXY).To(gomega.Equal("localhost,127.0.0.1,.example.com"))
-		g.Expect(ReconcileScope).To(gomega.Equal("Multi-Namespace"))
-		// Restore original values
-		HTTP_PROXY = originalHTTP_PROXY
-		HTTPS_PROXY = originalHTTPS_PROXY
-		NO_PROXY = originalNO_PROXY
-		ReconcileScope = originalReconcileScope
+		g.Expect(config.HTTPProxy).To(gomega.Equal("http://proxy.example.com:8080"))
+		g.Expect(config.HTTPSProxy).To(gomega.Equal("https://proxy.example.com:8443"))
+		g.Expect(config.NoProxy).To(gomega.Equal("localhost,127.0.0.1,.example.com"))
 	})
 }
 
@@ -318,11 +190,12 @@ func TestConstantsAndVariables(t *testing.T) {
 		g.Expect(metricsHost).To(gomega.Equal("0.0.0.0"))
 		g.Expect(metricsPort).To(gomega.Equal(8387))
 
-		// Test that all image references contain registry.redhat.io
-		g.Expect(GitopsOperatorImage).To(gomega.ContainSubstring("registry.redhat.io"))
-		g.Expect(GitopsImage).To(gomega.ContainSubstring("registry.redhat.io"))
-		g.Expect(RedisImage).To(gomega.ContainSubstring("registry.redhat.io"))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.ContainSubstring("registry.redhat.io"))
+		// Test that all default image references contain registry.redhat.io
+		config := utils.NewGitOpsAddonConfig()
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.ContainSubstring("registry.redhat.io"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.ContainSubstring("registry.redhat.io"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.ContainSubstring("registry.redhat.io"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDPrincipalImage]).To(gomega.ContainSubstring("registry.redhat.io"))
 	})
 }
 
@@ -356,136 +229,44 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	t.Run("EmptyStringHandling", func(t *testing.T) {
-		// Store original values
-		originalGitopsImage := GitopsImage
+		// Set empty environment variable (should not override default)
+		os.Setenv("GITOPS_OPERATOR_IMAGE", "")
 
-		// Set empty environment variable (should not override)
-		t.Setenv("GITOPS_IMAGE", "")
+		// Create config
+		config := utils.NewGitOpsAddonConfig()
 
-		// Simulate the environment variable processing logic from main()
-		if val, found := os.LookupEnv("GITOPS_IMAGE"); found && val > "" {
-			GitopsImage = val
-		}
+		// Should use default value since empty string
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.ContainSubstring("registry.redhat.io"))
 
-		// Should remain unchanged
-		g.Expect(GitopsImage).To(gomega.Equal(originalGitopsImage))
+		os.Unsetenv("GITOPS_OPERATOR_IMAGE")
 	})
 
 	t.Run("CompleteEnvironmentOverride", func(t *testing.T) {
-		// Store original values
-		originalValues := map[string]string{
-			"GitopsOperatorImage":         GitopsOperatorImage,
-			"GitopsImage":                 GitopsImage,
-			"RedisImage":                  RedisImage,
-			"GitOpsServiceImage":          GitOpsServiceImage,
-			"GitOpsConsolePluginImage":    GitOpsConsolePluginImage,
-			"HTTP_PROXY":                  HTTP_PROXY,
-			"HTTPS_PROXY":                 HTTPS_PROXY,
-			"NO_PROXY":                    NO_PROXY,
-			"ReconcileScope":              ReconcileScope,
-			"ARGOCD_AGENT_ENABLED":        ARGOCD_AGENT_ENABLED,
-			"ARGOCD_AGENT_IMAGE":          ARGOCD_AGENT_IMAGE,
-			"ARGOCD_AGENT_SERVER_ADDRESS": ARGOCD_AGENT_SERVER_ADDRESS,
-			"ARGOCD_AGENT_SERVER_PORT":    ARGOCD_AGENT_SERVER_PORT,
-			"ARGOCD_AGENT_MODE":           ARGOCD_AGENT_MODE,
-		}
-
 		// Set all environment variables
-		envVars := map[string]string{
-			"GITOPS_OPERATOR_IMAGE":       "test.registry.io/gitops-operator:test",
-			"GITOPS_IMAGE":                "test.registry.io/argocd:test",
-			"REDIS_IMAGE":                 "test.registry.io/redis:test",
-			"GitOpsServiceImage":          "test.registry.io/gitops-service:test",
-			"GitOpsConsolePluginImage":    "test.registry.io/gitops-console-plugin:test",
-			"HTTP_PROXY":                  "http://test-proxy:8080",
-			"HTTPS_PROXY":                 "https://test-proxy:8443",
-			"NO_PROXY":                    "test.local",
-			"RECONCILE_SCOPE":             "Test-Scope",
-			"ARGOCD_AGENT_ENABLED":        "true",
-			"ARGOCD_AGENT_IMAGE":          "test.registry.io/argocd-agent:test",
-			"ARGOCD_AGENT_SERVER_ADDRESS": "test.argocd.local",
-			"ARGOCD_AGENT_SERVER_PORT":    "9443",
-			"ARGOCD_AGENT_MODE":           "test-mode",
-		}
+		t.Setenv("GITOPS_OPERATOR_IMAGE", "test.registry.io/gitops-operator:test")
+		t.Setenv("ARGOCD_IMAGE", "test.registry.io/argocd:test")
+		t.Setenv("ARGOCD_REDIS_IMAGE", "test.registry.io/redis:test")
+		t.Setenv("HTTP_PROXY", "http://test-proxy:8080")
+		t.Setenv("HTTPS_PROXY", "https://test-proxy:8443")
+		t.Setenv("NO_PROXY", "test.local")
+		t.Setenv("ARGOCD_AGENT_ENABLED", "true")
+		t.Setenv("ARGOCD_AGENT_SERVER_ADDRESS", "test.argocd.local")
+		t.Setenv("ARGOCD_AGENT_SERVER_PORT", "9443")
+		t.Setenv("ARGOCD_AGENT_MODE", "test-mode")
 
-		for key, value := range envVars {
-			t.Setenv(key, value)
-		}
-
-		// Simulate the environment variable processing logic from main()
-		if val, found := os.LookupEnv("GITOPS_OPERATOR_IMAGE"); found && val > "" {
-			GitopsOperatorImage = val
-		}
-		if val, found := os.LookupEnv("GITOPS_IMAGE"); found && val > "" {
-			GitopsImage = val
-		}
-		if val, found := os.LookupEnv("REDIS_IMAGE"); found && val > "" {
-			RedisImage = val
-		}
-		if val, found := os.LookupEnv("GitOpsServiceImage"); found && val > "" {
-			GitOpsServiceImage = val
-		}
-		if val, found := os.LookupEnv("GitOpsConsolePluginImage"); found && val > "" {
-			GitOpsConsolePluginImage = val
-		}
-		if val, found := os.LookupEnv("HTTP_PROXY"); found && val > "" {
-			HTTP_PROXY = val
-		}
-		if val, found := os.LookupEnv("HTTPS_PROXY"); found && val > "" {
-			HTTPS_PROXY = val
-		}
-		if val, found := os.LookupEnv("NO_PROXY"); found && val > "" {
-			NO_PROXY = val
-		}
-		if val, found := os.LookupEnv("RECONCILE_SCOPE"); found && val > "" {
-			ReconcileScope = val
-		}
-		if val, found := os.LookupEnv("ARGOCD_AGENT_ENABLED"); found && val > "" {
-			ARGOCD_AGENT_ENABLED = val
-		}
-		if val, found := os.LookupEnv("ARGOCD_AGENT_IMAGE"); found && val > "" {
-			ARGOCD_AGENT_IMAGE = val
-		}
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_ADDRESS"); found && val > "" {
-			ARGOCD_AGENT_SERVER_ADDRESS = val
-		}
-		if val, found := os.LookupEnv("ARGOCD_AGENT_SERVER_PORT"); found && val > "" {
-			ARGOCD_AGENT_SERVER_PORT = val
-		}
-		if val, found := os.LookupEnv("ARGOCD_AGENT_MODE"); found && val > "" {
-			ARGOCD_AGENT_MODE = val
-		}
+		// Create config
+		config := utils.NewGitOpsAddonConfig()
 
 		// Verify all values were updated
-		g.Expect(GitopsOperatorImage).To(gomega.Equal("test.registry.io/gitops-operator:test"))
-		g.Expect(GitopsImage).To(gomega.Equal("test.registry.io/argocd:test"))
-		g.Expect(RedisImage).To(gomega.Equal("test.registry.io/redis:test"))
-		g.Expect(GitOpsServiceImage).To(gomega.Equal("test.registry.io/gitops-service:test"))
-		g.Expect(GitOpsConsolePluginImage).To(gomega.Equal("test.registry.io/gitops-console-plugin:test"))
-		g.Expect(HTTP_PROXY).To(gomega.Equal("http://test-proxy:8080"))
-		g.Expect(HTTPS_PROXY).To(gomega.Equal("https://test-proxy:8443"))
-		g.Expect(NO_PROXY).To(gomega.Equal("test.local"))
-		g.Expect(ReconcileScope).To(gomega.Equal("Test-Scope"))
-		g.Expect(ARGOCD_AGENT_ENABLED).To(gomega.Equal("true"))
-		g.Expect(ARGOCD_AGENT_IMAGE).To(gomega.Equal("test.registry.io/argocd-agent:test"))
-		g.Expect(ARGOCD_AGENT_SERVER_ADDRESS).To(gomega.Equal("test.argocd.local"))
-		g.Expect(ARGOCD_AGENT_SERVER_PORT).To(gomega.Equal("9443"))
-		g.Expect(ARGOCD_AGENT_MODE).To(gomega.Equal("test-mode"))
-
-		// Restore original values
-		GitopsOperatorImage = originalValues["GitopsOperatorImage"]
-		GitopsImage = originalValues["GitopsImage"]
-		RedisImage = originalValues["RedisImage"]
-		GitOpsServiceImage = originalValues["GitOpsServiceImage"]
-		GitOpsConsolePluginImage = originalValues["GitOpsConsolePluginImage"]
-		HTTP_PROXY = originalValues["HTTP_PROXY"]
-		HTTPS_PROXY = originalValues["HTTPS_PROXY"]
-		NO_PROXY = originalValues["NO_PROXY"]
-		ReconcileScope = originalValues["ReconcileScope"]
-		ARGOCD_AGENT_ENABLED = originalValues["ARGOCD_AGENT_ENABLED"]
-		ARGOCD_AGENT_IMAGE = originalValues["ARGOCD_AGENT_IMAGE"]
-		ARGOCD_AGENT_SERVER_ADDRESS = originalValues["ARGOCD_AGENT_SERVER_ADDRESS"]
-		ARGOCD_AGENT_SERVER_PORT = originalValues["ARGOCD_AGENT_SERVER_PORT"]
-		ARGOCD_AGENT_MODE = originalValues["ARGOCD_AGENT_MODE"]
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.Equal("test.registry.io/gitops-operator:test"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.Equal("test.registry.io/argocd:test"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.Equal("test.registry.io/redis:test"))
+		g.Expect(config.HTTPProxy).To(gomega.Equal("http://test-proxy:8080"))
+		g.Expect(config.HTTPSProxy).To(gomega.Equal("https://test-proxy:8443"))
+		g.Expect(config.NoProxy).To(gomega.Equal("test.local"))
+		g.Expect(config.ArgoCDAgentEnabled).To(gomega.BeTrue())
+		g.Expect(config.ArgoCDAgentServerAddress).To(gomega.Equal("test.argocd.local"))
+		g.Expect(config.ArgoCDAgentServerPort).To(gomega.Equal("9443"))
+		g.Expect(config.ArgoCDAgentMode).To(gomega.Equal("test-mode"))
 	})
 }

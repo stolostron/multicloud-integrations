@@ -1,4 +1,4 @@
 apiVersion: v1
-description: A Helm chart to install openshift gitops operator
+description: A Helm chart to install OpenShift GitOps operator without OLM subscription
 name: openshift-gitops-operator
-version: 1.17.1
+version: 1.18.0

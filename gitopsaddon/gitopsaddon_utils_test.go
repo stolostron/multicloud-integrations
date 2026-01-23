@@ -33,8 +33,6 @@ import (
 // Test embedded file system for tests
 //
 //go:embed charts/openshift-gitops-operator/**
-//go:embed charts/openshift-gitops-dependency/**
-//go:embed charts/dep-crds/**
 var testFS embed.FS
 
 func TestParseImageReference(t *testing.T) {
@@ -334,9 +332,9 @@ func TestApplyCRDIfNotExists(t *testing.T) {
 	}{
 		{
 			name:        "crd_does_not_exist",
-			resource:    "routes",
-			apiVersion:  "route.openshift.io/v1",
-			yamlPath:    "charts/dep-crds/routes.route.openshift.io.crd.yaml",
+			resource:    "appprojects",
+			apiVersion:  "argoproj.io/v1alpha1",
+			yamlPath:    "charts/openshift-gitops-operator/templates/crds/appprojects.argoproj.io.crd.yaml",
 			setupCRD:    false,
 			expectError: false, // Should succeed with real CRD
 		},
@@ -410,7 +408,7 @@ func TestCopyEmbeddedToTemp(t *testing.T) {
 	}{
 		{
 			name:        "copy_existing_chart",
-			srcPath:     "charts/dep-crds",
+			srcPath:     "charts/openshift-gitops-operator",
 			releaseName: "test-release",
 			expectError: false,
 		},
@@ -462,41 +460,6 @@ func TestTemplateAndApplyChart(t *testing.T) {
 			}
 
 			err := reconciler.templateAndApplyChart(tt.chartPath, tt.namespace, tt.releaseName)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-		})
-	}
-}
-
-func TestRenderAndApplyDependencyManifests(t *testing.T) {
-	t.Skip("Skipping due to resource conflicts with fake client setup")
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name        string
-		chartPath   string
-		namespace   string
-		expectError bool
-	}{
-		{
-			name:        "existing_dependency_chart",
-			chartPath:   "charts/openshift-gitops-dependency",
-			namespace:   "test-ns",
-			expectError: false, // Fixed: should succeed with fake client
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-			}
-
-			err := reconciler.renderAndApplyDependencyManifests(tt.chartPath, tt.namespace)
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())

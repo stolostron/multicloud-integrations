@@ -14,15 +14,14 @@ spec:
   gitopsAddon:
     enabled: true
     overrideExistingConfigs: true
+    # GitOpsOperatorImage is the only image that needs to be specified.
+    # All other images (ArgoCD, Redis, etc.) are handled by the operator.
     gitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-operator@sha256:..."
-    gitOpsImage: "registry.redhat.io/openshift-gitops-1/argocd@sha256:..."
-    redisImage: "registry.redhat.io/rhel8/redis-6@sha256:..."
-    gitOpsOperatorNamespace: openshift-gitops-operator
-    reconcileScope: Single-Namespace
     argoCDAgent:
       enabled: true
       serverAddress: ""
       serverPort: ""
       mode: managed
       propagateHubCA: true
-      image: "registry.redhat.io/openshift-gitops-1/argocd-agent@sha256:..."
+      # Note: Agent image uses the default Red Hat image from ARGOCD_PRINCIPAL_IMAGE.
+      # To customize, modify the ArgoCD CR directly on the managed cluster.

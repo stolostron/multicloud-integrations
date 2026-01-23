@@ -415,11 +415,6 @@ echo ""
 echo "Step 21: Creating ArgoCD CR in ${ARGOCD_NAMESPACE} namespace..."
 kubectl create namespace ${ARGOCD_NAMESPACE} 2>/dev/null || true
 
-# Grant cluster-admin to the ArgoCD application controller (required for managing resources)
-kubectl create clusterrolebinding argocd-application-controller-cluster-admin \
-  --clusterrole=cluster-admin \
-  --serviceaccount=${ARGOCD_NAMESPACE}:openshift-gitops-argocd-application-controller 2>/dev/null || true
-
 cat <<EOF | kubectl apply -f -
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD

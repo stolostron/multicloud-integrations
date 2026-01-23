@@ -1318,21 +1318,6 @@ func (r *ReconcileGitOpsCluster) ValidateGitOpsAddonSpec(gitOpsAddon *gitopsclus
 		return nil
 	}
 
-	// Validate ReconcileScope field
-	if gitOpsAddon.ReconcileScope != "" {
-		validScopes := []string{"All-Namespaces", "Single-Namespace"}
-		isValidScope := false
-		for _, validScope := range validScopes {
-			if gitOpsAddon.ReconcileScope == validScope {
-				isValidScope = true
-				break
-			}
-		}
-		if !isValidScope {
-			return fmt.Errorf("invalid ReconcileScope '%s': must be one of %v", gitOpsAddon.ReconcileScope, validScopes)
-		}
-	}
-
 	// Validate nested ArgoCDAgent spec
 	if err := r.ValidateArgoCDAgentSpec(gitOpsAddon.ArgoCDAgent); err != nil {
 		return fmt.Errorf("ArgoCDAgent validation failed: %w", err)

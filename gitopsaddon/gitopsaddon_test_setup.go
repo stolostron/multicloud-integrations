@@ -17,7 +17,6 @@ limitations under the License.
 package gitopsaddon
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -260,11 +259,4 @@ func createInitialTestResources() []client.Object {
 	allObjects = append(allObjects, serviceAccounts...)
 
 	return allObjects
-}
-
-// cleanupTestResources cleans up resources created during tests
-func cleanupTestResources(ctx context.Context, c client.Client) error {
-	// This function can be used to clean up resources between tests
-	// Implementation depends on specific cleanup needs
-	return nil
 }

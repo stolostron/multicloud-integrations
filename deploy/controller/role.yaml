@@ -38,6 +38,8 @@ rules:
       - manifestworks
       - manifestworks/status
       - managedclusters
+      - managedclustersetbindings
+      - managedclustersets/bind
       - managedclusterviews
       - managedclusterviews/status
       - managedclusteraddons

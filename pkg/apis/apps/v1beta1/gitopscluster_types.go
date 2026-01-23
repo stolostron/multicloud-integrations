@@ -165,16 +165,9 @@ type GitOpsAddonSpec struct {
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// GitOpsOperatorImage specifies the GitOps operator container image. Default is empty.
+	// This is the only image that needs to be specified - the operator uses environment
+	// variables to determine all other component images (ArgoCD, Redis, etc.).
 	GitOpsOperatorImage string `json:"gitOpsOperatorImage,omitempty"`
-
-	// GitOpsImage specifies the GitOps (ArgoCD) container image. Default is empty.
-	GitOpsImage string `json:"gitOpsImage,omitempty"`
-
-	// RedisImage specifies the Redis container image. Default is empty.
-	RedisImage string `json:"redisImage,omitempty"`
-
-	// ReconcileScope specifies the reconcile scope for the GitOps operator. Default is empty.
-	ReconcileScope string `json:"reconcileScope,omitempty"`
 
 	// ArgoCDAgent defines the configuration for the ArgoCD agent.
 	ArgoCDAgent *ArgoCDAgentSpec `json:"argoCDAgent,omitempty"`
@@ -239,9 +232,6 @@ type ArgoCDAgentSpec struct {
 	// PropagateHubCA indicates whether to propagate the hub CA certificate to managed clusters via ManifestWork. Default is true.
 	// +kubebuilder:default=true
 	PropagateHubCA *bool `json:"propagateHubCA,omitempty"`
-
-	// Image specifies the ArgoCD agent container image. Default is empty.
-	Image string `json:"image,omitempty"`
 
 	// ServerAddress specifies the ArgoCD server address for the agent. Default is empty.
 	ServerAddress string `json:"serverAddress,omitempty"`

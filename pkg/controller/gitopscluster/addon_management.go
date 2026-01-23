@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,9 +43,11 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 	// Check if OLM subscription mode is enabled
 	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(gitOpsCluster)
 
-	// Define variables managed by GitOpsCluster controller - only ArgoCD agent related variables
+	// Define variables managed by GitOpsCluster controller
+	// Start with ARGOCD_AGENT_ENABLED default, then ExtractVariablesFromGitOpsCluster
+	// will populate all other variables from hub environment and GitOpsCluster spec
 	managedVariables := map[string]string{
-		"ARGOCD_AGENT_ENABLED": "false", // Only default we set
+		utils.EnvArgoCDAgentEnabled: "false", // Default value
 	}
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
@@ -139,11 +142,11 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 			// Preserve mode (default): preserve ALL existing variables and only add new ones
 			// EXCEPT for ARGOCD_AGENT_ENABLED which should always reflect the current state
 			for _, variable := range existing.Spec.CustomizedVariables {
-				if variable.Name == "ARGOCD_AGENT_ENABLED" {
+				if variable.Name == utils.EnvArgoCDAgentEnabled {
 					// Always update ARGOCD_AGENT_ENABLED to match current argoCDAgent.enabled state
-					if newValue, exists := managedVariables["ARGOCD_AGENT_ENABLED"]; exists {
+					if newValue, exists := managedVariables[utils.EnvArgoCDAgentEnabled]; exists {
 						updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
-							Name:  "ARGOCD_AGENT_ENABLED",
+							Name:  utils.EnvArgoCDAgentEnabled,
 							Value: newValue,
 						})
 					}
@@ -445,30 +448,43 @@ func (r *ReconcileGitOpsCluster) GetGitOpsAddonStatus(instance *gitopsclusterV1b
 	return gitopsAddonEnabled, argoCDAgentEnabled
 }
 
-// ExtractVariablesFromGitOpsCluster extracts configuration variables from GitOpsCluster spec for AddOnDeploymentConfig
+// ExtractVariablesFromGitOpsCluster extracts configuration variables from GitOpsCluster spec for AddOnDeploymentConfig.
+// This populates managedVariables with all the configuration that should flow from hub to spoke:
+// 1. Operator images - from hub operator environment or defaults (excluding hub-only vars)
+// 2. Proxy settings - from hub operator environment
+// 3. ArgoCD agent settings - from GitOpsCluster spec
+// 4. GitOpsCluster spec overrides - takes precedence over environment
 func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedVariables map[string]string) {
-	// Extract values from GitOpsAddon spec
+	// First, populate with operator images from hub operator environment or defaults
+	// This ensures the spoke uses the same images as the hub operator
+	// Skip hub-only vars like ARGOCD_PRINCIPAL_IMAGE which are not needed on spoke
+	for envKey, defaultValue := range utils.DefaultOperatorImages {
+		if utils.IsHubOnlyEnvVar(envKey) {
+			continue
+		}
+		if envValue := os.Getenv(envKey); envValue != "" {
+			managedVariables[envKey] = envValue
+		} else {
+			managedVariables[envKey] = defaultValue
+		}
+	}
+
+	// Add proxy settings from hub operator environment
+	if v := os.Getenv(utils.EnvHTTPProxy); v != "" {
+		managedVariables[utils.EnvHTTPProxy] = v
+	}
+	if v := os.Getenv(utils.EnvHTTPSProxy); v != "" {
+		managedVariables[utils.EnvHTTPSProxy] = v
+	}
+	if v := os.Getenv(utils.EnvNoProxy); v != "" {
+		managedVariables[utils.EnvNoProxy] = v
+	}
+
+	// Extract values from GitOpsAddon spec - these override environment settings
 	if gitOpsCluster.Spec.GitOpsAddon != nil {
+		// GitOpsOperatorImage from spec takes precedence over environment
 		if gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage != "" {
-			managedVariables["GITOPS_OPERATOR_IMAGE"] = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage
-		}
-
-		if gitOpsCluster.Spec.GitOpsAddon.GitOpsImage != "" {
-			managedVariables["GITOPS_IMAGE"] = gitOpsCluster.Spec.GitOpsAddon.GitOpsImage
-		}
-
-		if gitOpsCluster.Spec.GitOpsAddon.RedisImage != "" {
-			managedVariables["REDIS_IMAGE"] = gitOpsCluster.Spec.GitOpsAddon.RedisImage
-		}
-
-		// GITOPS_OPERATOR_NAMESPACE is always openshift-gitops-operator (no longer configurable)
-		managedVariables["GITOPS_OPERATOR_NAMESPACE"] = utils.GitOpsOperatorNamespace
-
-		// GITOPS_NAMESPACE is always openshift-gitops (no longer configurable)
-		managedVariables["GITOPS_NAMESPACE"] = utils.GitOpsNamespace
-
-		if gitOpsCluster.Spec.GitOpsAddon.ReconcileScope != "" {
-			managedVariables["RECONCILE_SCOPE"] = gitOpsCluster.Spec.GitOpsAddon.ReconcileScope
+			managedVariables[utils.EnvGitOpsOperatorImage] = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage
 		}
 
 		// Extract ArgoCD agent values from the nested structure
@@ -485,23 +501,19 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 	}
 
 	if argoCDAgent.Enabled != nil && *argoCDAgent.Enabled {
-		managedVariables["ARGOCD_AGENT_ENABLED"] = "true"
-	}
-
-	if argoCDAgent.Image != "" {
-		managedVariables["ARGOCD_AGENT_IMAGE"] = argoCDAgent.Image
+		managedVariables[utils.EnvArgoCDAgentEnabled] = "true"
 	}
 
 	if argoCDAgent.ServerAddress != "" {
-		managedVariables["ARGOCD_AGENT_SERVER_ADDRESS"] = argoCDAgent.ServerAddress
+		managedVariables[utils.EnvArgoCDAgentServerAddress] = argoCDAgent.ServerAddress
 	}
 
 	if argoCDAgent.ServerPort != "" {
-		managedVariables["ARGOCD_AGENT_SERVER_PORT"] = argoCDAgent.ServerPort
+		managedVariables[utils.EnvArgoCDAgentServerPort] = argoCDAgent.ServerPort
 	}
 
 	if argoCDAgent.Mode != "" {
-		managedVariables["ARGOCD_AGENT_MODE"] = argoCDAgent.Mode
+		managedVariables[utils.EnvArgoCDAgentMode] = argoCDAgent.Mode
 	}
 }
 

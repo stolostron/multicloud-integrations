@@ -16,6 +16,7 @@ package gitopscluster
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,10 +74,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						GitOpsOperatorImage: "test-operator-image:latest",
-						GitOpsImage:         "test-gitops-image:latest",
-						RedisImage:          "test-redis-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							Image:         "test-agent-image:latest",
 							ServerAddress: "test-server.com",
 							ServerPort:    "443",
 							Mode:          "managed",
@@ -94,12 +92,11 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				require.NoError(t, err)
 
 				// Verify expected variables are set
+				// Note: Only GitOpsOperatorImage is configurable via GitOpsCluster spec
+				// Other images are handled by the operator via environment variables
 				expectedVars := map[string]string{
 					"ARGOCD_AGENT_ENABLED":        "false",
 					"GITOPS_OPERATOR_IMAGE":       "test-operator-image:latest",
-					"GITOPS_IMAGE":                "test-gitops-image:latest",
-					"REDIS_IMAGE":                 "test-redis-image:latest",
-					"ARGOCD_AGENT_IMAGE":          "test-agent-image:latest",
 					"ARGOCD_AGENT_SERVER_ADDRESS": "test-server.com",
 					"ARGOCD_AGENT_SERVER_PORT":    "443",
 					"ARGOCD_AGENT_MODE":           "managed",
@@ -128,7 +125,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 						GitOpsOperatorImage: "updated-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 							Enabled:       boolTruePtr,
-							Image:         "updated-agent-image:latest",
 							ServerAddress: "updated-server.com",
 						},
 					},
@@ -167,7 +163,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				// Existing managed variables should be preserved (not overridden)
 				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved")
 				// New managed variables should be added
-				assert.Equal(t, "updated-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "New managed variable should be added")
 				assert.Equal(t, "updated-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
 			},
 		},
@@ -184,7 +179,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 						OverrideExistingConfigs: func(b bool) *bool { return &b }(true),
 						GitOpsOperatorImage:     "new-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							Image:         "new-agent-image:latest",
 							ServerAddress: "new-server.com",
 						},
 					},
@@ -201,7 +195,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 							{Name: "ARGOCD_AGENT_ENABLED", Value: "true"},
 							{Name: "USER_CUSTOM_VAR", Value: "user-value"},
 							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-operator-image:latest"},
-							{Name: "ARGOCD_AGENT_IMAGE", Value: "old-agent-image:latest"},
 						},
 					},
 				},
@@ -223,7 +216,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
 				// Managed variables should be overridden
 				assert.Equal(t, "new-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Managed variable should be overridden")
-				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "Managed variable should be overridden")
 				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
 				assert.Equal(t, "false", varMap["ARGOCD_AGENT_ENABLED"], "Default managed variable should be be false")
 			},
@@ -242,7 +234,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 						GitOpsOperatorImage:     "new-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 							Enabled:       boolTruePtr,
-							Image:         "new-agent-image:latest",
 							ServerAddress: "new-server.com",
 						},
 					},
@@ -281,7 +272,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				// Existing managed variables should be preserved (not overridden)
 				assert.Equal(t, "old-operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Existing managed variable should be preserved")
 				// New managed variables should be added
-				assert.Equal(t, "new-agent-image:latest", varMap["ARGOCD_AGENT_IMAGE"], "New managed variable should be added")
 				assert.Equal(t, "new-server.com", varMap["ARGOCD_AGENT_SERVER_ADDRESS"], "New managed variable should be added")
 				assert.Equal(t, "true", varMap["ARGOCD_AGENT_ENABLED"], "ARGOCD_AGENT_ENABLED should be updated to match current state")
 			},
@@ -1043,102 +1033,136 @@ func TestGetGitOpsAddonStatus(t *testing.T) {
 }
 
 func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
-	tests := []struct {
-		name             string
-		gitOpsCluster    *gitopsclusterV1beta1.GitOpsCluster
-		initialVariables map[string]string
-		expectedVars     map[string]string
-	}{
-		{
-			name: "extract all GitOpsAddon variables",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsOperatorImage: "operator-image:v1.0",
-						GitOpsImage:         "gitops-image:v1.0",
-						RedisImage:          "redis-image:v1.0",
-						ReconcileScope:      "All-Namespaces",
-						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							Enabled:       boolTruePtr,
-							Image:         "agent-image:v1.0",
-							ServerAddress: "server.example.com",
-							ServerPort:    "443",
-							Mode:          "managed",
-						},
+	// The new behavior is that ExtractVariablesFromGitOpsCluster always populates:
+	// 1. All default operator images from utils.DefaultOperatorImages
+	// 2. GitOpsCluster spec overrides (e.g., GitOpsOperatorImage)
+	// 3. ArgoCD agent variables from the spec
+
+	t.Run("populates all default images plus GitOpsCluster spec overrides", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+				GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+					GitOpsOperatorImage: "custom-operator:v1.0",
+					ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+						Enabled:       boolTruePtr,
+						ServerAddress: "server.example.com",
+						ServerPort:    "443",
+						Mode:          "managed",
 					},
 				},
 			},
-			initialVariables: map[string]string{
-				"ARGOCD_AGENT_ENABLED": "true",
-			},
-			expectedVars: map[string]string{
-				"ARGOCD_AGENT_ENABLED":        "true",
-				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
-				"GITOPS_IMAGE":                "gitops-image:v1.0",
-				"REDIS_IMAGE":                 "redis-image:v1.0",
-				"GITOPS_OPERATOR_NAMESPACE":   utils.GitOpsOperatorNamespace,
-				"GITOPS_NAMESPACE":            utils.GitOpsNamespace,
-				"RECONCILE_SCOPE":             "All-Namespaces",
-				"ARGOCD_AGENT_IMAGE":          "agent-image:v1.0",
-				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
-				"ARGOCD_AGENT_SERVER_PORT":    "443",
-				"ARGOCD_AGENT_MODE":           "managed",
-			},
-		},
-		{
-			name: "extract partial variables only if non-empty",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						GitOpsOperatorImage: "operator-image:v1.0",
-						// Other fields are empty/nil
-						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							Enabled:       boolTruePtr,
-							ServerAddress: "server.example.com",
-							// Other fields are empty
-						},
-					},
-				},
-			},
-			initialVariables: map[string]string{
-				"ARGOCD_AGENT_ENABLED": "true",
-			},
-			expectedVars: map[string]string{
-				"ARGOCD_AGENT_ENABLED":        "true",
-				"GITOPS_OPERATOR_IMAGE":       "operator-image:v1.0",
-				"GITOPS_OPERATOR_NAMESPACE":   utils.GitOpsOperatorNamespace,
-				"GITOPS_NAMESPACE":            utils.GitOpsNamespace,
-				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
-			},
-		},
-		{
-			name: "no GitOpsAddon spec - no additional variables",
-			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
-			},
-			initialVariables: map[string]string{
-				"ARGOCD_AGENT_ENABLED": "true",
-			},
-			expectedVars: map[string]string{
-				"ARGOCD_AGENT_ENABLED": "true",
-			},
-		},
-	}
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &ReconcileGitOpsCluster{}
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
 
-			managedVariables := make(map[string]string)
-			for k, v := range tt.initialVariables {
-				managedVariables[k] = v
+		// Should have all default images EXCEPT hub-only vars (like ARGOCD_PRINCIPAL_IMAGE)
+		for envKey := range utils.DefaultOperatorImages {
+			if utils.IsHubOnlyEnvVar(envKey) {
+				_, exists := managedVariables[envKey]
+				assert.False(t, exists, "Hub-only var %s should NOT be present", envKey)
+				continue
 			}
+			_, exists := managedVariables[envKey]
+			assert.True(t, exists, "Expected %s to be present", envKey)
+		}
 
-			reconciler.ExtractVariablesFromGitOpsCluster(tt.gitOpsCluster, managedVariables)
+		// GitOpsOperatorImage should be overridden by spec
+		assert.Equal(t, "custom-operator:v1.0", managedVariables[utils.EnvGitOpsOperatorImage])
 
-			assert.Equal(t, tt.expectedVars, managedVariables)
-		})
-	}
+		// ArgoCD agent variables should be set
+		assert.Equal(t, "true", managedVariables[utils.EnvArgoCDAgentEnabled])
+		assert.Equal(t, "server.example.com", managedVariables[utils.EnvArgoCDAgentServerAddress])
+		assert.Equal(t, "443", managedVariables[utils.EnvArgoCDAgentServerPort])
+		assert.Equal(t, "managed", managedVariables[utils.EnvArgoCDAgentMode])
+	})
+
+	t.Run("uses defaults when no GitOpsAddon spec", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+
+		// Should have all default images EXCEPT hub-only vars
+		for envKey, defaultValue := range utils.DefaultOperatorImages {
+			if utils.IsHubOnlyEnvVar(envKey) {
+				_, exists := managedVariables[envKey]
+				assert.False(t, exists, "Hub-only var %s should NOT be present", envKey)
+				continue
+			}
+			value, exists := managedVariables[envKey]
+			assert.True(t, exists, "Expected %s to be present", envKey)
+			assert.Equal(t, defaultValue, value, "Expected %s to have default value", envKey)
+		}
+	})
+
+	t.Run("spec overrides take precedence over defaults", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		customImage := "my-custom-registry/gitops-operator:custom"
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+				GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+					GitOpsOperatorImage: customImage,
+				},
+			},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+
+		// Custom image should override the default
+		assert.Equal(t, customImage, managedVariables[utils.EnvGitOpsOperatorImage])
+
+		// Other images should still have defaults
+		assert.Equal(t, utils.DefaultOperatorImages[utils.EnvArgoCDImage], managedVariables[utils.EnvArgoCDImage])
+	})
+
+	t.Run("proxy environment variables are extracted from hub environment", func(t *testing.T) {
+		// Set proxy environment variables
+		os.Setenv(utils.EnvHTTPProxy, "http://proxy.example.com:8080")
+		os.Setenv(utils.EnvHTTPSProxy, "https://proxy.example.com:8443")
+		os.Setenv(utils.EnvNoProxy, "localhost,127.0.0.1,.example.com")
+		defer func() {
+			os.Unsetenv(utils.EnvHTTPProxy)
+			os.Unsetenv(utils.EnvHTTPSProxy)
+			os.Unsetenv(utils.EnvNoProxy)
+		}()
+
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+
+		// Proxy variables should be extracted from environment
+		assert.Equal(t, "http://proxy.example.com:8080", managedVariables[utils.EnvHTTPProxy])
+		assert.Equal(t, "https://proxy.example.com:8443", managedVariables[utils.EnvHTTPSProxy])
+		assert.Equal(t, "localhost,127.0.0.1,.example.com", managedVariables[utils.EnvNoProxy])
+	})
+
+	t.Run("image environment variables override defaults", func(t *testing.T) {
+		// Set an image environment variable
+		customImage := "custom.registry.io/gitops-operator:env-override"
+		os.Setenv(utils.EnvGitOpsOperatorImage, customImage)
+		defer os.Unsetenv(utils.EnvGitOpsOperatorImage)
+
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+
+		// Environment variable should override default
+		assert.Equal(t, customImage, managedVariables[utils.EnvGitOpsOperatorImage])
+	})
 }
 
 func TestExtractArgoCDAgentVariables(t *testing.T) {
@@ -1151,7 +1175,6 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 		{
 			name: "extract all ArgoCD agent variables",
 			argoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-				Image:         "agent-image:v2.0",
 				ServerAddress: "new-server.example.com",
 				ServerPort:    "8443",
 				Mode:          "autonomous",
@@ -1161,24 +1184,23 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 			},
 			expectedVars: map[string]string{
 				"EXISTING_VAR":                "existing-value",
-				"ARGOCD_AGENT_IMAGE":          "agent-image:v2.0",
 				"ARGOCD_AGENT_SERVER_ADDRESS": "new-server.example.com",
 				"ARGOCD_AGENT_SERVER_PORT":    "8443",
 				"ARGOCD_AGENT_MODE":           "autonomous",
 			},
 		},
 		{
-			name: "extract only non-empty variables",
+			name: "extract only server address variable",
 			argoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-				Image: "agent-image:v2.0",
+				ServerAddress: "server.example.com",
 				// Other fields are empty
 			},
 			initialVariables: map[string]string{
 				"EXISTING_VAR": "existing-value",
 			},
 			expectedVars: map[string]string{
-				"EXISTING_VAR":       "existing-value",
-				"ARGOCD_AGENT_IMAGE": "agent-image:v2.0",
+				"EXISTING_VAR":                "existing-value",
+				"ARGOCD_AGENT_SERVER_ADDRESS": "server.example.com",
 			},
 		},
 		{

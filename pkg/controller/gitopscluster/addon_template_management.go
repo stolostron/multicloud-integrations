@@ -44,7 +44,7 @@ const (
 	ControllerImageEnvVar = "CONTROLLER_IMAGE"
 )
 
-// Note: Default GitOps images (including DefaultArgoCDAgentImage) are defined in pkg/utils/images.go
+// Note: Default GitOps images and environment variable constants are defined in pkg/utils/config.go
 
 // getControllerImage retrieves the controller's image from environment variable or auto-detects it
 // Auto-detection: queries the Kubernetes API to find its own pod and reads the image
@@ -192,16 +192,7 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Command:         []string{"/usr/local/bin/gitopsaddon"},
 								Args:            []string{"-cleanup"},
-								Env: []corev1.EnvVar{
-									{
-										Name:  "GITOPS_OPERATOR_NAMESPACE",
-										Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
-									},
-									{
-										Name:  "GITOPS_NAMESPACE",
-										Value: "{{GITOPS_NAMESPACE}}",
-									},
-								},
+								Env:             []corev1.EnvVar{},
 							},
 						},
 					},
@@ -275,52 +266,7 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 								Image:           addonImage,
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Command:         []string{"/usr/local/bin/gitopsaddon"},
-								Env: []corev1.EnvVar{
-									{
-										Name:  "GITOPS_OPERATOR_IMAGE",
-										Value: "{{GITOPS_OPERATOR_IMAGE}}",
-									},
-									{
-										Name:  "GITOPS_OPERATOR_NAMESPACE",
-										Value: "{{GITOPS_OPERATOR_NAMESPACE}}",
-									},
-									{
-										Name:  "GITOPS_IMAGE",
-										Value: "{{GITOPS_IMAGE}}",
-									},
-									{
-										Name:  "GITOPS_NAMESPACE",
-										Value: "{{GITOPS_NAMESPACE}}",
-									},
-									{
-										Name:  "REDIS_IMAGE",
-										Value: "{{REDIS_IMAGE}}",
-									},
-									{
-										Name:  "RECONCILE_SCOPE",
-										Value: "{{RECONCILE_SCOPE}}",
-									},
-									{
-										Name:  "ARGOCD_AGENT_ENABLED",
-										Value: "{{ARGOCD_AGENT_ENABLED}}",
-									},
-									{
-										Name:  "ARGOCD_AGENT_IMAGE",
-										Value: "{{ARGOCD_AGENT_IMAGE}}",
-									},
-									{
-										Name:  "ARGOCD_AGENT_SERVER_ADDRESS",
-										Value: "{{ARGOCD_AGENT_SERVER_ADDRESS}}",
-									},
-									{
-										Name:  "ARGOCD_AGENT_SERVER_PORT",
-										Value: "{{ARGOCD_AGENT_SERVER_PORT}}",
-									},
-									{
-										Name:  "ARGOCD_AGENT_MODE",
-										Value: "{{ARGOCD_AGENT_MODE}}",
-									},
-								},
+								Env:             buildAddonEnvVars(),
 								SecurityContext: &corev1.SecurityContext{
 									ReadOnlyRootFilesystem:   boolPtr(true),
 									AllowPrivilegeEscalation: boolPtr(false),
@@ -352,6 +298,41 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	}
 
 	return manifests
+}
+
+// buildAddonEnvVars creates the environment variables for the gitops-addon container.
+// Each variable uses a template placeholder (e.g., {{GITOPS_OPERATOR_IMAGE}}) that gets
+// substituted by the addon framework using values from AddOnDeploymentConfig.
+func buildAddonEnvVars() []corev1.EnvVar {
+	envVars := []corev1.EnvVar{}
+
+	// Add all image environment variables (excluding hub-only vars like ARGOCD_PRINCIPAL_IMAGE)
+	for envKey := range utils.DefaultOperatorImages {
+		if utils.IsHubOnlyEnvVar(envKey) {
+			continue
+		}
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  envKey,
+			Value: fmt.Sprintf("{{%s}}", envKey),
+		})
+	}
+
+	// Add proxy environment variables
+	envVars = append(envVars,
+		corev1.EnvVar{Name: utils.EnvHTTPProxy, Value: fmt.Sprintf("{{%s}}", utils.EnvHTTPProxy)},
+		corev1.EnvVar{Name: utils.EnvHTTPSProxy, Value: fmt.Sprintf("{{%s}}", utils.EnvHTTPSProxy)},
+		corev1.EnvVar{Name: utils.EnvNoProxy, Value: fmt.Sprintf("{{%s}}", utils.EnvNoProxy)},
+	)
+
+	// Add ArgoCD agent environment variables
+	envVars = append(envVars,
+		corev1.EnvVar{Name: utils.EnvArgoCDAgentEnabled, Value: fmt.Sprintf("{{%s}}", utils.EnvArgoCDAgentEnabled)},
+		corev1.EnvVar{Name: utils.EnvArgoCDAgentServerAddress, Value: fmt.Sprintf("{{%s}}", utils.EnvArgoCDAgentServerAddress)},
+		corev1.EnvVar{Name: utils.EnvArgoCDAgentServerPort, Value: fmt.Sprintf("{{%s}}", utils.EnvArgoCDAgentServerPort)},
+		corev1.EnvVar{Name: utils.EnvArgoCDAgentMode, Value: fmt.Sprintf("{{%s}}", utils.EnvArgoCDAgentMode)},
+	)
+
+	return envVars
 }
 
 // Helper functions

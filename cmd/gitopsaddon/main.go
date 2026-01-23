@@ -63,23 +63,6 @@ var (
 	setupLog    = ctrl.Log.WithName("setup")
 	metricsHost = "0.0.0.0"
 	metricsPort = 8387
-
-	// Default image values are defined in pkg/utils/images.go
-	// These variables can be overridden by environment variables at runtime
-	GitopsOperatorImage         = utils.DefaultGitOpsOperatorImage
-	GitopsImage                 = utils.DefaultGitOpsImage
-	RedisImage                  = utils.DefaultRedisImage
-	GitOpsServiceImage          = utils.DefaultGitOpsServiceImage
-	GitOpsConsolePluginImage    = utils.DefaultGitOpsConsolePluginImage
-	ReconcileScope              = "Single-Namespace"
-	HTTP_PROXY                  = ""
-	HTTPS_PROXY                 = ""
-	NO_PROXY                    = ""
-	ARGOCD_AGENT_ENABLED        = "false"
-	ARGOCD_AGENT_IMAGE          = utils.DefaultArgoCDAgentImage
-	ARGOCD_AGENT_SERVER_ADDRESS = ""
-	ARGOCD_AGENT_SERVER_PORT    = ""
-	ARGOCD_AGENT_MODE           = "managed"
 )
 
 func init() {
@@ -155,80 +138,13 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	newGitopsOperatorImage, found := os.LookupEnv("GITOPS_OPERATOR_IMAGE")
-	if found && newGitopsOperatorImage > "" {
-		GitopsOperatorImage = newGitopsOperatorImage
-	}
-
-	newGitopsImage, found := os.LookupEnv("GITOPS_IMAGE")
-	if found && newGitopsImage > "" {
-		GitopsImage = newGitopsImage
-	}
-
-	newRedisImage, found := os.LookupEnv("REDIS_IMAGE")
-	if found && newRedisImage > "" {
-		RedisImage = newRedisImage
-	}
-
-	newGitOpsServiceImage, found := os.LookupEnv("BACKEND_IMAGE")
-	if found && newGitOpsServiceImage > "" {
-		GitOpsServiceImage = newGitOpsServiceImage
-	}
-
-	newGitOpsConsolePluginImage, found := os.LookupEnv("GITOPS_CONSOLE_PLUGIN_IMAGE")
-	if found && newGitOpsConsolePluginImage > "" {
-		GitOpsConsolePluginImage = newGitOpsConsolePluginImage
-	}
-
-	newHTTP_PROXY, found := os.LookupEnv("HTTP_PROXY")
-	if found && newHTTP_PROXY > "" {
-		HTTP_PROXY = newHTTP_PROXY
-	}
-
-	newHTTPS_PROXY, found := os.LookupEnv("HTTPS_PROXY")
-	if found && newHTTPS_PROXY > "" {
-		HTTPS_PROXY = newHTTPS_PROXY
-	}
-
-	newNO_PROXY, found := os.LookupEnv("NO_PROXY")
-	if found && newNO_PROXY > "" {
-		NO_PROXY = newNO_PROXY
-	}
-
-	newReconcileScope, found := os.LookupEnv("RECONCILE_SCOPE")
-	if found && newReconcileScope > "" {
-		ReconcileScope = newReconcileScope
-	}
-
-	newArgoCDAgentEnabled, found := os.LookupEnv("ARGOCD_AGENT_ENABLED")
-	if found && newArgoCDAgentEnabled > "" {
-		ARGOCD_AGENT_ENABLED = newArgoCDAgentEnabled
-	}
-
-	newArgoCDAgentImage, found := os.LookupEnv("ARGOCD_AGENT_IMAGE")
-	if found && newArgoCDAgentImage > "" {
-		ARGOCD_AGENT_IMAGE = newArgoCDAgentImage
-	}
-
-	newArgoCDAgentServerAddress, found := os.LookupEnv("ARGOCD_AGENT_SERVER_ADDRESS")
-	if found && newArgoCDAgentServerAddress > "" {
-		ARGOCD_AGENT_SERVER_ADDRESS = newArgoCDAgentServerAddress
-	}
-
-	newArgoCDAgentServerPort, found := os.LookupEnv("ARGOCD_AGENT_SERVER_PORT")
-	if found && newArgoCDAgentServerPort > "" {
-		ARGOCD_AGENT_SERVER_PORT = newArgoCDAgentServerPort
-	}
-
-	newArgoCDAgentMode, found := os.LookupEnv("ARGOCD_AGENT_MODE")
-	if found && newArgoCDAgentMode > "" {
-		ARGOCD_AGENT_MODE = newArgoCDAgentMode
-	}
+	// Create config from environment variables with defaults
+	config := utils.NewGitOpsAddonConfig()
 
 	// If cleanup mode is enabled, run cleanup and exit
 	if options.Cleanup {
 		setupLog.Info("Starting in cleanup mode")
-		runCleanupMode()
+		runCleanupMode(config)
 		return
 	}
 
@@ -237,21 +153,20 @@ func main() {
 		"renewDeadline", options.LeaderElectionRenewDeadline,
 		"retryPeriod", options.LeaderElectionRetryPeriod,
 		"syncInterval", options.SyncInterval,
-		"GitopsOperatorImage", GitopsOperatorImage,
-		"GitopsImage", GitopsImage,
-		"RedisImage", RedisImage,
-		"GitOpsServiceImage", GitOpsServiceImage,
-		"GitOpsConsolePluginImage", GitOpsConsolePluginImage,
-		"ReconcileScope", ReconcileScope,
-		"HTTP_PROXY", HTTP_PROXY,
-		"HTTPS_PROXY", HTTPS_PROXY,
-		"NO_PROXY", NO_PROXY,
-		"ARGOCD_AGENT_ENABLED", ARGOCD_AGENT_ENABLED,
-		"ARGOCD_AGENT_IMAGE", ARGOCD_AGENT_IMAGE,
-		"ARGOCD_AGENT_SERVER_ADDRESS", ARGOCD_AGENT_SERVER_ADDRESS,
-		"ARGOCD_AGENT_SERVER_PORT", ARGOCD_AGENT_SERVER_PORT,
-		"ARGOCD_AGENT_MODE", ARGOCD_AGENT_MODE,
+		"HTTP_PROXY", config.HTTPProxy,
+		"HTTPS_PROXY", config.HTTPSProxy,
+		"NO_PROXY", config.NoProxy,
+		"ArgoCDAgentEnabled", config.ArgoCDAgentEnabled,
+		"ArgoCDAgentServerAddress", config.ArgoCDAgentServerAddress,
+		"ArgoCDAgentServerPort", config.ArgoCDAgentServerPort,
+		"ArgoCDAgentMode", config.ArgoCDAgentMode,
 	)
+
+	// Log all operator images
+	setupLog.Info("Operator images configured:")
+	for key, value := range config.OperatorImages {
+		setupLog.Info("  Image", key, value)
+	}
 
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -270,8 +185,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, GitopsOperatorImage,
-		GitopsImage, RedisImage, GitOpsServiceImage, GitOpsConsolePluginImage, ReconcileScope, HTTP_PROXY, HTTPS_PROXY, NO_PROXY, ARGOCD_AGENT_ENABLED, ARGOCD_AGENT_IMAGE, ARGOCD_AGENT_SERVER_ADDRESS, ARGOCD_AGENT_SERVER_PORT, ARGOCD_AGENT_MODE); err != nil {
+	if err = gitopsaddon.SetupWithManager(mgr, options.SyncInterval, config); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "gitopsaddon")
 		os.Exit(1)
 	}
@@ -285,7 +199,7 @@ func main() {
 }
 
 // runCleanupMode runs the application in cleanup mode for pre-delete hook
-func runCleanupMode() {
+func runCleanupMode(config *utils.GitOpsAddonConfig) {
 	setupLog.Info("Running cleanup mode")
 
 	// Create a manager for cleanup mode (no leader election for cleanup job)
@@ -302,8 +216,7 @@ func runCleanupMode() {
 	}
 
 	// Setup the cleanup with the manager
-	if err = gitopsaddon.SetupCleanupWithManager(mgr, GitopsOperatorImage,
-		GitopsImage, ARGOCD_AGENT_IMAGE); err != nil {
+	if err = gitopsaddon.SetupCleanupWithManager(mgr, config); err != nil {
 		setupLog.Error(err, "unable to create cleanup controller")
 		os.Exit(1)
 	}

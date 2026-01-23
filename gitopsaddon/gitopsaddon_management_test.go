@@ -275,7 +275,3 @@ func TestApplyManifestSelectivelyWithManagement(t *testing.T) {
 		})
 	}
 }
-
-func TestNamespaceManagement(t *testing.T) {
-	t.Skip("Skipping namespace test due to image pull secret dependencies in test environment")
-}

@@ -15,6 +15,8 @@ limitations under the License.
 package gitopscluster
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,7 +31,7 @@ func TestGenerateArgoCDPolicyPlacementBindingYaml(t *testing.T) {
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 			UID:       "test-uid",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
@@ -43,7 +45,7 @@ func TestGenerateArgoCDPolicyPlacementBindingYaml(t *testing.T) {
 	yamlString := generateArgoCDPolicyPlacementBindingYaml(gitOpsCluster)
 
 	assert.Contains(t, yamlString, "name: test-gitops-argocd-policy-binding")
-	assert.Contains(t, yamlString, "namespace: test-ns")
+	assert.Contains(t, yamlString, "namespace: openshift-gitops")
 	assert.Contains(t, yamlString, "kind: PlacementBinding")
 	assert.Contains(t, yamlString, "name: test-placement")
 	assert.Contains(t, yamlString, "name: test-gitops-argocd-policy")
@@ -51,12 +53,28 @@ func TestGenerateArgoCDPolicyPlacementBindingYaml(t *testing.T) {
 	assert.NotContains(t, yamlString, "ownerReferences")
 }
 
+func TestGenerateManagedClusterSetBindingYaml(t *testing.T) {
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+		},
+	}
+
+	yamlString := generateManagedClusterSetBindingYaml(gitOpsCluster)
+
+	assert.Contains(t, yamlString, "name: default")
+	assert.Contains(t, yamlString, "namespace: openshift-gitops")
+	assert.Contains(t, yamlString, "kind: ManagedClusterSetBinding")
+	assert.Contains(t, yamlString, "clusterSet: default")
+}
+
 func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	enabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 			UID:       "test-uid",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
@@ -73,23 +91,59 @@ func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
 
 	assert.Contains(t, yamlString, "name: test-gitops-argocd-policy")
-	assert.Contains(t, yamlString, "namespace: test-ns")
+	assert.Contains(t, yamlString, "namespace: openshift-gitops")
 	assert.Contains(t, yamlString, "kind: Policy")
 	assert.Contains(t, yamlString, "kind: ConfigurationPolicy")
 	assert.Contains(t, yamlString, "name: test-gitops-argocd-config-policy")
 	assert.Contains(t, yamlString, "kind: ArgoCD")
-	assert.Contains(t, yamlString, "name: openshift-gitops")
+	assert.Contains(t, yamlString, "name: acm-openshift-gitops")
 	assert.Contains(t, yamlString, "remediationAction: enforce")
 	// ArgoCD CR should be orphaned when policy is deleted
 	assert.Contains(t, yamlString, "pruneObjectBehavior: None")
 }
 
-func TestGenerateArgoCDSpec_BasicConfig_DefaultImages(t *testing.T) {
+func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
 	enabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
+			UID:       "test-uid",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			PlacementRef: &v1.ObjectReference{
+				Name: "test-placement",
+				Kind: "Placement",
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
+
+	// Policy should include the default AppProject
+	assert.Contains(t, yamlString, "kind: AppProject")
+	assert.Contains(t, yamlString, "name: default")
+	assert.Contains(t, yamlString, "namespace: openshift-gitops")
+
+	// AppProject should have permissive spec for default project
+	assert.Contains(t, yamlString, "clusterResourceWhitelist:")
+	assert.Contains(t, yamlString, "group: '*'")
+	assert.Contains(t, yamlString, "kind: '*'")
+	assert.Contains(t, yamlString, "destinations:")
+	assert.Contains(t, yamlString, "namespace: '*'")
+	assert.Contains(t, yamlString, "server: '*'")
+	assert.Contains(t, yamlString, "sourceRepos:")
+}
+
+func TestGenerateArgoCDSpec_BasicConfig(t *testing.T) {
+	enabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
@@ -104,97 +158,14 @@ func TestGenerateArgoCDSpec_BasicConfig_DefaultImages(t *testing.T) {
 	assert.Contains(t, spec, "server:")
 	assert.Contains(t, spec, "enabled: false")
 
-	// Should use default Red Hat registry images when OLM subscription is disabled and no custom images specified
-	// Note: We don't test specific SHA values as they change with each release
-	assert.Contains(t, spec, "image: registry.redhat.io/openshift-gitops-1/argocd-rhel8")
-	assert.Contains(t, spec, "version: sha256:")
-	assert.Contains(t, spec, "redis:")
-	assert.Contains(t, spec, "image: registry.redhat.io/rhel9/redis-7")
-	assert.Contains(t, spec, "repo:")
-
-	// Should NOT contain argoCDAgent when not enabled
-	assert.NotContains(t, spec, "argoCDAgent:")
-}
-
-func TestGenerateArgoCDSpec_CustomImages(t *testing.T) {
-	enabled := true
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "test-ns",
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Enabled:     &enabled,
-				GitOpsImage: "quay.io/custom/argocd:v2.10.0",
-				RedisImage:  "custom-redis:6.2",
-			},
-		},
-	}
-
-	spec := generateArgoCDSpec(gitOpsCluster)
-
-	// Should use custom images
-	assert.Contains(t, spec, "image: quay.io/custom/argocd")
-	assert.Contains(t, spec, "version: v2.10.0")
-	assert.Contains(t, spec, "image: custom-redis")
-	assert.Contains(t, spec, "version: 6.2")
-}
-
-func TestGenerateArgoCDSpec_DigestImage(t *testing.T) {
-	enabled := true
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "test-ns",
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Enabled:     &enabled,
-				GitOpsImage: "quay.io/argoproj/argocd@sha256:abc123def456",
-			},
-		},
-	}
-
-	spec := generateArgoCDSpec(gitOpsCluster)
-
-	// Should handle digest format
-	assert.Contains(t, spec, "image: quay.io/argoproj/argocd")
-	assert.Contains(t, spec, "version: sha256:abc123def456")
-}
-
-func TestGenerateArgoCDSpec_OLMSubscriptionEnabled_NoImageOverride(t *testing.T) {
-	enabled := true
-	olmEnabled := true
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "test-ns",
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Enabled:     &enabled,
-				GitOpsImage: "quay.io/custom/argocd:v2.10.0", // This should be ignored when OLM is enabled
-				RedisImage:  "custom-redis:6.2",              // This should be ignored when OLM is enabled
-				OLMSubscription: &gitopsclusterV1beta1.OLMSubscriptionSpec{
-					Enabled: &olmEnabled,
-				},
-			},
-		},
-	}
-
-	spec := generateArgoCDSpec(gitOpsCluster)
-
-	// Should NOT have image override when OLM subscription is enabled
-	assert.NotContains(t, spec, "image: quay.io/custom/argocd")
-	assert.NotContains(t, spec, "image: quay.io/argoproj/argocd")
-	assert.NotContains(t, spec, "image: redis")
+	// Should NOT contain any image overrides - operator handles images via env vars
+	assert.NotContains(t, spec, "image:")
+	assert.NotContains(t, spec, "version:")
 	assert.NotContains(t, spec, "redis:")
 	assert.NotContains(t, spec, "repo:")
 
-	// Should only have server disabled
-	assert.Contains(t, spec, "server:")
-	assert.Contains(t, spec, "enabled: false")
+	// Should NOT contain argoCDAgent when not enabled
+	assert.NotContains(t, spec, "argoCDAgent:")
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
@@ -203,14 +174,13 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 				Enabled: &enabled,
 				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 					Enabled:       &agentEnabled,
-					Image:         "ghcr.io/argoproj-labs/argocd-agent:latest",
 					ServerAddress: "192.168.1.100",
 					ServerPort:    "443",
 					Mode:          "managed",
@@ -225,22 +195,41 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 	assert.Contains(t, spec, "server:")
 	assert.Contains(t, spec, "enabled: false")
 
-	// Should have image override with default Red Hat registry images (OLM is disabled, no custom images)
-	// Note: We don't test specific SHA values as they change with each release
-	assert.Contains(t, spec, "image: registry.redhat.io/openshift-gitops-1/argocd-rhel8")
-	assert.Contains(t, spec, "version: sha256:")
-	assert.Contains(t, spec, "redis:")
-	assert.Contains(t, spec, "image: registry.redhat.io/rhel9/redis-7")
-	assert.Contains(t, spec, "repo:")
-
-	// ArgoCD agent should be configured
+	// ArgoCD agent should be configured with default Red Hat image
 	assert.Contains(t, spec, "argoCDAgent:")
 	assert.Contains(t, spec, "agent:")
 	assert.Contains(t, spec, "enabled: true")
-	assert.Contains(t, spec, "image: ghcr.io/argoproj-labs/argocd-agent:latest")
+	assert.Contains(t, spec, "image: \"registry.redhat.io")
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
 	assert.Contains(t, spec, "principalServerPort: \"443\"")
 	assert.Contains(t, spec, "mode: \"managed\"")
+}
+
+func TestGenerateArgoCDSpec_WithArgoCDAgentDefaultImage(t *testing.T) {
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "192.168.1.100",
+					// No custom image - should use default Red Hat image
+				},
+			},
+		},
+	}
+
+	spec := generateArgoCDSpec(gitOpsCluster)
+
+	// Should use default Red Hat agent image
+	assert.Contains(t, spec, "argoCDAgent:")
+	assert.Contains(t, spec, "image: \"registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8")
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
@@ -249,14 +238,13 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 				Enabled: &enabled,
 				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 					Enabled:       &agentEnabled,
-					Image:         "ghcr.io/argoproj-labs/argocd-agent:latest",
 					ServerAddress: "192.168.1.100",
 					// ServerPort and Mode not specified - should use defaults
 				},
@@ -271,52 +259,36 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
 	assert.Contains(t, spec, "mode: \"managed\"")
 }
 
-func TestParseImageRef(t *testing.T) {
-	tests := []struct {
-		name        string
-		imageRef    string
-		expectedImg string
-		expectedTag string
-	}{
-		{
-			name:        "image with tag",
-			imageRef:    "quay.io/argoproj/argocd:v2.10.0",
-			expectedImg: "quay.io/argoproj/argocd",
-			expectedTag: "v2.10.0",
+func TestGenerateArgoCDSpec_WithImageOverrideEnv(t *testing.T) {
+	// Set the environment variable to override the agent image
+	customImage := "custom.registry.io/argocd-agent:test"
+	os.Setenv("ARGOCD_AGENT_IMAGE_OVERRIDE", customImage)
+	defer os.Unsetenv("ARGOCD_AGENT_IMAGE_OVERRIDE")
+
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
 		},
-		{
-			name:        "image with digest",
-			imageRef:    "quay.io/argoproj/argocd@sha256:abc123",
-			expectedImg: "quay.io/argoproj/argocd",
-			expectedTag: "sha256:abc123",
-		},
-		{
-			name:        "image without tag or digest",
-			imageRef:    "quay.io/argoproj/argocd",
-			expectedImg: "quay.io/argoproj/argocd",
-			expectedTag: "latest",
-		},
-		{
-			name:        "image with port in registry and tag",
-			imageRef:    "localhost:5000/argocd:v1.0",
-			expectedImg: "localhost:5000/argocd",
-			expectedTag: "v1.0",
-		},
-		{
-			name:        "simple image with tag",
-			imageRef:    "redis:7.0",
-			expectedImg: "redis",
-			expectedTag: "7.0",
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "192.168.1.100",
+					ServerPort:    "443",
+				},
+			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			img, tag := parseImageRef(tt.imageRef)
-			assert.Equal(t, tt.expectedImg, img)
-			assert.Equal(t, tt.expectedTag, tag)
-		})
-	}
+	spec := generateArgoCDSpec(gitOpsCluster)
+
+	// Should use the overridden image from environment variable
+	assert.Contains(t, spec, "argoCDAgent:")
+	assert.Contains(t, spec, fmt.Sprintf("image: \"%s\"", customImage))
 }
 
 func TestIndentYaml(t *testing.T) {
@@ -339,7 +311,7 @@ func TestCreateArgoCDPolicy_AddonDisabled(t *testing.T) {
 	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
@@ -366,7 +338,7 @@ func TestCreateArgoCDPolicy_NilPlacementRef(t *testing.T) {
 	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gitops",
-			Namespace: "test-ns",
+			Namespace: "openshift-gitops",
 		},
 		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
