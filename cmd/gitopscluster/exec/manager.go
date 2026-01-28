@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 
+	routev1 "github.com/openshift/api/route/v1"
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -130,6 +131,12 @@ func RunManager() {
 
 	// Setup ManifestWork Scheme for manager
 	if err := workv1.AddToScheme(mgr.GetScheme()); err != nil {
+		klog.Error(err, "")
+		os.Exit(1)
+	}
+
+	// Setup OpenShift Route Scheme for manager (needed for Route discovery)
+	if err := routev1.AddToScheme(mgr.GetScheme()); err != nil {
 		klog.Error(err, "")
 		os.Exit(1)
 	}

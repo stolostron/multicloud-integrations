@@ -163,15 +163,23 @@ subjects:
 	return yamlString
 }
 
-// generateArgoCDPolicyYaml generates the Policy YAML wrapping the ArgoCD CR and default AppProject.
+// generateArgoCDPolicyYaml generates the Policy YAML wrapping the ArgoCD CR and optionally the default AppProject.
 // The Policy is created in the same namespace as the GitOpsCluster CR.
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
 // They must be manually deleted by the user.
 // Note: pruneObjectBehavior is set to None to orphan the ArgoCD CR when the policy is deleted.
 // The ArgoCD CR cleanup is handled by the gitops addon code.
+// When ArgoCD agent is enabled, AppProject is NOT included because argocd-agent propagates it from the hub.
 func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	argoCDSpec := generateArgoCDSpec(gitOpsCluster)
 
+	// Check if ArgoCD agent is enabled
+	argoCDAgentEnabled := false
+	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled != nil {
+		argoCDAgentEnabled = *gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled
+	}
+
+	// Base policy with ArgoCD CR
 	yamlString := fmt.Sprintf(`
 apiVersion: policy.open-cluster-management.io/v1
 kind: Policy
@@ -204,7 +212,15 @@ spec:
                   name: acm-openshift-gitops
                   namespace: openshift-gitops
                 spec:
-%s
+%s`,
+		gitOpsCluster.Name+"-argocd-policy", gitOpsCluster.Namespace,
+		gitOpsCluster.Name+"-argocd-config-policy",
+		indentYaml(argoCDSpec, 18))
+
+	// Only include AppProject when ArgoCD agent is NOT enabled
+	// When argocd-agent is enabled, AppProject is propagated from the hub by the agent
+	if !argoCDAgentEnabled {
+		yamlString += `
             - complianceType: musthave
               objectDefinition:
                 apiVersion: argoproj.io/v1alpha1
@@ -221,10 +237,11 @@ spec:
                       server: '*'
                   sourceRepos:
                     - '*'
-`,
-		gitOpsCluster.Name+"-argocd-policy", gitOpsCluster.Namespace,
-		gitOpsCluster.Name+"-argocd-config-policy",
-		indentYaml(argoCDSpec, 18))
+`
+	} else {
+		klog.Infof("ArgoCD agent is enabled, excluding AppProject from policy (will be propagated by agent)")
+		yamlString += "\n"
+	}
 
 	return yamlString
 }
@@ -278,7 +295,9 @@ argoCDAgent:
     client:
       principalServerAddress: "%s"
       principalServerPort: "%s"
-      mode: "%s"`,
+      mode: "%s"
+    tls:
+      rootCASecretName: argocd-agent-ca`,
 			agentImage, serverAddress, serverPort, mode)
 	}
 

@@ -451,3 +451,4 @@ func (r *GitopsAddonReconciler) deletePodsWithImagePullIssues() error {
 
 	return nil
 }
+

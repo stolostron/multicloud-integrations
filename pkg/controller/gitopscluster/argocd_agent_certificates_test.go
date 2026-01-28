@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -258,6 +259,243 @@ func TestCertificateConstants(t *testing.T) {
 	}
 	if CASignerNamePrefix == "" {
 		t.Error("CASignerNamePrefix should not be empty")
+	}
+}
+
+func TestDiscoverRouteHostname(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = routev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name             string
+		namespace        string
+		routes           []routev1.Route
+		expectedHostname string
+		expectError      bool
+	}{
+		{
+			name:      "discover from principal route",
+			namespace: "openshift-gitops",
+			routes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+					},
+				},
+			},
+			expectedHostname: "principal.apps.example.com",
+			expectError:      false,
+		},
+		{
+			name:      "prefer principal route over others",
+			namespace: "openshift-gitops",
+			routes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-other",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "other.apps.example.com",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+					},
+				},
+			},
+			expectedHostname: "principal.apps.example.com",
+			expectError:      false,
+		},
+		{
+			name:      "fallback to first route when no principal",
+			namespace: "openshift-gitops",
+			routes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-server",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "server.apps.example.com",
+					},
+				},
+			},
+			expectedHostname: "server.apps.example.com",
+			expectError:      false,
+		},
+		{
+			name:        "no routes found",
+			namespace:   "openshift-gitops",
+			routes:      []routev1.Route{},
+			expectError: true,
+		},
+		{
+			name:      "route with wrong labels",
+			namespace: "openshift-gitops",
+			routes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "argocd-server",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd", // Not argocd-agent
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "server.apps.example.com",
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name:      "route without host",
+			namespace: "openshift-gitops",
+			routes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: "openshift-gitops",
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						// No host configured
+					},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objs []runtime.Object
+			for i := range tt.routes {
+				objs = append(objs, &tt.routes[i])
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+			r := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			hostname, err := r.discoverRouteHostname(context.Background(), tt.namespace)
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("discoverRouteHostname() expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("discoverRouteHostname() unexpected error: %v", err)
+				}
+				if hostname != tt.expectedHostname {
+					t.Errorf("discoverRouteHostname() = %v, want %v", hostname, tt.expectedHostname)
+				}
+			}
+		})
+	}
+}
+
+func TestGetPrincipalHostNames_WithRoute(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = routev1.AddToScheme(scheme)
+
+	// Create a route with argocd-agent labels
+	route := &routev1.Route{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "openshift-gitops-agent-principal",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of": "argocd-agent",
+			},
+		},
+		Spec: routev1.RouteSpec{
+			Host: "principal.apps.example.com",
+		},
+	}
+
+	// Create a service for LoadBalancer fallback
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-principal",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "argocd-agent-principal",
+			},
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						Hostname: "lb.example.com",
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(route, service).Build()
+	r := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace")
+
+	if len(hostnames) == 0 {
+		t.Error("getPrincipalHostNames() returned empty hostnames")
+	}
+
+	// Verify Route hostname is included
+	hasRouteHostname := false
+	for _, h := range hostnames {
+		if h == "principal.apps.example.com" {
+			hasRouteHostname = true
+			break
+		}
+	}
+
+	if !hasRouteHostname {
+		t.Error("getPrincipalHostNames() should include Route hostname")
+	}
+
+	// Verify basic hostnames are included
+	hasLocalhost := false
+	for _, h := range hostnames {
+		if h == "localhost" {
+			hasLocalhost = true
+			break
+		}
+	}
+
+	if !hasLocalhost {
+		t.Error("getPrincipalHostNames() should include localhost")
 	}
 }
 

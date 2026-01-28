@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 
+	routev1 "github.com/openshift/api/route/v1"
 	v1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -162,7 +163,7 @@ func (r *ReconcileGitOpsCluster) FindArgoCDAgentPrincipalService(ctx context.Con
 	return nil, fmt.Errorf("ArgoCD agent principal service not found in namespace '%s'. Please ensure the ArgoCD instance has been deployed with agent mode enabled and the principal service is running", namespace)
 }
 
-// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal service
+// DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal Route or Service
 // and updates the GitOpsCluster CR spec fields if they are empty
 func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	// Only discover if fields are not already set
@@ -181,49 +182,18 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 		argoNamespace = utils.GitOpsNamespace
 	}
 
-	// Find the principal service
-	service, err := r.FindArgoCDAgentPrincipalService(ctx, argoNamespace)
-	if err != nil {
-		return fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
-	}
-
-	// Look for LoadBalancer external endpoints
 	var serverAddress string
 	var serverPort string
 
-	for _, ingress := range service.Status.LoadBalancer.Ingress {
-		if ingress.Hostname != "" {
-			serverAddress = ingress.Hostname
-			klog.V(2).Infof("Discovered server address from LoadBalancer hostname: %s", serverAddress)
-			break
-		}
-		if ingress.IP != "" {
-			serverAddress = ingress.IP
-			klog.V(2).Infof("Discovered server address from LoadBalancer IP: %s", serverAddress)
-			break
-		}
-	}
+	// First, try to discover from Route (preferred for OpenShift)
+	serverAddress, serverPort, err := r.discoverFromRoute(ctx, argoNamespace)
+	if err != nil {
+		klog.V(2).Infof("Route discovery failed, trying LoadBalancer: %v", err)
 
-	if serverAddress == "" {
-		return fmt.Errorf("ArgoCD agent principal service '%s' in namespace '%s' does not have an external LoadBalancer IP or hostname. Please ensure your cluster has a LoadBalancer service provisioner (e.g., MetalLB, cloud provider load balancer) configured", service.Name, argoNamespace)
-	}
-
-	// Get the port from the service spec (no default)
-	for _, port := range service.Spec.Ports {
-		if port.Name == "https" || port.Port == 443 {
-			serverPort = fmt.Sprintf("%d", port.Port)
-			klog.V(2).Infof("Discovered server port from service spec: %s", serverPort)
-			break
-		}
-	}
-
-	if serverPort == "" {
-		// Try first port if no https port found
-		if len(service.Spec.Ports) > 0 {
-			serverPort = fmt.Sprintf("%d", service.Spec.Ports[0].Port)
-			klog.V(2).Infof("Using first available port from service spec: %s", serverPort)
-		} else {
-			return fmt.Errorf("ArgoCD agent principal service '%s' has no ports defined", service.Name)
+		// Fallback to LoadBalancer discovery
+		serverAddress, serverPort, err = r.discoverFromLoadBalancer(ctx, argoNamespace)
+		if err != nil {
+			return fmt.Errorf("failed to discover ArgoCD agent principal endpoint (tried Route and LoadBalancer): %w", err)
 		}
 	}
 
@@ -247,6 +217,124 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 	klog.Infof("Updated GitOpsCluster %s/%s with discovered ArgoCD agent server endpoint: %s:%s",
 		gitOpsCluster.Namespace, gitOpsCluster.Name, serverAddress, serverPort)
 	return nil
+}
+
+// discoverFromRoute discovers the server address from an OpenShift Route
+func (r *ReconcileGitOpsCluster) discoverFromRoute(ctx context.Context, argoNamespace string) (string, string, error) {
+	// List routes with principal labels
+	// The ArgoCD operator creates routes with app.kubernetes.io/part-of: argocd-agent
+	// and app.kubernetes.io/name containing "agent-principal"
+	routeList := &routev1.RouteList{}
+	listopts := &client.ListOptions{Namespace: argoNamespace}
+
+	routeSelector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app.kubernetes.io/part-of": "argocd-agent",
+		},
+	}
+
+	routeSelectionLabel, err := utils.ConvertLabels(routeSelector)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to convert route labels: %w", err)
+	}
+
+	listopts.LabelSelector = routeSelectionLabel
+
+	err = r.List(ctx, routeList, listopts)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to list routes: %w", err)
+	}
+
+	if len(routeList.Items) == 0 {
+		return "", "", fmt.Errorf("no ArgoCD agent principal route found in namespace %s", argoNamespace)
+	}
+
+	// Find the principal route (look for "principal" in the name)
+	var route *routev1.Route
+	for i := range routeList.Items {
+		r := &routeList.Items[i]
+		if strings.Contains(r.Name, "principal") {
+			route = r
+			break
+		}
+	}
+
+	if route == nil {
+		// Fallback to first route if no principal route found
+		route = &routeList.Items[0]
+	}
+
+	// Get the hostname from the Route
+	if route.Spec.Host == "" {
+		return "", "", fmt.Errorf("route %s/%s has no host configured", argoNamespace, route.Name)
+	}
+
+	serverAddress := route.Spec.Host
+
+	// Determine port based on TLS configuration
+	// OpenShift Routes use the router which exposes 443 for HTTPS (TLS) and 80 for HTTP
+	serverPort := "443" // Default to HTTPS
+	if route.Spec.TLS == nil {
+		// No TLS configured, use HTTP port
+		serverPort = "80"
+		klog.V(2).Infof("Route %s has no TLS configuration, using port 80", route.Name)
+	} else {
+		klog.V(2).Infof("Route %s has TLS termination type: %s", route.Name, route.Spec.TLS.Termination)
+	}
+
+	klog.Infof("Discovered server address from Route %s: %s:%s", route.Name, serverAddress, serverPort)
+	return serverAddress, serverPort, nil
+}
+
+// discoverFromLoadBalancer discovers the server address from a LoadBalancer Service
+func (r *ReconcileGitOpsCluster) discoverFromLoadBalancer(ctx context.Context, argoNamespace string) (string, string, error) {
+	// Find the principal service
+	service, err := r.FindArgoCDAgentPrincipalService(ctx, argoNamespace)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
+	}
+
+	// Look for LoadBalancer external endpoints
+	var serverAddress string
+	var serverPort string
+
+	for _, ingress := range service.Status.LoadBalancer.Ingress {
+		if ingress.Hostname != "" {
+			serverAddress = ingress.Hostname
+			klog.V(2).Infof("Discovered server address from LoadBalancer hostname: %s", serverAddress)
+			break
+		}
+		if ingress.IP != "" {
+			serverAddress = ingress.IP
+			klog.V(2).Infof("Discovered server address from LoadBalancer IP: %s", serverAddress)
+			break
+		}
+	}
+
+	if serverAddress == "" {
+		return "", "", fmt.Errorf("ArgoCD agent principal service '%s' in namespace '%s' does not have an external LoadBalancer IP or hostname", service.Name, argoNamespace)
+	}
+
+	// Get the port from the service spec
+	for _, port := range service.Spec.Ports {
+		if port.Name == "https" || port.Port == 443 {
+			serverPort = fmt.Sprintf("%d", port.Port)
+			klog.V(2).Infof("Discovered server port from service spec: %s", serverPort)
+			break
+		}
+	}
+
+	if serverPort == "" {
+		// Try first port if no https port found
+		if len(service.Spec.Ports) > 0 {
+			serverPort = fmt.Sprintf("%d", service.Spec.Ports[0].Port)
+			klog.V(2).Infof("Using first available port from service spec: %s", serverPort)
+		} else {
+			return "", "", fmt.Errorf("ArgoCD agent principal service '%s' has no ports defined", service.Name)
+		}
+	}
+
+	return serverAddress, serverPort, nil
 }
 
 // GetManagedClusters retrieves managed cluster names from placement decision
