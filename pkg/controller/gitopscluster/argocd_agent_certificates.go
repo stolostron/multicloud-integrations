@@ -17,12 +17,15 @@ package gitopscluster
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"crypto/x509"
 
+	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openshift/library-go/pkg/crypto"
@@ -33,6 +36,8 @@ import (
 	"open-cluster-management.io/sdk-go/pkg/certrotation"
 
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -333,16 +338,27 @@ func (r *ReconcileGitOpsCluster) loadCACertificate(
 func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, namespace string) []string {
 	hostnames := []string{}
 
+	// Try to discover Route hostname first (preferred for OpenShift)
+	routeHostname, err := r.discoverRouteHostname(ctx, namespace)
+	if err == nil && routeHostname != "" {
+		hostnames = append(hostnames, routeHostname)
+		klog.V(2).Infof("Added Route hostname to principal certificate: %s", routeHostname)
+	} else {
+		klog.V(2).Infof("Could not discover Route hostname: %v", err)
+	}
+
 	// Try to get the service to find LoadBalancer endpoints
 	service, err := r.FindArgoCDAgentPrincipalService(ctx, namespace)
 	if err != nil {
 		klog.V(2).Infof("Could not find principal service for hostname discovery, using defaults: %v", err)
-		// Return default internal hostnames
+		// Return default internal hostnames plus any Route hostname
 		serviceName := "argocd-agent-principal"
-		return []string{
+		hostnames = append(hostnames,
 			fmt.Sprintf("%s.%s.svc", serviceName, namespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
-		}
+		)
+		hostnames = append(hostnames, "localhost", "127.0.0.1", "::1")
+		return hostnames
 	}
 
 	// Add LoadBalancer external hostnames/IPs
@@ -371,22 +387,75 @@ func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, name
 	return hostnames
 }
 
+// discoverRouteHostname discovers the Route hostname for the ArgoCD agent principal
+func (r *ReconcileGitOpsCluster) discoverRouteHostname(ctx context.Context, namespace string) (string, error) {
+	// List routes with argocd-agent labels
+	routeList := &routev1.RouteList{}
+	listopts := &client.ListOptions{Namespace: namespace}
+
+	routeSelector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app.kubernetes.io/part-of": "argocd-agent",
+		},
+	}
+
+	routeSelectionLabel, err := utils.ConvertLabels(routeSelector)
+	if err != nil {
+		return "", fmt.Errorf("failed to convert route labels: %w", err)
+	}
+
+	listopts.LabelSelector = routeSelectionLabel
+
+	err = r.List(ctx, routeList, listopts)
+	if err != nil {
+		return "", fmt.Errorf("failed to list routes: %w", err)
+	}
+
+	if len(routeList.Items) == 0 {
+		return "", fmt.Errorf("no ArgoCD agent principal route found in namespace %s", namespace)
+	}
+
+	// Find the principal route (look for "principal" in the name)
+	for i := range routeList.Items {
+		route := &routeList.Items[i]
+		if strings.Contains(route.Name, "principal") && route.Spec.Host != "" {
+			return route.Spec.Host, nil
+		}
+	}
+
+	// Fallback to first route with a host
+	if routeList.Items[0].Spec.Host != "" {
+		return routeList.Items[0].Spec.Host, nil
+	}
+
+	return "", fmt.Errorf("no route with host found")
+}
+
 // getResourceProxyHostNames returns the hostnames for the resource proxy certificate
-// For resource proxy, we need internal cluster DNS names
+// For resource proxy, we need internal cluster DNS names for the resource-proxy service
 func (r *ReconcileGitOpsCluster) getResourceProxyHostNames(ctx context.Context, namespace string) []string {
 	hostnames := []string{}
 
-	// Try to get the service
+	// Try to get the principal service to derive the resource-proxy service name
 	service, err := r.FindArgoCDAgentPrincipalService(ctx, namespace)
-	serviceName := "argocd-agent-principal"
+	principalServiceName := "argocd-agent-principal"
 	if err == nil {
-		serviceName = service.Name
+		principalServiceName = service.Name
 	}
 
-	// Add internal DNS names for resource proxy
+	// The resource-proxy service is named <principal-service-name>-resource-proxy
+	resourceProxyServiceName := fmt.Sprintf("%s-resource-proxy", principalServiceName)
+
+	// Add internal DNS names for resource proxy service
 	hostnames = append(hostnames,
-		fmt.Sprintf("%s.%s.svc", serviceName, namespace),
-		fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
+		fmt.Sprintf("%s.%s.svc", resourceProxyServiceName, namespace),
+		fmt.Sprintf("%s.%s.svc.cluster.local", resourceProxyServiceName, namespace),
+	)
+
+	// Also add the principal service names for compatibility
+	hostnames = append(hostnames,
+		fmt.Sprintf("%s.%s.svc", principalServiceName, namespace),
+		fmt.Sprintf("%s.%s.svc.cluster.local", principalServiceName, namespace),
 	)
 
 	// Add localhost for local access

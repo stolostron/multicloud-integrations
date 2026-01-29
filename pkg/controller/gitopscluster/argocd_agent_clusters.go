@@ -51,13 +51,19 @@ const (
 	argoCDManagedByAnnotation    = "managed-by"
 )
 
-// ClusterConfig represents the configuration for an ArgoCD cluster
-type ClusterConfig struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+// TLSClientConfig represents TLS client configuration for ArgoCD cluster secrets
+type TLSClientConfig struct {
+	Insecure bool   `json:"insecure,omitempty"`
+	CAData   []byte `json:"caData,omitempty"`
 	CertData []byte `json:"certData,omitempty"`
 	KeyData  []byte `json:"keyData,omitempty"`
-	CAData   []byte `json:"caData,omitempty"`
+}
+
+// ClusterConfig represents the configuration for an ArgoCD cluster
+type ClusterConfig struct {
+	Username        string          `json:"username,omitempty"`
+	Password        string          `json:"password,omitempty"`
+	TLSClientConfig TLSClientConfig `json:"tlsClientConfig,omitempty"`
 }
 
 // Cluster represents an ArgoCD cluster
@@ -181,9 +187,12 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			Config: ClusterConfig{
 				Username: clusterName,
 				Password: password,
-				CertData: []byte(clientCert),
-				KeyData:  []byte(clientKey),
-				CAData:   []byte(caData),
+				TLSClientConfig: TLSClientConfig{
+					Insecure: false,
+					CAData:   []byte(caData),
+					CertData: []byte(clientCert),
+					KeyData:  []byte(clientKey),
+				},
 			},
 		}
 
@@ -225,23 +234,27 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 	return nil
 }
 
-// getArgoCDAgentServerConfig retrieves the server address and port configuration
-// Note: The controller has already called EnsureServerAddressAndPort() earlier, so these values should be set
+// getArgoCDAgentServerConfig retrieves the server address and port configuration for the cluster secret
+// The cluster secret URL uses the external Route/LoadBalancer address discovered during GitOpsCluster reconciliation.
+// The ArgoCD application controller on the hub connects to the principal via this external address,
+// and the principal proxies requests to the agent on the managed cluster.
 func (r *ReconcileGitOpsCluster) getArgoCDAgentServerConfig(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster,
 ) (string, string, error) {
-	var serverAddress, serverPort string
+	// Get the server address and port from the GitOpsCluster spec
+	// These were discovered during reconciliation from Route or LoadBalancer
+	serverAddress := ""
+	serverPort := "443"
 
-	// Read from the spec - the controller has already ensured these are set via EnsureServerAddressAndPort()
-	if gitOpsCluster.Spec.GitOpsAddon != nil &&
-		gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
-		agent := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
-		serverAddress = agent.ServerAddress
-		serverPort = agent.ServerPort
+	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
+		serverAddress = gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress
+		if gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort != "" {
+			serverPort = gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort
+		}
 	}
 
-	if serverAddress == "" || serverPort == "" {
-		return "", "", fmt.Errorf("ArgoCD agent server address and port are not configured. Please ensure the ArgoCD agent principal service has an external LoadBalancer IP assigned, or manually specify serverAddress and serverPort in the GitOpsCluster spec")
+	if serverAddress == "" {
+		return "", "", fmt.Errorf("ArgoCD agent server address not configured in GitOpsCluster spec")
 	}
 
 	return serverAddress, serverPort, nil

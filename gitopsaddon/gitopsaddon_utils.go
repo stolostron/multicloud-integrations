@@ -339,8 +339,10 @@ func (r *GitopsAddonReconciler) crdExists(resource, apiVersion string) bool {
 }
 
 // applyCRDIfNotExists applies a CRD only if it doesn't already exist
+// This function checks both native APIs (like OpenShift's Route API) and CRD-based APIs
+// to avoid creating duplicate API endpoints that cause OpenAPI spec conflicts.
 func (r *GitopsAddonReconciler) applyCRDIfNotExists(resource, apiVersion, yamlFilePath string) error {
-	// Check if API resource exists
+	// Check if API resource exists (either as native API or CRD)
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(r.Config)
 	if err != nil {
 		return fmt.Errorf("failed to create discovery client: %v", err)
@@ -351,14 +353,23 @@ func (r *GitopsAddonReconciler) applyCRDIfNotExists(resource, apiVersion, yamlFi
 		// Check if the resource exists in the API resource list
 		for _, apiResource := range apiResourceList.APIResources {
 			if apiResource.Name == resource {
-				klog.Infof("CRD %s already exists, skipping installation", yamlFilePath)
+				klog.Infof("API resource %s/%s already exists (native or CRD), skipping CRD installation: %s", apiVersion, resource, yamlFilePath)
 				return nil
 			}
 		}
 	}
 
+	// Also check if the CRD itself exists to avoid conflicts
+	crdName := resource + "." + strings.Split(apiVersion, "/")[0]
+	existingCRD := &apiextensionsv1.CustomResourceDefinition{}
+	err = r.Get(context.TODO(), types.NamespacedName{Name: crdName}, existingCRD)
+	if err == nil {
+		klog.Infof("CRD %s already exists, skipping installation", crdName)
+		return nil
+	}
+
 	// CRD doesn't exist, install it
-	klog.Infof("Installing CRD %s", yamlFilePath)
+	klog.Infof("Installing CRD %s (API %s/%s not found)", yamlFilePath, apiVersion, resource)
 
 	crdData, err := ChartFS.ReadFile(yamlFilePath)
 	if err != nil {

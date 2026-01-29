@@ -379,6 +379,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 }
 
 func TestGetArgoCDAgentServerConfig(t *testing.T) {
+	agentEnabled := true
 	tests := []struct {
 		name            string
 		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
@@ -387,59 +388,61 @@ func TestGetArgoCDAgentServerConfig(t *testing.T) {
 		expectedError   bool
 	}{
 		{
-			name: "server config set in spec",
+			name: "returns configured server address and port",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							ServerAddress: "test-server.example.com",
-							ServerPort:    "8443",
+							Enabled:       &agentEnabled,
+							ServerAddress: "principal.example.com",
+							ServerPort:    "443",
 						},
 					},
 				},
 			},
-			expectedAddress: "test-server.example.com",
-			expectedPort:    "8443",
+			expectedAddress: "principal.example.com",
+			expectedPort:    "443",
 			expectedError:   false,
 		},
 		{
-			name: "missing server address should fail",
+			name: "returns default port 443 when not specified",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							ServerPort: "443",
-							// ServerAddress missing
+							Enabled:       &agentEnabled,
+							ServerAddress: "172.18.255.201",
 						},
 					},
 				},
 			},
-			expectedError: true,
+			expectedAddress: "172.18.255.201",
+			expectedPort:    "443",
+			expectedError:   false,
 		},
 		{
-			name: "missing server port should fail",
+			name: "error when server address not configured",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							ServerAddress: "test-server.example.com",
-							// ServerPort missing
+							Enabled: &agentEnabled,
 						},
 					},
 				},
 			},
-			expectedError: true,
+			expectedAddress: "",
+			expectedPort:    "",
+			expectedError:   true,
 		},
 		{
-			name: "nil ArgoCDAgent should fail",
+			name: "error when GitOpsAddon not configured",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-						// ArgoCDAgent is nil
-					},
-				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
 			},
-			expectedError: true,
+			expectedAddress: "",
+			expectedPort:    "",
+			expectedError:   true,
 		},
 	}
 
@@ -604,9 +607,12 @@ func TestClusterToSecret(t *testing.T) {
 		Config: ClusterConfig{
 			Username: "cluster1",
 			Password: "test-password",
-			CertData: []byte("test-cert"),
-			KeyData:  []byte("test-key"),
-			CAData:   []byte("test-ca"),
+			TLSClientConfig: TLSClientConfig{
+				Insecure: false,
+				CAData:   []byte("test-ca"),
+				CertData: []byte("test-cert"),
+				KeyData:  []byte("test-key"),
+			},
 		},
 	}
 
@@ -637,6 +643,89 @@ func TestClusterToSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "cluster1", config.Username)
 	assert.Equal(t, "test-password", config.Password)
+}
+
+func TestTLSClientConfig_Structure(t *testing.T) {
+	// Test that TLSClientConfig structure is correctly nested in ClusterConfig
+	config := ClusterConfig{
+		Username: "test-user",
+		Password: "test-pass",
+		TLSClientConfig: TLSClientConfig{
+			Insecure: false,
+			CAData:   []byte("ca-cert-data"),
+			CertData: []byte("client-cert-data"),
+			KeyData:  []byte("client-key-data"),
+		},
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.Marshal(config)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var parsedConfig ClusterConfig
+	err = json.Unmarshal(jsonData, &parsedConfig)
+	require.NoError(t, err)
+
+	// Verify structure is preserved
+	assert.Equal(t, "test-user", parsedConfig.Username)
+	assert.Equal(t, "test-pass", parsedConfig.Password)
+	assert.False(t, parsedConfig.TLSClientConfig.Insecure)
+	assert.Equal(t, []byte("ca-cert-data"), parsedConfig.TLSClientConfig.CAData)
+	assert.Equal(t, []byte("client-cert-data"), parsedConfig.TLSClientConfig.CertData)
+	assert.Equal(t, []byte("client-key-data"), parsedConfig.TLSClientConfig.KeyData)
+
+	// Verify JSON structure has nested tlsClientConfig
+	jsonStr := string(jsonData)
+	assert.Contains(t, jsonStr, `"tlsClientConfig"`)
+	// Note: "insecure" is omitempty, so when false it won't be included in JSON
+	assert.Contains(t, jsonStr, `"caData"`)
+	assert.Contains(t, jsonStr, `"certData"`)
+	assert.Contains(t, jsonStr, `"keyData"`)
+}
+
+func TestTLSClientConfig_WithInsecureTrue(t *testing.T) {
+	// Test that Insecure:true is correctly serialized
+	config := ClusterConfig{
+		Username: "test-user",
+		Password: "test-pass",
+		TLSClientConfig: TLSClientConfig{
+			Insecure: true, // When true, should be included in JSON
+			CAData:   []byte("ca-cert-data"),
+		},
+	}
+
+	jsonData, err := json.Marshal(config)
+	require.NoError(t, err)
+
+	jsonStr := string(jsonData)
+	assert.Contains(t, jsonStr, `"insecure":true`)
+
+	// Verify it can be unmarshaled correctly
+	var parsedConfig ClusterConfig
+	err = json.Unmarshal(jsonData, &parsedConfig)
+	require.NoError(t, err)
+	assert.True(t, parsedConfig.TLSClientConfig.Insecure)
+}
+
+func TestClusterConfig_EmptyTLS(t *testing.T) {
+	// Test that empty TLSClientConfig is handled correctly
+	config := ClusterConfig{
+		Username: "test-user",
+		Password: "test-pass",
+	}
+
+	jsonData, err := json.Marshal(config)
+	require.NoError(t, err)
+
+	var parsedConfig ClusterConfig
+	err = json.Unmarshal(jsonData, &parsedConfig)
+	require.NoError(t, err)
+
+	assert.False(t, parsedConfig.TLSClientConfig.Insecure)
+	assert.Nil(t, parsedConfig.TLSClientConfig.CAData)
+	assert.Nil(t, parsedConfig.TLSClientConfig.CertData)
+	assert.Nil(t, parsedConfig.TLSClientConfig.KeyData)
 }
 
 // Helper functions for testing

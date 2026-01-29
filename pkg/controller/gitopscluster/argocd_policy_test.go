@@ -138,6 +138,46 @@ func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
 	assert.Contains(t, yamlString, "sourceRepos:")
 }
 
+func TestGenerateArgoCDPolicyYaml_ExcludesAppProjectWhenAgentEnabled(t *testing.T) {
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+			UID:       "test-uid",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			PlacementRef: &v1.ObjectReference{
+				Name: "test-placement",
+				Kind: "Placement",
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "principal.example.com",
+					ServerPort:    "443",
+				},
+			},
+		},
+	}
+
+	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
+
+	// Policy should NOT include AppProject when argocd-agent is enabled
+	// because the agent propagates AppProject from the hub
+	assert.NotContains(t, yamlString, "kind: AppProject")
+
+	// Should still contain the ArgoCD CR
+	assert.Contains(t, yamlString, "kind: ArgoCD")
+	assert.Contains(t, yamlString, "name: acm-openshift-gitops")
+
+	// Should contain argocd-agent configuration
+	assert.Contains(t, yamlString, "argoCDAgent:")
+	assert.Contains(t, yamlString, "principalServerAddress")
+}
+
 func TestGenerateArgoCDSpec_BasicConfig(t *testing.T) {
 	enabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -202,6 +242,7 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 	assert.Contains(t, spec, "image: \"registry.redhat.io")
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
 	assert.Contains(t, spec, "principalServerPort: \"443\"")
+	// This test explicitly sets Mode: "managed", so it should output managed
 	assert.Contains(t, spec, "mode: \"managed\"")
 }
 

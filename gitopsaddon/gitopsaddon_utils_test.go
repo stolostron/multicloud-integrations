@@ -469,3 +469,97 @@ func TestTemplateAndApplyChart(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyCRDIfNotExists_DirectCRDCheck(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name        string
+		crdName     string
+		resource    string
+		apiVersion  string
+		setupCRD    bool
+		expectError bool
+	}{
+		{
+			name:        "skip_when_crd_exists_directly",
+			crdName:     "testresources.test.example.com",
+			resource:    "testresources",
+			apiVersion:  "test.example.com/v1",
+			setupCRD:    true,
+			expectError: false, // Should skip installation without error
+		},
+		{
+			name:        "install_when_crd_not_exists",
+			crdName:     "nonexistent.test.example.com",
+			resource:    "nonexistent",
+			apiVersion:  "test.example.com/v1",
+			setupCRD:    false,
+			expectError: true, // Error because yaml file doesn't exist
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := &GitopsAddonReconciler{
+				Client: getTestEnv().Client,
+				Config: getTestEnv().Config,
+			}
+
+			// Cleanup before test
+			existingCRD := &apiextensionsv1.CustomResourceDefinition{}
+			err := reconciler.Get(context.TODO(), types.NamespacedName{Name: tt.crdName}, existingCRD)
+			if err == nil {
+				_ = reconciler.Delete(context.TODO(), existingCRD)
+			}
+
+			// Setup CRD if specified
+			if tt.setupCRD {
+				crd := &apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: tt.crdName,
+					},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "test.example.com",
+						Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+							Name:    "v1",
+							Served:  true,
+							Storage: true,
+							Schema: &apiextensionsv1.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+									Type: "object",
+								},
+							},
+						}},
+						Scope: apiextensionsv1.NamespaceScoped,
+						Names: apiextensionsv1.CustomResourceDefinitionNames{
+							Plural: tt.resource,
+							Kind:   "TestResource",
+						},
+					},
+				}
+				err := reconciler.Create(context.TODO(), crd)
+				if err != nil && !errors.IsAlreadyExists(err) {
+					g.Expect(err).ToNot(gomega.HaveOccurred())
+				}
+			}
+
+			// Run the function with a non-existent yaml path
+			// When CRD exists, it should skip without needing to read the yaml
+			err = reconciler.applyCRDIfNotExists(tt.resource, tt.apiVersion, "charts/nonexistent.yaml")
+
+			if tt.expectError {
+				g.Expect(err).To(gomega.HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			}
+
+			// Cleanup
+			if tt.setupCRD {
+				_ = reconciler.Delete(context.TODO(), &apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: tt.crdName},
+				})
+			}
+		})
+	}
+}

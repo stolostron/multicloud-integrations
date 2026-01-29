@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	routev1 "github.com/openshift/api/route/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -819,6 +820,527 @@ func TestGetManagedClusters(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Len(t, managedClusters, tt.expectedCount)
+			}
+		})
+	}
+}
+
+func TestDiscoverFromRoute(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := routev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		argoNamespace   string
+		existingObjects []client.Object
+		expectedAddress string
+		expectedPort    string
+		expectedError   bool
+	}{
+		{
+			name:          "discover from principal route",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+			},
+			expectedAddress: "principal.apps.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:          "discover from multiple routes - prefer principal",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-other",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "other.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+			},
+			expectedAddress: "principal.apps.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:          "fallback to first route when no principal found",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-server",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "server.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+			},
+			expectedAddress: "server.apps.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:            "no routes found - should error",
+			argoNamespace:   utils.GitOpsNamespace,
+			existingObjects: []client.Object{},
+			expectedError:   true,
+		},
+		{
+			name:          "route without host - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						// No host configured
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "route with wrong labels - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-server",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd", // Not argocd-agent
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "server.apps.example.com",
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "route with TLS - use port 443",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+			},
+			expectedAddress: "principal.apps.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:          "route without TLS - use port 80",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "principal.apps.example.com",
+						// No TLS configured
+					},
+				},
+			},
+			expectedAddress: "principal.apps.example.com",
+			expectedPort:    "80",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			address, port, err := reconciler.discoverFromRoute(context.TODO(), tt.argoNamespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedAddress, address)
+				assert.Equal(t, tt.expectedPort, port)
+			}
+		})
+	}
+}
+
+func TestDiscoverFromLoadBalancer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		argoNamespace   string
+		existingObjects []client.Object
+		expectedAddress string
+		expectedPort    string
+		expectedError   bool
+	}{
+		{
+			name:          "discover from LoadBalancer hostname",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "lb.example.com"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "lb.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:          "discover from LoadBalancer IP",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 8443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{IP: "192.168.1.100"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "192.168.1.100",
+			expectedPort:    "8443",
+		},
+		{
+			name:          "prefer hostname over IP",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "lb.example.com", IP: "192.168.1.100"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "lb.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name:            "service not found - should error",
+			argoNamespace:   utils.GitOpsNamespace,
+			existingObjects: []client.Object{},
+			expectedError:   true,
+		},
+		{
+			name:          "service without external endpoint - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						ClusterIP: "10.0.0.100",
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{},
+						},
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "custom port discovery",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "grpc", Port: 9443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "lb.example.com"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "lb.example.com",
+			expectedPort:    "9443",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			address, port, err := reconciler.discoverFromLoadBalancer(context.TODO(), tt.argoNamespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedAddress, address)
+				assert.Equal(t, tt.expectedPort, port)
+			}
+		})
+	}
+}
+
+func TestDiscoverServerAddressAndPort_RoutePreference(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = routev1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = gitopsclusterV1beta1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		gitOpsCluster   *gitopsclusterV1beta1.GitOpsCluster
+		existingObjects []client.Object
+		expectedAddress string
+		expectedPort    string
+		expectedError   bool
+	}{
+		{
+			name: "prefer Route over LoadBalancer when both exist",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				// Route should be preferred
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/part-of": "argocd-agent",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "route.apps.example.com",
+						TLS: &routev1.TLSConfig{
+							Termination: routev1.TLSTerminationPassthrough,
+						},
+					},
+				},
+				// LoadBalancer should be fallback
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "lb.example.com"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "route.apps.example.com",
+			expectedPort:    "443",
+		},
+		{
+			name: "fallback to LoadBalancer when Route not available",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				// No Route, only LoadBalancer
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443},
+						},
+					},
+					Status: v1.ServiceStatus{
+						LoadBalancer: v1.LoadBalancerStatus{
+							Ingress: []v1.LoadBalancerIngress{
+								{Hostname: "lb.example.com"},
+							},
+						},
+					},
+				},
+			},
+			expectedAddress: "lb.example.com",
+			expectedPort:    "443",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := append(tt.existingObjects, tt.gitOpsCluster)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			err := reconciler.DiscoverServerAddressAndPort(context.TODO(), tt.gitOpsCluster)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedAddress, tt.gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress)
+				assert.Equal(t, tt.expectedPort, tt.gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
 			}
 		})
 	}
