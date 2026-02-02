@@ -61,6 +61,20 @@ func (r *ReconcileGitOpsCluster) CreatePolicyTemplate(instance *gitopsclusterV1b
 }
 
 func (r *ReconcileGitOpsCluster) createNamespaceScopedResourceFromYAML(yamlString string) error {
+	return r.createOrUpdateNamespaceScopedResourceFromYAML(yamlString, true)
+}
+
+// createOnlyNamespaceScopedResourceFromYAML creates a resource from YAML only if it doesn't exist.
+// If the resource already exists, it skips the update to allow users to own and modify the resource.
+// This is used for Policy resources that users may want to customize.
+func (r *ReconcileGitOpsCluster) createOnlyNamespaceScopedResourceFromYAML(yamlString string) error {
+	return r.createOrUpdateNamespaceScopedResourceFromYAML(yamlString, false)
+}
+
+// createOrUpdateNamespaceScopedResourceFromYAML handles both create-only and create-or-update scenarios.
+// When updateIfExists is true, existing resources are updated.
+// When updateIfExists is false, existing resources are skipped (create-only mode).
+func (r *ReconcileGitOpsCluster) createOrUpdateNamespaceScopedResourceFromYAML(yamlString string, updateIfExists bool) error {
 	var obj map[string]interface{}
 	if err := yaml.Unmarshal([]byte(yamlString), &obj); err != nil {
 		klog.Error("failed to unmarshal yaml string: ", err)
@@ -103,21 +117,26 @@ func (r *ReconcileGitOpsCluster) createNamespaceScopedResourceFromYAML(yamlStrin
 	// Check if the resource already exists.
 	// existingObj, err := r.DynamicClient.Resource(apiResource).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err == nil {
-		// Resource exists, perform an update.
-		unstructuredObj.SetResourceVersion(existingObj.GetResourceVersion())
-		_, err = r.DynamicClient.Resource(apiResource).Namespace(namespace).Update(
-			context.TODO(),
-			unstructuredObj,
-			metav1.UpdateOptions{},
-		)
+		if updateIfExists {
+			// Resource exists, perform an update.
+			unstructuredObj.SetResourceVersion(existingObj.GetResourceVersion())
+			_, err = r.DynamicClient.Resource(apiResource).Namespace(namespace).Update(
+				context.TODO(),
+				unstructuredObj,
+				metav1.UpdateOptions{},
+			)
 
-		if err != nil {
-			klog.Error("failed to update resource: ", err)
+			if err != nil {
+				klog.Error("failed to update resource: ", err)
 
-			return err
+				return err
+			}
+
+			klog.Infof("resource updated: %s/%s\n", namespace, name)
+		} else {
+			// Resource exists but we're in create-only mode - skip update
+			klog.Infof("resource already exists, skipping update (user-owned): %s/%s\n", namespace, name)
 		}
-
-		klog.Infof("resource updated: %s/%s\n", namespace, name)
 	} else if k8errors.IsNotFound(err) {
 		// Resource does not exist, create it.
 		_, err = r.DynamicClient.Resource(apiResource).Namespace(namespace).Create(

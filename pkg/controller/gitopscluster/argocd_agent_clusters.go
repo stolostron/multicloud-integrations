@@ -424,6 +424,7 @@ func certDataToPEM(certBytes []byte) (string, error) {
 
 // clusterToSecret converts a cluster object to string data for serialization to a secret
 // This is based on the ArgoCD agent's ClusterToSecret function
+// It also cleans up labels/annotations from traditional mode when switching to agent mode
 func (r *ReconcileGitOpsCluster) clusterToSecret(cluster *Cluster, secret *v1.Secret) error {
 	data := make(map[string][]byte)
 	data["server"] = []byte(strings.TrimRight(cluster.Server, "/"))
@@ -442,25 +443,36 @@ func (r *ReconcileGitOpsCluster) clusterToSecret(cluster *Cluster, secret *v1.Se
 
 	secret.Data = data
 
-	// Set labels
-	if secret.Labels == nil {
-		secret.Labels = make(map[string]string)
-	}
+	// Start with fresh labels to avoid keeping stale labels from traditional mode
+	newLabels := make(map[string]string)
 
 	// Copy cluster labels
 	if cluster.Labels != nil {
 		for k, v := range cluster.Labels {
-			secret.Labels[k] = v
+			newLabels[k] = v
 		}
 	}
 
 	// Set required ArgoCD labels
-	secret.Labels[argoCDTypeLabel] = argoCDSecretTypeClusterValue
+	newLabels[argoCDTypeLabel] = argoCDSecretTypeClusterValue
 
-	// Set annotations
-	if secret.Annotations == nil {
-		secret.Annotations = make(map[string]string)
+	// Preserve some existing labels that are needed
+	if secret.Labels != nil {
+		// Keep these labels from traditional mode as they're still useful
+		preserveLabels := []string{
+			"apps.open-cluster-management.io/cluster-name",
+		}
+		for _, label := range preserveLabels {
+			if val, ok := secret.Labels[label]; ok {
+				newLabels[label] = val
+			}
+		}
 	}
+
+	secret.Labels = newLabels
+
+	// Start with fresh annotations
+	newAnnotations := make(map[string]string)
 
 	// Copy cluster annotations
 	if cluster.Annotations != nil {
@@ -468,12 +480,14 @@ func (r *ReconcileGitOpsCluster) clusterToSecret(cluster *Cluster, secret *v1.Se
 			if k == v1.LastAppliedConfigAnnotation {
 				return fmt.Errorf("annotation %s cannot be set", v1.LastAppliedConfigAnnotation)
 			}
-			secret.Annotations[k] = v
+			newAnnotations[k] = v
 		}
 	}
 
-	// Set managed-by annotation
-	secret.Annotations[argoCDManagedByAnnotation] = labelValueManagerName
+	// Set managed-by annotation for agent mode
+	newAnnotations[argoCDManagedByAnnotation] = labelValueManagerName
+
+	secret.Annotations = newAnnotations
 
 	return nil
 }

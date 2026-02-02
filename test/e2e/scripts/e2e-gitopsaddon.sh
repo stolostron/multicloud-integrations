@@ -154,10 +154,78 @@ echo "========================================="
 echo "PHASE 2: Enable ArgoCD Agent"
 echo "========================================="
 
+# Delete existing Policy so a new one with agent config can be created
+# Policy is created once and never updated automatically, so we must delete it first
+echo ""
+echo "Step 0: Deleting existing ArgoCD Policy (create-only, must recreate for agent config)..."
+kubectl delete policy gitopscluster-argocd-policy -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --ignore-not-found
+kubectl delete placementbinding gitopscluster-argocd-policy-binding -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --ignore-not-found
+echo "  ✓ Existing Policy deleted"
+
 # Re-enable ArgoCD agent (AddOnDeploymentConfig will be updated automatically)
 echo ""
 echo "Step 1: Enabling ArgoCD Agent..."
 kubectl patch gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --type=merge --context ${HUB_CONTEXT} -p '{"spec":{"gitopsAddon":{"argoCDAgent":{"enabled":true}}}}'
+
+# Wait for serverAddress to be discovered and populated
+echo ""
+echo "Step 1.1: Waiting for serverAddress to be auto-discovered..."
+for i in {1..60}; do
+  SERVER_ADDRESS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.spec.gitopsAddon.argoCDAgent.serverAddress}' 2>/dev/null || echo "")
+  if [ -n "${SERVER_ADDRESS}" ] && [ "${SERVER_ADDRESS}" != "" ]; then
+    echo "  ✓ Server address discovered: ${SERVER_ADDRESS} (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: Server address not discovered after 60 attempts"
+    kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml
+    kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50
+    exit 1
+  fi
+  echo "  Waiting for server address discovery... (attempt $i/60)"
+  sleep 2
+done
+
+# Wait for new Policy with agent config to be created
+echo ""
+echo "Step 1.2: Waiting for new Policy with agent config to be created..."
+for i in {1..30}; do
+  if kubectl get policy gitopscluster-argocd-policy -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+    echo "  ✓ New Policy created (attempt $i/30)"
+    # Verify Policy contains serverAddress
+    POLICY_YAML=$(kubectl get policy gitopscluster-argocd-policy -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml 2>/dev/null)
+    if echo "${POLICY_YAML}" | grep -q "principalServerAddress"; then
+      echo "  ✓ Policy contains agent configuration with principalServerAddress"
+    else
+      echo "  ✗ Warning: Policy may not have agent configuration"
+    fi
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "  ✗ ERROR: Policy not recreated after 30 attempts"
+    exit 1
+  fi
+  echo "  Waiting for Policy to be recreated... (attempt $i/30)"
+  sleep 2
+done
+
+# Wait for Policy to propagate and update ArgoCD CR on managed cluster
+echo ""
+echo "Step 1.3: Waiting for ArgoCD CR on managed cluster to be updated with agent config..."
+for i in {1..60}; do
+  AGENT_ENABLED_IN_CR=$(kubectl --context ${SPOKE_CONTEXT} get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} -o jsonpath='{.spec.argoCDAgent.agent.enabled}' 2>/dev/null || echo "")
+  if [ "${AGENT_ENABLED_IN_CR}" == "true" ]; then
+    echo "  ✓ ArgoCD CR has argoCDAgent.agent.enabled=true (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: ArgoCD CR not updated with agent config after 60 attempts"
+    kubectl --context ${SPOKE_CONTEXT} get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} -o yaml
+    exit 1
+  fi
+  echo "  Waiting for ArgoCD CR to have agent config... (attempt $i/60, current: ${AGENT_ENABLED_IN_CR})"
+  sleep 5
+done
 
 # Wait for the controller to process the change
 echo "  Waiting for controller to process the change..."
@@ -165,7 +233,7 @@ sleep 10
 
 # Verify AddOnDeploymentConfig was updated
 echo ""
-echo "Step 1.5: Verifying AddOnDeploymentConfig was updated..."
+echo "Step 1.4: Verifying AddOnDeploymentConfig was updated..."
 for i in {1..30}; do
   AGENT_ENABLED=$(kubectl get addondeploymentconfig gitops-addon-config -n cluster1 --context ${HUB_CONTEXT} -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_ENABLED")].value}' 2>/dev/null || echo "false")
   if [ "${AGENT_ENABLED}" == "true" ]; then

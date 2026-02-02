@@ -1,5 +1,5 @@
 #!/bin/bash
-# e2e-cleanup-full.sh - Full cleanup test (local use)
+# e2e-gitopsaddon-agent-cleanup-full.sh - Full cleanup test with ArgoCD agent enabled (local use)
 set -e
 
 HUB_CONTEXT="kind-hub"
@@ -9,77 +9,100 @@ GITOPS_NAMESPACE="openshift-gitops"
 ADDON_NAMESPACE="open-cluster-management-agent-addon"
 
 echo "========================================="
-echo "E2E CLEANUP FULL TEST - Setup + Cleanup"
+echo "E2E GITOPSADDON AGENT CLEANUP FULL TEST"
 echo "========================================="
 
-# Run setup WITHOUT ArgoCD agent (agent tests are in e2e-gitopsaddon-agent-cleanup-full.sh)
+# Run setup with ArgoCD agent enabled
 echo ""
-echo "Running setup WITHOUT ArgoCD agent..."
-ENABLE_ARGOCD_AGENT=false ./test/e2e/scripts/e2e-setup.sh
+echo "Running setup WITH ArgoCD agent enabled..."
+ENABLE_ARGOCD_AGENT=true ./test/e2e/scripts/e2e-setup.sh
 
 # Run deploy verification
 echo ""
 echo "Running deploy verification..."
 ./test/e2e/scripts/e2e-deploy.sh
 
-# Verify ArgoCD is running on managed cluster (no agent mode - no app sync from hub)
+# Verify test application (already created in setup)
 echo ""
-echo "Verifying ArgoCD deployment on managed cluster..."
+echo "Verifying test application (agent mode)..."
 echo ""
 
-# Step 1: Verify ArgoCD CR exists on managed cluster
-echo "1. Verifying ArgoCD CR on managed cluster..."
-for i in {1..60}; do
-  if kubectl get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
-    echo "  ✓ ArgoCD CR 'acm-openshift-gitops' exists"
-    break
-  fi
-  if [ $i -eq 60 ]; then
-    echo "  ✗ ERROR: ArgoCD CR not found after 60 attempts"
-    exit 1
-  fi
-  echo "  Waiting for ArgoCD CR... (attempt $i/60)"
-  sleep 2
-done
-
-# Step 2: Verify ArgoCD application controller is running
-echo ""
-echo "2. Verifying ArgoCD application controller..."
-for i in {1..60}; do
-  APP_CTRL=$(kubectl get pods -n ${GITOPS_NAMESPACE} -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | grep Running | wc -l)
-  if [ "${APP_CTRL}" -gt 0 ]; then
-    echo "  ✓ ArgoCD application controller is running"
-    break
-  fi
-  if [ $i -eq 60 ]; then
-    echo "  ✗ ERROR: ArgoCD application controller not running after 60 attempts"
-    kubectl get pods -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT}
-    exit 1
-  fi
-  echo "  Waiting for application controller... (attempt $i/60)"
-  sleep 2
-done
-
-# Step 3: Verify gitops-addon pod is running
-echo ""
-echo "3. Verifying gitops-addon pod..."
-ADDON_PODS=$(kubectl get pods -n ${ADDON_NAMESPACE} -l app=gitops-addon --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | grep Running | wc -l)
-if [ "${ADDON_PODS}" -gt 0 ]; then
-  echo "  ✓ gitops-addon pod is running"
+# Step 1: Verify application exists on hub
+echo "1. Verifying application on hub..."
+if kubectl get application guestbook -n cluster1 --context ${HUB_CONTEXT} &>/dev/null; then
+  echo "  ✓ Application 'guestbook' exists on hub (cluster1 namespace)"
 else
-  echo "  ✗ ERROR: gitops-addon pod not running"
-  kubectl get pods -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT}
+  echo "  ✗ Application 'guestbook' not found on hub"
   exit 1
 fi
 
+# Step 2: Verify app is synced to managed cluster
 echo ""
-echo "Deployment verification complete (no agent mode - apps are created directly on managed cluster)"
+echo "2. Verifying application is synced to managed cluster..."
+for i in {1..60}; do
+  if kubectl get application guestbook -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+    echo "  ✓ Application synced to managed cluster (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: Application not synced to managed cluster after 60 attempts"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Step 3: Verify app status on managed cluster
+echo ""
+echo "3. Verifying application status on managed cluster..."
+for i in {1..60}; do
+  MANAGED_HEALTH=$(kubectl get application guestbook -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+  MANAGED_SYNC=$(kubectl get application guestbook -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+  
+  echo "  Managed cluster - Health: ${MANAGED_HEALTH}, Sync: ${MANAGED_SYNC} (attempt $i/60)"
+  
+  if [ "${MANAGED_HEALTH}" == "Healthy" ] && [ "${MANAGED_SYNC}" == "Synced" ]; then
+    echo "  ✓ Application is Healthy and Synced on managed cluster"
+    break
+  fi
+  
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: Application not healthy/synced after 60 attempts"
+    exit 1
+  fi
+  sleep 5
+done
+
+# Step 4: Verify app status on hub
+echo ""
+echo "4. Verifying application status on hub..."
+for i in {1..30}; do
+  HUB_HEALTH=$(kubectl get application guestbook -n cluster1 --context ${HUB_CONTEXT} -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+  HUB_SYNC=$(kubectl get application guestbook -n cluster1 --context ${HUB_CONTEXT} -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+
+  echo "  Hub cluster - Health: ${HUB_HEALTH}, Sync: ${HUB_SYNC} (attempt $i/30)"
+
+  if [ "${HUB_HEALTH}" == "${MANAGED_HEALTH}" ] && [ "${HUB_SYNC}" == "${MANAGED_SYNC}" ]; then
+    echo "  ✓ Application status on hub matches managed cluster"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "  Note: Application status mismatch (hub may take time to sync)"
+  fi
+  sleep 2
+done
+
+echo ""
+echo "Application Verification Summary:"
+echo "  • Application created on hub: ✓"
+echo "  • Application synced to managed: ✓"
+echo "  • Managed cluster status: Health=${MANAGED_HEALTH}, Sync=${MANAGED_SYNC}"
+echo "  • Hub cluster status: Health=${HUB_HEALTH}, Sync=${HUB_SYNC}"
 
 # Run cleanup
 echo ""
 echo "Running cleanup..."
 echo "========================================="
-echo "E2E CLEANUP TEST - Verifying Cleanup"
+echo "E2E CLEANUP TEST - Verifying Agent Cleanup"
 echo "========================================="
 
 echo ""
@@ -112,9 +135,6 @@ echo "✓ ManagedClusterAddon deleted"
 
 echo ""
 echo "Step 4: Verifying ArgoCD CR still exists (managed by Policy, not deleted with GitOpsCluster)..."
-# ArgoCD CR is managed by OCM Policy without ownerReferences
-# It should NOT be automatically deleted when GitOpsCluster is deleted
-# Users must manually delete the Policy to remove ArgoCD CR
 if kubectl get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
   echo "✓ ArgoCD CR 'acm-openshift-gitops' still exists (expected - managed by Policy)"
 else
@@ -151,11 +171,9 @@ echo ""
 echo "Step 6: Verifying gitops-addon is cleaned up from open-cluster-management-agent-addon namespace..."
 echo "  (Note: governance-policy-framework and config-policy-controller pods are expected to remain)"
 for i in {1..60}; do
-  # Count only gitops-addon related resources, excluding policy framework pods
   GITOPS_ADDON_RESOURCES=$(kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | grep -v "governance-policy-framework" | grep -v "config-policy-controller" | wc -l)
   if [ "${GITOPS_ADDON_RESOURCES}" -eq "0" ]; then
     echo "✓ No gitops-addon resources found in open-cluster-management-agent-addon namespace"
-    # List remaining policy resources for reference
     REMAINING=$(kubectl get all -n ${ADDON_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
     if [ "${REMAINING}" -gt "0" ]; then
       echo "  (Policy framework pods still running as expected: ${REMAINING} resources)"
@@ -189,28 +207,28 @@ done
 
 echo ""
 echo "========================================="
-echo "✓ E2E CLEANUP TEST PASSED"
+echo "✓ E2E AGENT CLEANUP TEST PASSED"
 echo "========================================="
 
 echo ""
-echo "Step 8: Verifying ArgoCD CR still exists (managed by Policy, not cleaned up by gitops-addon)..."
-if kubectl get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
-  echo "✓ ArgoCD CR 'acm-openshift-gitops' still exists (as expected - managed by Policy)"
+echo "Step 8: Verifying ArgoCD Application still exists in openshift-gitops namespace..."
+if kubectl get application guestbook -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} &>/dev/null; then
+  echo "✓ ArgoCD Application 'guestbook' still exists in openshift-gitops namespace"
 else
-  echo "  Note: ArgoCD CR was deleted (may have been cleaned up by Policy)"
+  echo "  Note: ArgoCD Application 'guestbook' was deleted"
 fi
 
 echo ""
-echo "Step 9: Verifying ArgoCD pods still running (ArgoCD operator manages them)..."
-ARGOCD_PODS=$(kubectl get pods -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
-if [ "${ARGOCD_PODS}" -gt "0" ]; then
-  echo "✓ ArgoCD has ${ARGOCD_PODS} pod(s) running"
-  kubectl get pods -n ${GITOPS_NAMESPACE} --context ${SPOKE_CONTEXT} 2>/dev/null | head -10 || true
+echo "Step 9: Verifying guestbook namespace still has resources..."
+GUESTBOOK_RESOURCES=$(kubectl get all -n guestbook --context ${SPOKE_CONTEXT} --no-headers 2>/dev/null | wc -l)
+if [ "${GUESTBOOK_RESOURCES}" -gt "0" ]; then
+  echo "✓ Guestbook namespace has ${GUESTBOOK_RESOURCES} resource(s)"
+  kubectl get all -n guestbook --context ${SPOKE_CONTEXT} 2>/dev/null || true
 else
-  echo "  Note: No ArgoCD pods found (may have been cleaned up)"
+  echo "  Note: No resources found in guestbook namespace"
 fi
 
 echo ""
 echo "========================================="
-echo "✓ E2E CLEANUP FULL TEST PASSED"
+echo "✓ E2E GITOPSADDON AGENT CLEANUP FULL TEST PASSED"
 echo "========================================="
