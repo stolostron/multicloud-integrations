@@ -385,7 +385,7 @@ func TestUnionSecretData(t *testing.T) {
 		validateFunc   func(t *testing.T, result *v1.Secret)
 	}{
 		{
-			name: "merge labels and annotations",
+			name: "merge labels and annotations only, not data",
 			newSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -426,13 +426,13 @@ func TestUnionSecretData(t *testing.T) {
 				assert.Equal(t, "existing-value", result.Annotations["existing-annotation"])
 				assert.NotContains(t, result.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
 
-				// Data should be merged
+				// Data should NOT be merged - only new secret data should be present
 				assert.Equal(t, "new-value", result.StringData["new-key"])
-				assert.Equal(t, "existing-value", result.StringData["existing-key"])
+				assert.NotContains(t, result.StringData, "existing-key")
 			},
 		},
 		{
-			name: "existing secret has Data field, new secret has StringData",
+			name: "blank secret should not inherit config from existing secret",
 			newSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -440,7 +440,8 @@ func TestUnionSecretData(t *testing.T) {
 					},
 				},
 				StringData: map[string]string{
-					"new-key": "new-value",
+					"name":   "test-cluster",
+					"server": "https://test-cluster-control-plane",
 				},
 			},
 			existingSecret: &v1.Secret{
@@ -450,13 +451,20 @@ func TestUnionSecretData(t *testing.T) {
 					},
 				},
 				Data: map[string][]byte{
-					"existing-key": []byte("existing-value"),
+					"config": []byte(`{"bearerToken": "secret-token"}`),
+					"name":   []byte("test-cluster"),
+					"server": []byte("https://api.test-cluster.com:6443"),
 				},
 			},
 			validateFunc: func(t *testing.T, result *v1.Secret) {
-				// Should convert Data to StringData
-				assert.Equal(t, "new-value", result.StringData["new-key"])
-				assert.Equal(t, "existing-value", result.StringData["existing-key"])
+				// Labels should be merged
+				assert.Equal(t, "new-value", result.Labels["new-label"])
+				assert.Equal(t, "existing-value", result.Labels["existing-label"])
+
+				// Data should NOT be merged - blank secret should not get config from existing
+				assert.Equal(t, "test-cluster", result.StringData["name"])
+				assert.Equal(t, "https://test-cluster-control-plane", result.StringData["server"])
+				assert.NotContains(t, result.StringData, "config")
 			},
 		},
 	}
@@ -1413,6 +1421,1023 @@ func TestAddManagedClustersToArgo(t *testing.T) {
 			} else {
 				assert.NoError(t, err, tt.description)
 			}
+		})
+	}
+}
+
+func TestGetClusterProxyInfo(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		existingObjects  []client.Object
+		expectedAvail    bool
+		expectedPort     string
+		expectedHostPart string
+		expectError      bool
+		description      string
+	}{
+		{
+			name: "cluster proxy service exists with default port",
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster-proxy-addon-user",
+						Namespace: "multicluster-engine",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Name: "user-port",
+								Port: 9092,
+							},
+						},
+					},
+				},
+			},
+			expectedAvail:    true,
+			expectedPort:     "9092",
+			expectedHostPart: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			expectError:      false,
+			description:      "Should return available cluster proxy info when service exists",
+		},
+		{
+			name: "cluster proxy service exists with custom port",
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster-proxy-addon-user",
+						Namespace: "multicluster-engine",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{
+								Name: "user-port",
+								Port: 8080,
+							},
+						},
+					},
+				},
+			},
+			expectedAvail:    true,
+			expectedPort:     "8080",
+			expectedHostPart: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:8080",
+			expectError:      false,
+			description:      "Should return available cluster proxy info with custom port",
+		},
+		{
+			name:             "cluster proxy service does not exist",
+			existingObjects:  []client.Object{},
+			expectedAvail:    false,
+			expectedPort:     "9092", // default port
+			expectedHostPart: "",
+			expectError:      false,
+			description:      "Should return unavailable when service does not exist",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			info, err := reconciler.GetClusterProxyInfo()
+
+			if tt.expectError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.NotNil(t, info)
+				assert.Equal(t, tt.expectedAvail, info.Available, "Available should match expected")
+				assert.Equal(t, tt.expectedPort, info.Port, "Port should match expected")
+				if tt.expectedAvail {
+					assert.Equal(t, tt.expectedHostPart, info.ClusterLocalHost, "ClusterLocalHost should match expected")
+				}
+			}
+		})
+	}
+}
+
+func TestGetClusterProxyURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &ReconcileGitOpsCluster{
+		Client: fakeClient,
+	}
+
+	tests := []struct {
+		name               string
+		clusterProxyInfo   *ClusterProxyInfo
+		managedClusterName string
+		expectedURL        string
+		description        string
+	}{
+		{
+			name: "available cluster proxy",
+			clusterProxyInfo: &ClusterProxyInfo{
+				ServiceName:      "cluster-proxy-addon-user",
+				Namespace:        "multicluster-engine",
+				Port:             "9092",
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			managedClusterName: "test-cluster",
+			expectedURL:        "https://cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092/test-cluster",
+			description:        "Should return proper cluster proxy URL",
+		},
+		{
+			name: "unavailable cluster proxy",
+			clusterProxyInfo: &ClusterProxyInfo{
+				Available: false,
+			},
+			managedClusterName: "test-cluster",
+			expectedURL:        "",
+			description:        "Should return empty URL when cluster proxy is unavailable",
+		},
+		{
+			name:               "nil cluster proxy info",
+			clusterProxyInfo:   nil,
+			managedClusterName: "test-cluster",
+			expectedURL:        "",
+			description:        "Should return empty URL when cluster proxy info is nil",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := reconciler.GetClusterProxyURL(tt.clusterProxyInfo, tt.managedClusterName)
+			assert.Equal(t, tt.expectedURL, url, tt.description)
+		})
+	}
+}
+
+func TestGetServiceCAFromConfigMap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		namespace       string
+		existingObjects []client.Object
+		expectedCA      string
+		expectError     bool
+		description     string
+	}{
+		{
+			name:      "service CA configmap exists",
+			namespace: "test-cluster",
+			existingObjects: []client.Object{
+				&v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-service-ca.crt",
+						Namespace: "test-cluster",
+					},
+					Data: map[string]string{
+						"service-ca.crt": "-----BEGIN CERTIFICATE-----\nTEST_CA_DATA\n-----END CERTIFICATE-----",
+					},
+				},
+			},
+			expectedCA:  "-----BEGIN CERTIFICATE-----\nTEST_CA_DATA\n-----END CERTIFICATE-----",
+			expectError: false,
+			description: "Should return CA cert when configmap exists",
+		},
+		{
+			name:            "service CA configmap does not exist",
+			namespace:       "test-cluster",
+			existingObjects: []client.Object{},
+			expectedCA:      "",
+			expectError:     false,
+			description:     "Should return empty string when configmap does not exist",
+		},
+		{
+			name:      "service CA configmap exists but missing key",
+			namespace: "test-cluster",
+			existingObjects: []client.Object{
+				&v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-service-ca.crt",
+						Namespace: "test-cluster",
+					},
+					Data: map[string]string{
+						"other-key": "some-value",
+					},
+				},
+			},
+			expectedCA:  "",
+			expectError: false,
+			description: "Should return empty string when key is missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			caCert, err := reconciler.GetServiceCAFromConfigMap(tt.namespace)
+
+			if tt.expectError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.Equal(t, tt.expectedCA, caCert, "CA certificate should match expected")
+			}
+		})
+	}
+}
+
+func TestGetManagedServiceAccountToken(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = authv1beta1.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		namespace       string
+		msaName         string
+		existingObjects []client.Object
+		expectedToken   string
+		expectedCA      string
+		expectError     bool
+		description     string
+	}{
+		{
+			name:      "MSA exists with token secret",
+			namespace: "test-cluster",
+			msaName:   "application-manager",
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token-123"),
+						"ca.crt": []byte("test-ca-data"),
+					},
+				},
+			},
+			expectedToken: "test-token-123",
+			expectedCA:    "test-ca-data",
+			expectError:   false,
+			description:   "Should return token and CA from MSA secret",
+		},
+		{
+			name:      "MSA uses default name when empty",
+			namespace: "test-cluster",
+			msaName:   "",
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("default-token"),
+						"ca.crt": []byte("default-ca"),
+					},
+				},
+			},
+			expectedToken: "default-token",
+			expectedCA:    "default-ca",
+			expectError:   false,
+			description:   "Should use default MSA name when empty",
+		},
+		{
+			name:            "MSA does not exist",
+			namespace:       "test-cluster",
+			msaName:         "non-existent",
+			existingObjects: []client.Object{},
+			expectedToken:   "",
+			expectedCA:      "",
+			expectError:     true,
+			description:     "Should return error when MSA does not exist",
+		},
+		{
+			name:      "MSA has no token secret ref",
+			namespace: "test-cluster",
+			msaName:   "no-token-msa",
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "no-token-msa",
+						Namespace: "test-cluster",
+					},
+					// No TokenSecretRef
+				},
+			},
+			expectedToken: "",
+			expectedCA:    "",
+			expectError:   true,
+			description:   "Should return error when MSA has no token secret ref",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			token, caCrt, err := reconciler.GetManagedServiceAccountToken(tt.namespace, tt.msaName)
+
+			if tt.expectError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.Equal(t, tt.expectedToken, token, "Token should match expected")
+				assert.Equal(t, tt.expectedCA, caCrt, "CA should match expected")
+			}
+		})
+	}
+}
+
+func TestCreateManagedClusterSecretViaClusterProxy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = authv1beta1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name                string
+		argoNamespace       string
+		managedCluster      *spokeclusterv1.ManagedCluster
+		clusterProxyInfo    *ClusterProxyInfo
+		msaRef              string
+		legacyClusterSecret bool
+		existingObjects     []client.Object
+		expectedError       bool
+		validateFunc        func(t *testing.T, secret *v1.Secret)
+		description         string
+	}{
+		{
+			name:          "successfully create cluster secret via cluster proxy",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+					Labels: map[string]string{
+						"environment": "test",
+					},
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				ServiceName:      "cluster-proxy-addon-user",
+				Namespace:        "multicluster-engine",
+				Port:             "9092",
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false,
+			existingObjects: []client.Object{
+				&v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-service-ca.crt",
+						Namespace: "test-cluster",
+					},
+					Data: map[string]string{
+						"service-ca.crt": "-----BEGIN CERTIFICATE-----\nTEST_CA_DATA\n-----END CERTIFICATE-----",
+					},
+				},
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token-123"),
+						"ca.crt": []byte("test-ca-data"),
+					},
+				},
+			},
+			expectedError: false,
+			validateFunc: func(t *testing.T, secret *v1.Secret) {
+				assert.Equal(t, "test-cluster-application-manager-cluster-secret", secret.Name)
+				assert.Equal(t, "argocd", secret.Namespace)
+				assert.Equal(t, "https://cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092/test-cluster", secret.StringData["server"])
+				assert.Equal(t, "test-cluster", secret.StringData["name"])
+				assert.Contains(t, secret.StringData["config"], "bearerToken")
+				assert.Contains(t, secret.StringData["config"], "test-token-123")
+				assert.Contains(t, secret.StringData["config"], "caData") // Should have CA data
+				assert.Contains(t, secret.StringData["config"], `"insecure":false`)
+				assert.Equal(t, "true", secret.Labels["apps.open-cluster-management.io/acm-cluster"])
+				assert.Equal(t, "cluster", secret.Labels["argocd.argoproj.io/secret-type"])
+				assert.Equal(t, "cluster-proxy", secret.Labels["apps.open-cluster-management.io/data-source"])
+				assert.Equal(t, "test", secret.Labels["environment"])
+			},
+			description: "Should create cluster secret with cluster proxy URL and service CA",
+		},
+		{
+			name:          "create legacy cluster secret via cluster proxy when annotation enabled",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				ServiceName:      "cluster-proxy-addon-user",
+				Namespace:        "multicluster-engine",
+				Port:             "9092",
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: true, // Annotation enabled - no need for service CA
+			existingObjects: []client.Object{
+				// No service CA configmap needed when legacy mode is enabled
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token"),
+						"ca.crt": []byte("test-ca"),
+					},
+				},
+			},
+			expectedError: false,
+			validateFunc: func(t *testing.T, secret *v1.Secret) {
+				assert.Equal(t, "https://cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092/test-cluster", secret.StringData["server"])
+				assert.Contains(t, secret.StringData["config"], `"insecure":true`)
+				assert.NotContains(t, secret.StringData["config"], "caData")
+			},
+			description: "Should create legacy cluster secret when annotation is enabled, skipping service CA requirement",
+		},
+		{
+			name:          "cluster proxy unavailable",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				Available: false,
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false,
+			existingObjects:     []client.Object{},
+			expectedError:       true,
+			description:         "Should return error when cluster proxy is unavailable",
+		},
+		{
+			name:          "service CA configmap not found",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				ServiceName:      "cluster-proxy-addon-user",
+				Namespace:        "multicluster-engine",
+				Port:             "9092",
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false, // Not insecure, so CA is required
+			existingObjects:     []client.Object{},
+			expectedError:       true,
+			description:         "Should return error when service CA configmap is not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			secret, err := reconciler.CreateManagedClusterSecretViaClusterProxy(
+				tt.argoNamespace, tt.managedCluster, tt.clusterProxyInfo, tt.msaRef, tt.legacyClusterSecret)
+
+			if tt.expectedError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.NotNil(t, secret)
+				if tt.validateFunc != nil {
+					tt.validateFunc(t, secret)
+				}
+			}
+		})
+	}
+}
+
+func TestTryManagedServiceAccountOption(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = authv1beta1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name                string
+		argoNamespace       string
+		managedCluster      *spokeclusterv1.ManagedCluster
+		msaRef              string
+		legacyClusterSecret bool
+		existingObjects     []client.Object
+		expectedError       bool
+		validateFunc        func(t *testing.T, secret *v1.Secret)
+		description         string
+	}{
+		{
+			name:          "successfully create secret using CA from managed cluster client configs",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+					Labels: map[string]string{
+						"environment": "test",
+					},
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL:      "https://api.test-cluster.example.com:6443",
+							CABundle: []byte("-----BEGIN CERTIFICATE-----\nCA_FROM_CLIENT_CONFIG\n-----END CERTIFICATE-----"),
+						},
+					},
+				},
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false,
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token-123"),
+						"ca.crt": []byte("CA_FROM_MSA_SECRET_SHOULD_NOT_BE_USED"),
+					},
+				},
+			},
+			expectedError: false,
+			validateFunc: func(t *testing.T, secret *v1.Secret) {
+				assert.Equal(t, "test-cluster-application-manager-cluster-secret", secret.Name)
+				assert.Equal(t, "argocd", secret.Namespace)
+				assert.Equal(t, "https://api.test-cluster.example.com:6443", secret.StringData["server"])
+				assert.Equal(t, "test-cluster", secret.StringData["name"])
+				// Verify the config contains the CA from managed cluster client config (not MSA)
+				assert.Contains(t, secret.StringData["config"], "bearerToken")
+				assert.Contains(t, secret.StringData["config"], "test-token-123")
+				// The CA should be base64 encoded from client config, not from MSA
+				assert.Contains(t, secret.StringData["config"], "caData")
+				assert.NotContains(t, secret.StringData["config"], "CA_FROM_MSA_SECRET_SHOULD_NOT_BE_USED")
+				assert.Equal(t, "managed-service-account", secret.Labels["apps.open-cluster-management.io/data-source"])
+				assert.Equal(t, "test", secret.Labels["environment"])
+			},
+			description: "Should use CA from managed cluster client configs, not from MSA token secret",
+		},
+		{
+			name:          "create secret with insecure TLS when no CA bundle in client configs",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL: "https://api.test-cluster.example.com:6443",
+							// No CABundle
+						},
+					},
+				},
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false,
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token"),
+						"ca.crt": []byte("CA_FROM_MSA"),
+					},
+				},
+			},
+			expectedError: false,
+			validateFunc: func(t *testing.T, secret *v1.Secret) {
+				// Should use legacy mode when no CA bundle is available
+				assert.Contains(t, secret.StringData["config"], `"insecure":true`)
+				assert.NotContains(t, secret.StringData["config"], "caData")
+			},
+			description: "Should use insecure TLS when no CA bundle in client configs",
+		},
+		{
+			name:          "create legacy secret when annotation is set even if CA bundle exists",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL:      "https://api.test-cluster.example.com:6443",
+							CABundle: []byte("-----BEGIN CERTIFICATE-----\nTHIS_SHOULD_BE_IGNORED\n-----END CERTIFICATE-----"),
+						},
+					},
+				},
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: true, // Annotation enabled
+			existingObjects: []client.Object{
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token"),
+						"ca.crt": []byte("test-ca"),
+					},
+				},
+			},
+			expectedError: false,
+			validateFunc: func(t *testing.T, secret *v1.Secret) {
+				// Should use legacy mode even though CA bundle is available
+				assert.Contains(t, secret.StringData["config"], `"insecure":true`)
+				assert.NotContains(t, secret.StringData["config"], "caData")
+				assert.NotContains(t, secret.StringData["config"], "THIS_SHOULD_BE_IGNORED")
+			},
+			description: "Should create legacy secret when annotation is set, ignoring CA bundle",
+		},
+		{
+			name:          "error when no client configs",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					// No ManagedClusterClientConfigs
+				},
+			},
+			msaRef:              "application-manager",
+			legacyClusterSecret: false,
+			existingObjects:     []client.Object{},
+			expectedError:       true,
+			description:         "Should return error when no client configs",
+		},
+		{
+			name:          "error when MSA not found",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL: "https://api.test-cluster.example.com:6443",
+						},
+					},
+				},
+			},
+			msaRef:              "non-existent-msa",
+			legacyClusterSecret: false,
+			existingObjects:     []client.Object{},
+			expectedError:       true,
+			description:         "Should return error when MSA not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			secret, err := reconciler.tryManagedServiceAccountOption(tt.argoNamespace, tt.managedCluster, tt.msaRef, tt.legacyClusterSecret)
+
+			if tt.expectedError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.NotNil(t, secret)
+				if tt.validateFunc != nil {
+					tt.validateFunc(t, secret)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateClusterSecretWithFallback(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = authv1beta1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name                      string
+		argoNamespace             string
+		managedCluster            *spokeclusterv1.ManagedCluster
+		clusterProxyInfo          *ClusterProxyInfo
+		msaRef                    string
+		createBlankClusterSecrets bool
+		legacyClusterSecret       bool
+		existingObjects           []client.Object
+		expectedDataSource        ClusterSecretDataSource
+		expectedError             bool
+		description               string
+	}{
+		{
+			name:          "blank cluster secrets when createBlankClusterSecrets is true",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			msaRef:                    "application-manager",
+			createBlankClusterSecrets: true,
+			legacyClusterSecret:       false,
+			existingObjects:           []client.Object{},
+			expectedDataSource:        DataSourceBlankSecret,
+			expectedError:             false,
+			description:               "Should create blank secret when createBlankClusterSecrets is true",
+		},
+		{
+			name:          "fallback to MSA option when cluster proxy fails",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL:      "https://api.test-cluster.example.com:6443",
+							CABundle: []byte("-----BEGIN CERTIFICATE-----\nTEST_CA_FROM_CLIENT_CONFIG\n-----END CERTIFICATE-----"),
+						},
+					},
+				},
+			},
+			clusterProxyInfo: &ClusterProxyInfo{
+				Available:        true,
+				ClusterLocalHost: "cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092",
+			},
+			msaRef:                    "application-manager",
+			createBlankClusterSecrets: false,
+			legacyClusterSecret:       false,
+			existingObjects: []client.Object{
+				// No service CA configmap - cluster proxy will fail
+				// But MSA resources exist with token
+				&authv1beta1.ManagedServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Status: authv1beta1.ManagedServiceAccountStatus{
+						TokenSecretRef: &authv1beta1.SecretRef{
+							Name: "application-manager",
+						},
+					},
+				},
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "application-manager",
+						Namespace: "test-cluster",
+					},
+					Data: map[string][]byte{
+						"token":  []byte("test-token"),
+						"ca.crt": []byte("test-ca-from-msa"), // This should NOT be used in Option 2
+					},
+				},
+			},
+			expectedDataSource: DataSourceManagedServiceAccount,
+			expectedError:      false,
+			description:        "Should fallback to MSA option using CA from managed cluster client configs when cluster proxy fails",
+		},
+		{
+			name:          "fallback to legacy secret when MSA option fails",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				Spec: spokeclusterv1.ManagedClusterSpec{
+					ManagedClusterClientConfigs: []spokeclusterv1.ClientConfig{
+						{
+							URL: "https://api.test-cluster.example.com:6443",
+						},
+					},
+				},
+			},
+			clusterProxyInfo:          nil, // No cluster proxy
+			msaRef:                    "application-manager",
+			createBlankClusterSecrets: false,
+			legacyClusterSecret:       false,
+			existingObjects: []client.Object{
+				// No MSA resources, but legacy secret exists
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-cluster-cluster-secret",
+						Namespace: "test-cluster",
+						Labels: map[string]string{
+							"apps.open-cluster-management.io/cluster-name":   "test-cluster",
+							"apps.open-cluster-management.io/cluster-server": "api.test-cluster.example.com",
+						},
+					},
+					Data: map[string][]byte{
+						"config": []byte(`{"bearerToken":"legacy-token","tlsClientConfig":{"insecure":true}}`),
+						"name":   []byte("test-cluster"),
+						"server": []byte("https://api.test-cluster.example.com:6443"),
+					},
+				},
+			},
+			expectedDataSource: DataSourceLegacySecret,
+			expectedError:      false,
+			description:        "Should fallback to legacy secret when MSA option fails",
+		},
+		{
+			name:          "error when all options exhausted",
+			argoNamespace: "argocd",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster",
+				},
+				// No client configs
+			},
+			clusterProxyInfo:          nil, // No cluster proxy
+			msaRef:                    "application-manager",
+			createBlankClusterSecrets: false,
+			legacyClusterSecret:       false,
+			existingObjects:           []client.Object{}, // No resources
+			expectedDataSource:        DataSourceLegacySecret,
+			expectedError:             true,
+			description:               "Should return error when all options exhausted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			secret, dataSource, err := reconciler.createClusterSecretWithFallback(
+				tt.argoNamespace, tt.managedCluster, tt.clusterProxyInfo, tt.msaRef, tt.createBlankClusterSecrets, tt.legacyClusterSecret)
+
+			if tt.expectedError {
+				assert.Error(t, err, tt.description)
+			} else {
+				assert.NoError(t, err, tt.description)
+				assert.NotNil(t, secret)
+				assert.Equal(t, tt.expectedDataSource, dataSource, "Data source should match expected")
+			}
+		})
+	}
+}
+
+func TestDataSourceToString(t *testing.T) {
+	tests := []struct {
+		dataSource ClusterSecretDataSource
+		expected   string
+	}{
+		{DataSourceClusterProxy, "cluster-proxy"},
+		{DataSourceManagedServiceAccount, "managed-service-account"},
+		{DataSourceLegacySecret, "legacy-secret"},
+		{DataSourceBlankSecret, "blank-secret"},
+		{ClusterSecretDataSource(999), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := dataSourceToString(tt.dataSource)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

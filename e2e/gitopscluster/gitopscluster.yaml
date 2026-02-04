@@ -13,7 +13,7 @@ metadata:
 spec:
   createBlankClusterSecrets: true
   createPolicyTemplate: true
-  managedServiceAccountRef: "msa"
+  # managedServiceAccountRef defaults to "application-manager" when empty
   argoServer:
     cluster: notused
     argoNamespace: argocd
