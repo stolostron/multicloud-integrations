@@ -861,7 +861,16 @@ func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretFromManagedServiceAcc
 }
 
 func unionSecretData(newSecret, existingSecret *v1.Secret) *v1.Secret {
-	// union of labels
+	// Labels and annotations that are specific to argocd-agent mode
+	// These should be removed when switching to traditional mode
+	agentModeLabels := map[string]bool{
+		"argocd-agent.argoproj-labs.io/agent-name": true,
+	}
+	agentModeAnnotations := map[string]bool{
+		"managed-by": true, // Used by argocd-agent
+	}
+
+	// union of labels (excluding agent-mode specific labels)
 	newLabels := newSecret.GetLabels()
 	existingLabels := existingSecret.GetLabels()
 
@@ -874,6 +883,10 @@ func unionSecretData(newSecret, existingSecret *v1.Secret) *v1.Secret {
 	}
 
 	for key, val := range existingLabels {
+		// Skip agent-mode specific labels when merging
+		if agentModeLabels[key] {
+			continue
+		}
 		if _, ok := newLabels[key]; !ok {
 			newLabels[key] = val
 		}
@@ -881,7 +894,7 @@ func unionSecretData(newSecret, existingSecret *v1.Secret) *v1.Secret {
 
 	newSecret.SetLabels(newLabels)
 
-	// union of annotations
+	// union of annotations (excluding agent-mode specific annotations)
 	newAnnotations := newSecret.GetAnnotations()
 	existingAnnotations := existingSecret.GetAnnotations()
 
@@ -894,6 +907,10 @@ func unionSecretData(newSecret, existingSecret *v1.Secret) *v1.Secret {
 	}
 
 	for key, val := range existingAnnotations {
+		// Skip agent-mode specific annotations when merging
+		if agentModeAnnotations[key] {
+			continue
+		}
 		if _, ok := newAnnotations[key]; !ok {
 			if key != "kubectl.kubernetes.io/last-applied-configuration" {
 				newAnnotations[key] = val

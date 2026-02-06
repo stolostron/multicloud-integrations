@@ -56,7 +56,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -77,7 +77,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -91,7 +91,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -121,7 +121,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 				Labels: map[string]string{
 					"test-label": "test-value",
 				},
@@ -141,7 +141,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -186,7 +186,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		sourceSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -215,7 +215,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -260,7 +260,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		sourceSecretTLS := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -275,7 +275,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -305,7 +305,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		sourceSecretOpaque := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{
@@ -349,7 +349,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "wrong-secret-name",
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -392,7 +392,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -431,7 +431,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -449,7 +449,7 @@ func TestIsTargetSecret(t *testing.T) {
 	targetSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      getSourceSecretName(),
-			Namespace: SourceNamespace,
+			Namespace: DefaultSourceNamespace,
 		},
 	}
 	g.Expect(isTargetSecret(targetSecret)).To(BeTrue())
@@ -458,7 +458,7 @@ func TestIsTargetSecret(t *testing.T) {
 	wrongNameSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "wrong-name",
-			Namespace: SourceNamespace,
+			Namespace: DefaultSourceNamespace,
 		},
 	}
 	g.Expect(isTargetSecret(wrongNameSecret)).To(BeFalse())
@@ -485,7 +485,7 @@ func TestNamespaceToSecretMapper(t *testing.T) {
 	requests := namespaceToSecretMapper(context.TODO(), targetNs)
 	g.Expect(requests).To(HaveLen(1))
 	g.Expect(requests[0].Name).To(Equal(getSourceSecretName()))
-	g.Expect(requests[0].Namespace).To(Equal(SourceNamespace))
+	g.Expect(requests[0].Namespace).To(Equal(DefaultSourceNamespace))
 
 	// Test other namespace
 	otherNs := &corev1.Namespace{
@@ -506,7 +506,7 @@ func TestPredicateFunctions(t *testing.T) {
 		targetSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      getSourceSecretName(),
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 
@@ -526,7 +526,7 @@ func TestPredicateFunctions(t *testing.T) {
 		wrongSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "wrong-secret",
-				Namespace: SourceNamespace,
+				Namespace: DefaultSourceNamespace,
 			},
 		}
 

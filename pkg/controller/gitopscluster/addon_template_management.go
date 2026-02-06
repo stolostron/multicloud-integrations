@@ -27,6 +27,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
@@ -42,9 +43,10 @@ const (
 
 	// ControllerImageEnvVar is the environment variable name for the controller image
 	ControllerImageEnvVar = "CONTROLLER_IMAGE"
-)
 
-// Note: Default GitOps images and environment variable constants are defined in pkg/utils/config.go
+	// GitOpsAddonLabel is the label used to identify gitops-addon resources for cleanup
+	GitOpsAddonLabel = "apps.open-cluster-management.io/gitopsaddon"
+)
 
 // getControllerImage retrieves the controller's image from environment variable or auto-detects it
 // Auto-detection: queries the Kubernetes API to find its own pod and reads the image
@@ -83,13 +85,19 @@ func (r *ReconcileGitOpsCluster) getControllerImage() (string, error) {
 	return "", fmt.Errorf("failed to auto-detect controller image: no container with 'gitopscluster' command found in pod %s/%s", podNamespace, podName)
 }
 
-// getAddOnTemplateName generates a unique AddOnTemplate name for the GitOpsCluster
+// getAddOnTemplateName generates a unique AddOnTemplate name for the GitOpsCluster with argocd-agent
 func getAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
 	// Use namespace-name format for uniqueness
 	return fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 }
 
-// EnsureAddOnTemplate creates or updates the AddOnTemplate for a GitOpsCluster
+// getAddOnTemplateOLMName generates a unique AddOnTemplate name for argocd-agent + OLM mode
+func getAddOnTemplateOLMName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
+	return fmt.Sprintf("gitops-addon-olm-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
+}
+
+// EnsureAddOnTemplate creates or updates the AddOnTemplate for a GitOpsCluster with ArgoCD agent enabled
+// This is the dynamic template for argocd-agent WITHOUT OLM subscription
 func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	templateName := getAddOnTemplateName(gitOpsCluster)
 
@@ -100,10 +108,7 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 		return fmt.Errorf("cannot create addon template: %w", err)
 	}
 
-	// Note: operatorImage and agentImage are configured via AddOnDeploymentConfig environment variables,
-	// not hardcoded in the template. The addon framework substitutes template placeholders at deployment time.
-
-	// Build the AddOnTemplate
+	// Build the AddOnTemplate for argocd-agent mode
 	addonTemplate := &addonv1alpha1.AddOnTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: templateName,
@@ -126,6 +131,10 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 					Type: addonv1alpha1.RegistrationTypeCustomSigner,
 					CustomSigner: &addonv1alpha1.CustomSignerRegistrationConfig{
 						SignerName: "open-cluster-management.io/argocd-agent-addon",
+						// Note: The certificate CN will be the full OCM path like:
+						// system:open-cluster-management:cluster:<cluster-name>:addon:gitops-addon:agent:gitops-addon-agent
+						// The ArgoCD principal is configured with a custom auth regex to extract
+						// just the cluster name from this full path.
 						SigningCA: addonv1alpha1.SigningCARef{
 							Name:      "argocd-agent-ca",
 							Namespace: gitOpsCluster.Namespace,
@@ -156,148 +165,322 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 	return r.Create(context.Background(), addonTemplate)
 }
 
-// buildAddonManifests builds the manifest list for the AddOnTemplate
-// Note: Environment variables in the deployment use template placeholders (e.g., {{GITOPS_OPERATOR_IMAGE}})
-// which are substituted by the addon framework using values from AddOnDeploymentConfig
+// EnsureAddOnTemplateOLM creates or updates the AddOnTemplate for argocd-agent + OLM subscription mode
+func (r *ReconcileGitOpsCluster) EnsureAddOnTemplateOLM(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
+	templateName := getAddOnTemplateOLMName(gitOpsCluster)
+
+	// Get the controller image - error out if not available
+	addonImage, err := r.getControllerImage()
+	if err != nil {
+		klog.Errorf("Failed to get controller image: %v", err)
+		return fmt.Errorf("cannot create addon template: %w", err)
+	}
+
+	// Get OLM subscription values with defaults
+	subName, subNamespace, channel, source, sourceNamespace, installPlanApproval := GetOLMSubscriptionValues(gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
+
+	// Build the AddOnTemplate for argocd-agent + OLM mode
+	addonTemplate := &addonv1alpha1.AddOnTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: templateName,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by":                            "multicloud-integrations",
+				"app.kubernetes.io/component":                             "addon-template-olm-agent",
+				"gitopscluster.apps.open-cluster-management.io/name":      gitOpsCluster.Name,
+				"gitopscluster.apps.open-cluster-management.io/namespace": gitOpsCluster.Namespace,
+			},
+		},
+		Spec: addonv1alpha1.AddOnTemplateSpec{
+			AddonName: "gitops-addon",
+			AgentSpec: workv1.ManifestWorkSpec{
+				Workload: workv1.ManifestsTemplate{
+					Manifests: buildOLMAgentManifests(gitOpsCluster.Namespace, addonImage, subName, subNamespace, channel, source, sourceNamespace, installPlanApproval),
+				},
+			},
+			Registration: []addonv1alpha1.RegistrationSpec{
+				{
+					Type: addonv1alpha1.RegistrationTypeCustomSigner,
+					CustomSigner: &addonv1alpha1.CustomSignerRegistrationConfig{
+						SignerName: "open-cluster-management.io/argocd-agent-addon",
+						// Note: The certificate CN will be the full OCM path like:
+						// system:open-cluster-management:cluster:<cluster-name>:addon:gitops-addon:agent:gitops-addon-agent
+						// The ArgoCD principal is configured with a custom auth regex to extract
+						// just the cluster name from this full path.
+						SigningCA: addonv1alpha1.SigningCARef{
+							Name:      "argocd-agent-ca",
+							Namespace: gitOpsCluster.Namespace,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Check if AddOnTemplate already exists
+	existing := &addonv1alpha1.AddOnTemplate{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: templateName}, existing)
+	if err == nil {
+		// AddOnTemplate exists, update it
+		klog.V(2).Infof("Updating OLM Agent AddOnTemplate %s", templateName)
+		existing.Spec = addonTemplate.Spec
+		existing.Labels = addonTemplate.Labels
+		return r.Update(context.Background(), existing)
+	}
+
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get OLM Agent AddOnTemplate: %w", err)
+	}
+
+	// Create new AddOnTemplate
+	klog.Infof("Creating OLM Agent AddOnTemplate %s", templateName)
+	return r.Create(context.Background(), addonTemplate)
+}
+
+// buildAddonManifests builds the manifest list for the AddOnTemplate (argocd-agent without OLM)
 func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	if gitOpsNamespace == "" {
 		gitOpsNamespace = utils.GitOpsNamespace
 	}
 
 	manifests := []workv1.Manifest{
-		// Pre-delete cleanup job
-		newManifestWithoutStatus(&batchv1.Job{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "batch/v1",
-				Kind:       "Job",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "gitops-addon-cleanup",
-				Namespace: "open-cluster-management-agent-addon",
-				Annotations: map[string]string{
-					"addon.open-cluster-management.io/addon-pre-delete": "",
-				},
-			},
-			Spec: batchv1.JobSpec{
-				BackoffLimit:          int32Ptr(3),   // Retry up to 3 times on failure
-				ActiveDeadlineSeconds: int64Ptr(600), // 10 minutes timeout (increased for cleanup operations)
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ServiceAccountName: "gitops-addon",
-						RestartPolicy:      corev1.RestartPolicyNever,
-						Containers: []corev1.Container{
-							{
-								Name:            "cleanup",
-								Image:           addonImage,
-								ImagePullPolicy: corev1.PullIfNotPresent,
-								Command:         []string{"/usr/local/bin/gitopsaddon"},
-								Args:            []string{"-cleanup"},
-								Env:             []corev1.EnvVar{},
-							},
-						},
-					},
-				},
-			},
-		}),
+		// Pre-delete cleanup job - consistent across all templates, no env vars needed
+		buildCleanupJobManifest(addonImage, "open-cluster-management-agent-addon"),
 		// ServiceAccount
-		newManifestWithoutStatus(&corev1.ServiceAccount{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "v1",
-				Kind:       "ServiceAccount",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "gitops-addon",
-				Namespace: "open-cluster-management-agent-addon",
-			},
-		}),
+		buildServiceAccountManifest("open-cluster-management-agent-addon"),
 		// ClusterRoleBinding
-		newManifestWithoutStatus(&rbacv1.ClusterRoleBinding{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "rbac.authorization.k8s.io/v1",
-				Kind:       "ClusterRoleBinding",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "gitops-addon",
-			},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "ClusterRole",
-				Name:     "cluster-admin",
-			},
-			Subjects: []rbacv1.Subject{
-				{
-					Kind:      "ServiceAccount",
-					Name:      "gitops-addon",
-					Namespace: "open-cluster-management-agent-addon",
-				},
-			},
-		}),
+		buildClusterRoleBindingManifest("open-cluster-management-agent-addon"),
 		// Deployment
-		newManifestWithoutStatus(&appsv1.Deployment{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "gitops-addon",
-				Namespace: "open-cluster-management-agent-addon",
-				Labels: map[string]string{
-					"app": "gitops-addon",
-				},
-			},
-			Spec: appsv1.DeploymentSpec{
-				Replicas: int32Ptr(1),
-				Selector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						"app": "gitops-addon",
-					},
-				},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							"app": "gitops-addon",
-						},
-					},
-					Spec: corev1.PodSpec{
-						ServiceAccountName: "gitops-addon",
-						Containers: []corev1.Container{
-							{
-								Name:            "gitops-addon",
-								Image:           addonImage,
-								ImagePullPolicy: corev1.PullIfNotPresent,
-								Command:         []string{"/usr/local/bin/gitopsaddon"},
-								Env:             buildAddonEnvVars(),
-								SecurityContext: &corev1.SecurityContext{
-									ReadOnlyRootFilesystem:   boolPtr(true),
-									AllowPrivilegeEscalation: boolPtr(false),
-									RunAsNonRoot:             boolPtr(true),
-									Capabilities: &corev1.Capabilities{
-										Drop: []corev1.Capability{"ALL"},
-									},
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										MountPath: "/tmp",
-										Name:      "tmp-volume",
-									},
-								},
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: "tmp-volume",
-								VolumeSource: corev1.VolumeSource{
-									EmptyDir: &corev1.EmptyDirVolumeSource{},
-								},
-							},
-						},
-					},
-				},
-			},
-		}),
+		buildDeploymentManifest(addonImage, "open-cluster-management-agent-addon"),
 	}
 
 	return manifests
+}
+
+// buildOLMAgentManifests builds the manifest list for argocd-agent + OLM AddOnTemplate
+func buildOLMAgentManifests(gitOpsNamespace, addonImage, subName, subNamespace, channel, source, sourceNamespace, installPlanApproval string) []workv1.Manifest {
+	if gitOpsNamespace == "" {
+		gitOpsNamespace = utils.GitOpsNamespace
+	}
+
+	manifests := []workv1.Manifest{
+		// Pre-delete cleanup job - consistent across all templates, no env vars needed
+		buildCleanupJobManifest(addonImage, subNamespace),
+		// OLM Subscription
+		buildOLMSubscriptionManifest(subName, subNamespace, channel, source, sourceNamespace, installPlanApproval),
+		// ServiceAccount for cleanup job and gitops-addon deployment
+		buildServiceAccountManifest(subNamespace),
+		// ClusterRoleBinding
+		buildClusterRoleBindingManifest(subNamespace),
+		// Deployment - needed to run the secret controller that copies argocd-agent-client-tls cert
+		// from open-cluster-management-agent-addon namespace to openshift-gitops namespace
+		buildDeploymentManifest(addonImage, subNamespace),
+	}
+
+	return manifests
+}
+
+// buildCleanupJobManifest creates the cleanup job manifest - consistent across all templates
+func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
+	return newManifestWithoutStatus(&batchv1.Job{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "batch/v1",
+			Kind:       "Job",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gitops-addon-cleanup",
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"addon.open-cluster-management.io/addon-pre-delete": "",
+			},
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:          int32Ptr(3),   // Retry up to 3 times on failure
+			ActiveDeadlineSeconds: int64Ptr(600), // 10 minutes timeout
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "gitops-addon",
+					RestartPolicy:      corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:            "cleanup",
+							Image:           addonImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"/usr/local/bin/gitopsaddon"},
+							Args:            []string{"-cleanup"},
+							// No env vars needed - cleanup uses label-based lookup
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+// buildServiceAccountManifest creates the service account manifest
+func buildServiceAccountManifest(namespace string) workv1.Manifest {
+	return newManifestWithoutStatus(&corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "ServiceAccount",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gitops-addon",
+			Namespace: namespace,
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		ImagePullSecrets: []corev1.LocalObjectReference{
+			{Name: "open-cluster-management-image-pull-credentials"},
+		},
+	})
+}
+
+// buildClusterRoleBindingManifest creates the cluster role binding manifest
+func buildClusterRoleBindingManifest(namespace string) workv1.Manifest {
+	return newManifestWithoutStatus(&rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRoleBinding",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gitops-addon",
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "cluster-admin",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "gitops-addon",
+				Namespace: namespace,
+			},
+		},
+	})
+}
+
+// buildDeploymentManifest creates the deployment manifest for the gitops-addon
+func buildDeploymentManifest(addonImage, namespace string) workv1.Manifest {
+	return newManifestWithoutStatus(&appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gitops-addon",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":            "gitops-addon",
+				GitOpsAddonLabel: "true",
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "gitops-addon",
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "gitops-addon",
+					},
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "gitops-addon",
+					Containers: []corev1.Container{
+						{
+							Name:            "gitops-addon",
+							Image:           addonImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"/usr/local/bin/gitopsaddon"},
+							Env:             buildAddonEnvVars(),
+							SecurityContext: &corev1.SecurityContext{
+								ReadOnlyRootFilesystem:   boolPtr(true),
+								AllowPrivilegeEscalation: boolPtr(false),
+								RunAsNonRoot:             boolPtr(true),
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									MountPath: "/tmp",
+									Name:      "tmp-volume",
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tmp-volume",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+// buildOLMSubscriptionManifest creates the OLM Subscription manifest
+func buildOLMSubscriptionManifest(name, namespace, channel, source, sourceNamespace, installPlanApproval string) workv1.Manifest {
+	subscription := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					"app.kubernetes.io/managed-by": "multicloud-integrations",
+					GitOpsAddonLabel:               "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"channel":             channel,
+				"name":                name,
+				"source":              source,
+				"sourceNamespace":     sourceNamespace,
+				"installPlanApproval": installPlanApproval,
+				"config": map[string]interface{}{
+					"env": []map[string]interface{}{
+						{
+							"name":  "DISABLE_DEFAULT_ARGOCD_INSTANCE",
+							"value": "true",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(subscription.Object)
+	if err != nil {
+		klog.Errorf("Failed to marshal subscription: %v", err)
+		return workv1.Manifest{
+			RawExtension: runtime.RawExtension{
+				Object: subscription,
+			},
+		}
+	}
+
+	return workv1.Manifest{
+		RawExtension: runtime.RawExtension{
+			Raw: jsonBytes,
+		},
+	}
 }
 
 // buildAddonEnvVars creates the environment variables for the gitops-addon container.
@@ -305,6 +488,16 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 // substituted by the addon framework using values from AddOnDeploymentConfig.
 func buildAddonEnvVars() []corev1.EnvVar {
 	envVars := []corev1.EnvVar{}
+
+	// Add POD_NAMESPACE using downward API - needed by secret controller to discover source namespace
+	envVars = append(envVars, corev1.EnvVar{
+		Name: "POD_NAMESPACE",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.namespace",
+			},
+		},
+	})
 
 	// Add all image environment variables (excluding hub-only vars like ARGOCD_PRINCIPAL_IMAGE)
 	for envKey := range utils.DefaultOperatorImages {
@@ -333,6 +526,48 @@ func buildAddonEnvVars() []corev1.EnvVar {
 	)
 
 	return envVars
+}
+
+// CleanupDynamicAddOnTemplates deletes all dynamic AddOnTemplates created for a GitOpsCluster
+// This should be called when a GitOpsCluster is deleted
+func (r *ReconcileGitOpsCluster) CleanupDynamicAddOnTemplates(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) {
+	// Try to delete the argocd-agent template
+	templateName := getAddOnTemplateName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(templateName); err != nil {
+		klog.Warningf("Failed to delete AddOnTemplate %s: %v", templateName, err)
+	}
+
+	// Try to delete the argocd-agent + OLM template
+	olmTemplateName := getAddOnTemplateOLMName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(olmTemplateName); err != nil {
+		klog.Warningf("Failed to delete OLM AddOnTemplate %s: %v", olmTemplateName, err)
+	}
+
+	// Also try to delete any OLM-only templates (non-agent)
+	olmOnlyTemplateName := getOLMAddOnTemplateName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(olmOnlyTemplateName); err != nil {
+		klog.Warningf("Failed to delete OLM-only AddOnTemplate %s: %v", olmOnlyTemplateName, err)
+	}
+}
+
+// deleteAddOnTemplateByName deletes an AddOnTemplate by name (best effort, doesn't wait)
+func (r *ReconcileGitOpsCluster) deleteAddOnTemplateByName(name string) error {
+	template := &addonv1alpha1.AddOnTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+
+	err := r.Delete(context.Background(), template)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return err
+	}
+
+	if err == nil {
+		klog.Infof("Deleted AddOnTemplate %s", name)
+	}
+
+	return nil
 }
 
 // Helper functions

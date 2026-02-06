@@ -171,7 +171,7 @@ func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentPrincipalTLSCert(ctx context.C
 		Namespace: namespace,
 		Name:      ArgoCDAgentPrincipalTLSSecretName,
 		Validity:  TargetCertValidity,
-		HostNames: r.getPrincipalHostNames(ctx, namespace),
+		HostNames: r.getPrincipalHostNames(ctx, namespace, gitOpsCluster),
 		Lister:    secretLister,
 		Client:    kubeClient.CoreV1(),
 	}
@@ -335,14 +335,34 @@ func (r *ReconcileGitOpsCluster) loadCACertificate(
 
 // getPrincipalHostNames returns the hostnames for the principal certificate
 // For principal, we need external endpoints (LoadBalancer IPs/hostnames) plus internal DNS
-func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, namespace string) []string {
+func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, namespace string, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) []string {
 	hostnames := []string{}
 
-	// Try to discover Route hostname first (preferred for OpenShift)
+	// First, add the serverAddress from GitOpsCluster if it's configured for ArgoCD agent
+	// This is the most reliable source as it's explicitly configured by the user
+	if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
+		serverAddress := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress
+		if serverAddress != "" {
+			hostnames = append(hostnames, serverAddress)
+			klog.Infof("Added serverAddress from GitOpsCluster to principal certificate SANs: %s", serverAddress)
+		}
+	}
+
+	// Also try to discover Route hostname (for cases where serverAddress isn't set yet)
 	routeHostname, err := r.discoverRouteHostname(ctx, namespace)
 	if err == nil && routeHostname != "" {
-		hostnames = append(hostnames, routeHostname)
-		klog.V(2).Infof("Added Route hostname to principal certificate: %s", routeHostname)
+		// Only add if not already present
+		alreadyAdded := false
+		for _, h := range hostnames {
+			if h == routeHostname {
+				alreadyAdded = true
+				break
+			}
+		}
+		if !alreadyAdded {
+			hostnames = append(hostnames, routeHostname)
+			klog.V(2).Infof("Added Route hostname to principal certificate: %s", routeHostname)
+		}
 	} else {
 		klog.V(2).Infof("Could not discover Route hostname: %v", err)
 	}

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,10 +50,11 @@ func (r *GitopsAddonCleanupReconciler) uninstallGitopsAgent(ctx context.Context)
 
 // uninstallGitopsAgentInternal performs the actual uninstall logic
 // Step 0: Create pause marker to stop the gitops-addon controller from reconciling
-// Step 1: Delete ArgoCD CR and wait for it to be fully removed (operator handles agent cleanup)
-// Step 2: Delete openshift-gitops-operator resources from openshift-gitops-operator namespace
-// Step 3: Wait and re-verify that resources stay deleted
-// Step 4: Leave pause marker in place (prevents install controller from reinstalling; cleaned up by addon framework)
+// Step 1: Delete GitOpsService CR (for OLM mode, if exists)
+// Step 2: Delete ArgoCD CR and wait for it to be fully removed (operator handles agent cleanup)
+// Step 3: Delete OLM Subscription and CSV (for OLM mode)
+// Step 4: Delete openshift-gitops-operator resources from openshift-gitops-operator namespace
+// Step 5: Wait and re-verify that resources stay deleted (if configured)
 // All steps attempt to continue even if one fails to ensure maximum cleanup
 // Note: argocd-agent resources are handled by the argocd-operator when the ArgoCD CR is deleted
 func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOperatorNS string) error {
@@ -66,34 +68,47 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 		errors = append(errors, fmt.Errorf("failed to create pause marker: %w", err))
 	}
 
-	// Step 1: Delete ArgoCD CR and wait for it to be fully removed
+	// Step 1: Delete GitOpsService CR (for OLM mode, if exists)
+	klog.Info("Step 1: Deleting GitOpsService CR (if exists)")
+	if err := deleteGitOpsServiceCR(ctx, c); err != nil {
+		klog.Errorf("Error deleting GitOpsService CR (continuing with cleanup): %v", err)
+		// Don't add to errors - GitOpsService might not exist if not in OLM mode
+	}
+
+	// Step 2: Delete ArgoCD CR and wait for it to be fully removed
 	// The argocd-operator will handle cleaning up the agent resources when the ArgoCD CR is deleted
-	klog.Info("Step 1: Deleting ArgoCD CR from namespace: " + GitOpsNamespace)
+	klog.Info("Step 2: Deleting ArgoCD CR from namespace: " + GitOpsNamespace)
 	if err := deleteArgoCDCR(ctx, c); err != nil {
 		klog.Errorf("Error deleting ArgoCD CR (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to delete ArgoCD CR: %w", err))
 	}
 
-	// Step 2: Delete openshift-gitops-operator resources from openshift-gitops-operator namespace
-	klog.Info("Step 2: Deleting openshift-gitops-operator resources from namespace: " + gitopsOperatorNS)
+	// Step 3: Delete OLM Subscription and CSV (for OLM mode)
+	klog.Info("Step 3: Deleting OLM Subscription and CSV (if exists)")
+	if err := deleteOLMResources(ctx, c); err != nil {
+		klog.Errorf("Error deleting OLM resources (continuing with cleanup): %v", err)
+		// Don't add to errors - OLM resources might not exist if not in OLM mode
+	}
+
+	// Step 4: Delete openshift-gitops-operator resources from openshift-gitops-operator namespace
+	klog.Info("Step 4: Deleting openshift-gitops-operator resources from namespace: " + gitopsOperatorNS)
 	if err := deleteOperatorResources(ctx, c, gitopsOperatorNS); err != nil {
 		klog.Errorf("Error deleting openshift-gitops-operator resources (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to delete openshift-gitops-operator resources: %w", err))
 	}
 
-	// Step 3: Wait and re-verify that resources stay deleted
+	// Step 5: Wait and re-verify that resources stay deleted
 	// This is critical to handle timing issues where the controller might try to reconcile
-	// Wait for at least 3 minutes (longer than typical reconciliation interval)
 	// Can be disabled for tests by setting CLEANUP_VERIFICATION_WAIT_SECONDS=0
 	waitDuration := getCleanupVerificationWaitDuration()
 	if waitDuration > 0 {
-		klog.Infof("Step 3: Waiting and re-verifying that resources stay deleted (%v)...", waitDuration)
+		klog.Infof("Step 5: Waiting and re-verifying that resources stay deleted (%v)...", waitDuration)
 		if err := waitAndVerifyCleanup(ctx, c, gitopsOperatorNS, waitDuration); err != nil {
 			klog.Errorf("Error during cleanup verification (resources may have been recreated): %v", err)
 			errors = append(errors, fmt.Errorf("cleanup verification failed: %w", err))
 		}
 	} else {
-		klog.Info("Step 3: Skipping cleanup verification (wait duration is 0)")
+		klog.Info("Step 5: Skipping cleanup verification (wait duration is 0)")
 	}
 
 	if len(errors) > 0 {
@@ -106,14 +121,116 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 	return nil
 }
 
-// deleteArgoCDCR deletes the ArgoCD CR and retries until it's fully removed
-func deleteArgoCDCR(ctx context.Context, c client.Client) error {
-	klog.Info("Deleting ArgoCD CR with retry until fully removed")
+// deleteGitOpsServiceCR deletes the GitOpsService CR if it exists (used in OLM mode)
+func deleteGitOpsServiceCR(ctx context.Context, c client.Client) error {
+	klog.Info("Deleting GitOpsService CR (if exists)")
 
-	argoCDKey := types.NamespacedName{
-		Name:      GitOpsNamespace,
-		Namespace: GitOpsNamespace,
+	// GitOpsService is typically in the openshift-gitops namespace
+	gitOpsService := &unstructured.Unstructured{}
+	gitOpsService.SetAPIVersion("pipelines.openshift.io/v1alpha1")
+	gitOpsService.SetKind("GitopsService")
+	gitOpsService.SetName("cluster")
+	gitOpsService.SetNamespace(GitOpsNamespace)
+
+	err := c.Delete(ctx, gitOpsService)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Info("GitOpsService CR not found (expected if not using OLM mode)")
+			return nil
+		}
+		return fmt.Errorf("failed to delete GitOpsService CR: %w", err)
 	}
+
+	klog.Info("GitOpsService CR deleted successfully")
+	return nil
+}
+
+// deleteOLMResources deletes OLM Subscription and CSV resources with gitopsaddon label
+func deleteOLMResources(ctx context.Context, c client.Client) error {
+	klog.Info("Deleting OLM resources (Subscription and CSV)")
+
+	// Delete Subscriptions with gitopsaddon label in openshift-operators namespace
+	subscriptionNamespaces := []string{"openshift-operators", "operators"}
+	for _, ns := range subscriptionNamespaces {
+		if err := deleteSubscriptionsInNamespace(ctx, c, ns); err != nil {
+			klog.Warningf("Error deleting subscriptions in %s: %v", ns, err)
+		}
+	}
+
+	// Delete associated CSVs
+	for _, ns := range subscriptionNamespaces {
+		if err := deleteCSVsInNamespace(ctx, c, ns); err != nil {
+			klog.Warningf("Error deleting CSVs in %s: %v", ns, err)
+		}
+	}
+
+	return nil
+}
+
+// deleteSubscriptionsInNamespace deletes OLM Subscriptions with gitopsaddon label
+func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namespace string) error {
+	subscriptions := &unstructured.UnstructuredList{}
+	subscriptions.SetAPIVersion("operators.coreos.com/v1alpha1")
+	subscriptions.SetKind("SubscriptionList")
+
+	err := c.List(ctx, subscriptions,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, sub := range subscriptions.Items {
+		klog.Infof("Deleting Subscription: %s/%s", namespace, sub.GetName())
+		if err := c.Delete(ctx, &sub); err != nil && !errors.IsNotFound(err) {
+			klog.Warningf("Failed to delete Subscription %s: %v", sub.GetName(), err)
+		}
+	}
+
+	return nil
+}
+
+// deleteCSVsInNamespace deletes ClusterServiceVersions related to argocd-operator
+func deleteCSVsInNamespace(ctx context.Context, c client.Client, namespace string) error {
+	csvs := &unstructured.UnstructuredList{}
+	csvs.SetAPIVersion("operators.coreos.com/v1alpha1")
+	csvs.SetKind("ClusterServiceVersionList")
+
+	err := c.List(ctx, csvs, client.InNamespace(namespace))
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, csv := range csvs.Items {
+		name := csv.GetName()
+		// Delete argocd-operator or openshift-gitops-operator CSVs
+		if containsArgoCD(name) {
+			klog.Infof("Deleting CSV: %s/%s", namespace, name)
+			if err := c.Delete(ctx, &csv); err != nil && !errors.IsNotFound(err) {
+				klog.Warningf("Failed to delete CSV %s: %v", name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// containsArgoCD checks if a string contains argocd-related identifiers
+func containsArgoCD(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "argocd") || strings.Contains(lower, "openshift-gitops")
+}
+
+// deleteArgoCDCR deletes ArgoCD CRs with the gitopsaddon label and retries until fully removed
+// Only deletes ArgoCD CRs created by the gitops-addon (with apps.open-cluster-management.io/gitopsaddon label)
+func deleteArgoCDCR(ctx context.Context, c client.Client) error {
+	klog.Info("Deleting ArgoCD CRs with gitopsaddon label in namespace: " + GitOpsNamespace)
 
 	// Retry loop: 2 minutes total (24 iterations * 5 seconds)
 	maxWait := 2 * time.Minute
@@ -121,32 +238,39 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 	elapsed := time.Duration(0)
 	deleted := false
 
-	for elapsed < maxWait {
-		argoCD := &unstructured.Unstructured{}
-		argoCD.SetAPIVersion("argoproj.io/v1beta1")
-		argoCD.SetKind("ArgoCD")
+	// Label selector for gitopsaddon-created resources
+	labelSelector := client.MatchingLabels{
+		"apps.open-cluster-management.io/gitopsaddon": "true",
+	}
 
-		err := c.Get(ctx, argoCDKey, argoCD)
-		if errors.IsNotFound(err) {
-			// ArgoCD CR is fully deleted
+	for elapsed < maxWait {
+		// List ArgoCD CRs with gitopsaddon label in the namespace
+		argoCDList := &unstructured.UnstructuredList{}
+		argoCDList.SetAPIVersion("argoproj.io/v1beta1")
+		argoCDList.SetKind("ArgoCDList")
+
+		err := c.List(ctx, argoCDList, client.InNamespace(GitOpsNamespace), labelSelector)
+		if err != nil {
+			klog.Warningf("Error listing ArgoCD CRs: %v", err)
+			// Continue trying despite errors
+		} else if len(argoCDList.Items) == 0 {
+			// No ArgoCD CRs found with the label
 			if deleted {
-				klog.Info("ArgoCD CR has been fully deleted")
+				klog.Info("All gitopsaddon-labeled ArgoCD CRs have been fully deleted")
 			} else {
-				klog.Info("ArgoCD CR not found (already deleted or never existed)")
+				klog.Info("No gitopsaddon-labeled ArgoCD CRs found (already deleted or never existed)")
 			}
 			return nil
-		}
-
-		if err != nil {
-			klog.Warningf("Error checking ArgoCD CR status: %v", err)
-			// Continue trying despite errors
 		} else {
-			// ArgoCD CR exists, delete it
-			klog.V(1).Infof("ArgoCD CR exists, attempting deletion (elapsed: %v)", elapsed)
-			if err := c.Delete(ctx, argoCD); err != nil && !errors.IsNotFound(err) {
-				klog.Warningf("Failed to delete ArgoCD CR: %v", err)
-			} else {
-				deleted = true
+			// Delete each ArgoCD CR found with the label
+			for _, argoCD := range argoCDList.Items {
+				name := argoCD.GetName()
+				klog.Infof("Deleting ArgoCD CR: %s/%s (elapsed: %v)", GitOpsNamespace, name, elapsed)
+				if err := c.Delete(ctx, &argoCD); err != nil && !errors.IsNotFound(err) {
+					klog.Warningf("Failed to delete ArgoCD CR %s: %v", name, err)
+				} else {
+					deleted = true
+				}
 			}
 		}
 
@@ -156,16 +280,16 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 	}
 
 	// Timeout reached - check final status
-	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
-	err := c.Get(ctx, argoCDKey, argoCD)
-	if errors.IsNotFound(err) {
-		klog.Warning("ArgoCD CR deleted after timeout")
+	argoCDList := &unstructured.UnstructuredList{}
+	argoCDList.SetAPIVersion("argoproj.io/v1beta1")
+	argoCDList.SetKind("ArgoCDList")
+	err := c.List(ctx, argoCDList, client.InNamespace(GitOpsNamespace), labelSelector)
+	if err == nil && len(argoCDList.Items) == 0 {
+		klog.Warning("ArgoCD CRs deleted after timeout")
 		return nil
 	}
 
-	return fmt.Errorf("timeout: ArgoCD CR still exists after %v", maxWait)
+	return fmt.Errorf("timeout: gitopsaddon-labeled ArgoCD CRs still exist after %v", maxWait)
 }
 
 // deleteOperatorResources deletes openshift-gitops-operator resources

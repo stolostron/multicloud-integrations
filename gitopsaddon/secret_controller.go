@@ -35,9 +35,24 @@ import (
 )
 
 const (
-	SourceNamespace  = "open-cluster-management-agent-addon"
-	TargetSecretName = "argocd-agent-client-tls" // #nosec G101
+	TargetSecretName       = "argocd-agent-client-tls" // #nosec G101
+	DefaultSourceNamespace = "open-cluster-management-agent-addon"
 )
+
+// getSourceNamespace returns the source namespace for the agent client cert secret.
+// For OLM mode, this is the namespace where gitops-addon runs (e.g., openshift-operators).
+// For non-OLM mode, this is open-cluster-management-agent-addon.
+// It can be overridden via GITOPS_ADDON_NAMESPACE environment variable.
+func getSourceNamespace() string {
+	if ns := os.Getenv("GITOPS_ADDON_NAMESPACE"); ns != "" {
+		return ns
+	}
+	// Default to the namespace where this pod is running
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return DefaultSourceNamespace
+}
 
 // getSourceSecretName returns the source secret name, allowing override via environment variable
 func getSourceSecretName() string {
@@ -126,7 +141,7 @@ var targetNamespacePredicateFunc = predicate.TypedFuncs[*corev1.Namespace]{
 
 // isTargetSecret checks if the secret is the one we want to watch
 func isTargetSecret(secret *corev1.Secret) bool {
-	return secret.Name == getSourceSecretName() && secret.Namespace == SourceNamespace
+	return secret.Name == getSourceSecretName() && secret.Namespace == getSourceNamespace()
 }
 
 // namespaceToSecretMapper maps namespace events to secret reconcile requests
@@ -137,7 +152,7 @@ func namespaceToSecretMapper(ctx context.Context, obj *corev1.Namespace) []recon
 			{
 				NamespacedName: types.NamespacedName{
 					Name:      getSourceSecretName(),
-					Namespace: SourceNamespace,
+					Namespace: getSourceNamespace(),
 				},
 			},
 		}
@@ -151,7 +166,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 	klog.Infof("Reconciling ArgoCD agent client cert secret: %s", request.NamespacedName)
 
 	// Only process the specific secret we care about
-	if request.Name != getSourceSecretName() || request.Namespace != SourceNamespace {
+	if request.Name != getSourceSecretName() || request.Namespace != getSourceNamespace() {
 		klog.V(4).Infof("Ignoring secret %s, not the target secret", request.NamespacedName)
 		return reconcile.Result{}, nil
 	}

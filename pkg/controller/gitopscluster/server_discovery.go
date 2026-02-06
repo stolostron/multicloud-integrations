@@ -188,7 +188,7 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 	// First, try to discover from Route (preferred for OpenShift)
 	serverAddress, serverPort, err := r.discoverFromRoute(ctx, argoNamespace)
 	if err != nil {
-		klog.V(2).Infof("Route discovery failed, trying LoadBalancer: %v", err)
+		klog.Warningf("Route discovery failed: %v, trying LoadBalancer", err)
 
 		// Fallback to LoadBalancer discovery
 		serverAddress, serverPort, err = r.discoverFromLoadBalancer(ctx, argoNamespace)
@@ -220,7 +220,13 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 }
 
 // discoverFromRoute discovers the server address from an OpenShift Route
+// Uses the uncached apiReader since Routes are not watched by the controller
 func (r *ReconcileGitOpsCluster) discoverFromRoute(ctx context.Context, argoNamespace string) (string, string, error) {
+	// Check if apiReader is available (might be nil in tests)
+	if r.apiReader == nil {
+		return "", "", fmt.Errorf("apiReader not available for route discovery")
+	}
+
 	// List routes with principal labels
 	// The ArgoCD operator creates routes with app.kubernetes.io/part-of: argocd-agent
 	// and app.kubernetes.io/name containing "agent-principal"
@@ -240,8 +246,14 @@ func (r *ReconcileGitOpsCluster) discoverFromRoute(ctx context.Context, argoName
 
 	listopts.LabelSelector = routeSelectionLabel
 
-	err = r.List(ctx, routeList, listopts)
+	// Use apiReader (uncached) instead of the cached Client for Route listing
+	// Routes are not watched by the controller, so they're not in the cache
+	err = r.apiReader.List(ctx, routeList, listopts)
 	if err != nil {
+		// Check if the error is because Route API is not available (non-OpenShift cluster)
+		if k8errors.IsNotFound(err) || strings.Contains(err.Error(), "no matches for kind") {
+			return "", "", fmt.Errorf("Route API not available (not an OpenShift cluster): %w", err)
+		}
 		return "", "", fmt.Errorf("failed to list routes: %w", err)
 	}
 

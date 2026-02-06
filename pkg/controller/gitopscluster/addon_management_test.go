@@ -357,12 +357,12 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				}, config)
 				require.NoError(t, err)
 
-				// AgentInstallNamespace should be patched to empty string for OLM mode
-				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty for OLM subscription mode")
+				// AgentInstallNamespace should be patched to OLM subscription namespace for OLM mode
+				assert.Equal(t, "operators", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be set to OLM namespace for OLM subscription mode")
 			},
 		},
 		{
-			name:      "OLM subscription mode - update existing config with AgentInstallNamespace patched to empty",
+			name:      "OLM subscription mode - update existing config with AgentInstallNamespace patched to OLM namespace",
 			namespace: "test-cluster",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -403,8 +403,8 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				}, config)
 				require.NoError(t, err)
 
-				// AgentInstallNamespace should be patched to empty string for OLM mode
-				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty for OLM subscription mode")
+				// AgentInstallNamespace should be patched to OLM subscription namespace for OLM mode
+				assert.Equal(t, "operators", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be set to OLM namespace for OLM subscription mode")
 			},
 		},
 	}
@@ -841,7 +841,7 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 			},
 		},
 		{
-			name:      "OLM subscription mode - create new ManagedClusterAddOn with OLM template",
+			name:      "OLM subscription mode with custom values - create new ManagedClusterAddOn with dynamic OLM template (no argocd-agent)",
 			namespace: "test-cluster",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -876,7 +876,7 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				foundDeploymentConfig := false
 				for _, config := range addon.Spec.Configs {
 					if config.Group == "addon.open-cluster-management.io" && config.Resource == "addontemplates" {
-						// OLM template name should follow the pattern: gitops-addon-olm-<namespace>-<name>
+						// OLM mode with custom values uses dynamic template: gitops-addon-olm-{namespace}-{name}
 						assert.Equal(t, "gitops-addon-olm-test-namespace-test-gitopscluster", config.Name)
 						foundOLMTemplate = true
 					}
@@ -1231,7 +1231,7 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 	}
 }
 
-func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
+func TestPatchAgentInstallNamespaceForOLM(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := addonv1alpha1.AddToScheme(scheme)
 	require.NoError(t, err)
@@ -1239,13 +1239,15 @@ func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
 	tests := []struct {
 		name            string
 		namespace       string
+		olmSubNamespace string
 		existingObjects []client.Object
 		expectedError   bool
-		validateFunc    func(t *testing.T, c client.Client, namespace string)
+		validateFunc    func(t *testing.T, c client.Client, namespace, olmSubNamespace string)
 	}{
 		{
-			name:      "patch existing config to empty AgentInstallNamespace",
-			namespace: "test-cluster",
+			name:            "patch existing config to OLM namespace",
+			namespace:       "test-cluster",
+			olmSubNamespace: "openshift-operators",
 			existingObjects: []client.Object{
 				&addonv1alpha1.AddOnDeploymentConfig{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1260,7 +1262,7 @@ func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
 					},
 				},
 			},
-			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+			validateFunc: func(t *testing.T, c client.Client, namespace, olmSubNamespace string) {
 				config := &addonv1alpha1.AddOnDeploymentConfig{}
 				err := c.Get(context.Background(), types.NamespacedName{
 					Name:      "gitops-addon-config",
@@ -1268,8 +1270,8 @@ func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
 				}, config)
 				require.NoError(t, err)
 
-				// AgentInstallNamespace should be patched to empty string
-				assert.Equal(t, "", config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be empty after patch")
+				// AgentInstallNamespace should be patched to OLM namespace
+				assert.Equal(t, olmSubNamespace, config.Spec.AgentInstallNamespace, "AgentInstallNamespace should be set to OLM namespace after patch")
 				// Other fields should be preserved
 				assert.Len(t, config.Spec.CustomizedVariables, 1)
 				assert.Equal(t, "TEST_VAR", config.Spec.CustomizedVariables[0].Name)
@@ -1277,9 +1279,10 @@ func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
 			},
 		},
 		{
-			name:          "error when config doesn't exist",
-			namespace:     "non-existent-cluster",
-			expectedError: true,
+			name:            "error when config doesn't exist",
+			namespace:       "non-existent-cluster",
+			olmSubNamespace: "openshift-operators",
+			expectedError:   true,
 		},
 	}
 
@@ -1294,14 +1297,14 @@ func TestPatchAgentInstallNamespaceToEmpty(t *testing.T) {
 				Client: fakeClient,
 			}
 
-			err := reconciler.patchAgentInstallNamespaceToEmpty(tt.namespace)
+			err := reconciler.patchAgentInstallNamespaceForOLM(tt.namespace, tt.olmSubNamespace)
 
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				if tt.validateFunc != nil {
-					tt.validateFunc(t, fakeClient, tt.namespace)
+					tt.validateFunc(t, fakeClient, tt.namespace, tt.olmSubNamespace)
 				}
 			}
 		})

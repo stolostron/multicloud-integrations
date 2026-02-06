@@ -60,21 +60,24 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDPolicy(instance *gitopsclusterV1bet
 		return ErrPolicyFrameworkNotAvailable
 	}
 
-	// Ensure ManagedClusterSetBinding exists in the GitOpsCluster namespace
-	// This is required for the Placement to be able to select clusters from the default ClusterSet
-	if err := r.createNamespaceScopedResourceFromYAML(generateManagedClusterSetBindingYaml(*instance)); err != nil {
-		klog.Error("failed to create ManagedClusterSetBinding: ", err)
-		return err
-	}
+	// NOTE: We do NOT create a ManagedClusterSetBinding here because:
+	// 1. The GitOpsCluster already references a Placement which resolves managed clusters successfully
+	// 2. For that Placement to work, a ManagedClusterSetBinding must already exist in the namespace
+	// 3. The Policy uses the SAME Placement, so it leverages the existing ManagedClusterSetBinding
+	// 4. Creating a duplicate "default" binding would be redundant and could conflict with user configuration
 
 	// Create PlacementBinding to bind the Policy to the existing Placement
-	if err := r.createNamespaceScopedResourceFromYAML(generateArgoCDPolicyPlacementBindingYaml(*instance)); err != nil {
+	// PlacementBinding uses create-only mode since it references the user-owned Policy
+	if err := r.createOnlyNamespaceScopedResourceFromYAML(generateArgoCDPolicyPlacementBindingYaml(*instance)); err != nil {
 		klog.Error("failed to create ArgoCD Policy PlacementBinding: ", err)
 		return err
 	}
 
 	// Create the Policy wrapping the ArgoCD CR
-	if err := r.createNamespaceScopedResourceFromYAML(generateArgoCDPolicyYaml(*instance)); err != nil {
+	// IMPORTANT: Policy is created once and never updated automatically.
+	// This allows users to own and customize the Policy (e.g., adding RBAC for cluster-admin).
+	// Users can modify the Policy's object-templates to add ClusterRole/ClusterRoleBinding for ArgoCD.
+	if err := r.createOnlyNamespaceScopedResourceFromYAML(generateArgoCDPolicyYaml(*instance)); err != nil {
 		klog.Error("failed to create ArgoCD Policy: ", err)
 		return err
 	}
@@ -122,20 +125,6 @@ func (r *ReconcileGitOpsCluster) isPolicyCRDAvailable() bool {
 	return available
 }
 
-// generateManagedClusterSetBindingYaml generates a ManagedClusterSetBinding in the GitOpsCluster namespace
-// to allow Placements to select clusters from the default ClusterSet.
-func generateManagedClusterSetBindingYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
-	return fmt.Sprintf(`
-apiVersion: cluster.open-cluster-management.io/v1beta2
-kind: ManagedClusterSetBinding
-metadata:
-  name: default
-  namespace: %s
-spec:
-  clusterSet: default
-`, gitOpsCluster.Namespace)
-}
-
 // generateArgoCDPolicyPlacementBindingYaml generates the PlacementBinding YAML to bind the ArgoCD Policy to the Placement.
 // All resources are created in the same namespace as the GitOpsCluster CR.
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
@@ -168,7 +157,10 @@ subjects:
 // Note: No ownerReferences - Policy resources are intentionally NOT cleaned up when GitOpsCluster is deleted.
 // They must be manually deleted by the user.
 // Note: pruneObjectBehavior is set to None to orphan the ArgoCD CR when the policy is deleted.
-// The ArgoCD CR cleanup is handled by the gitops addon code.
+// The proper cleanup order is:
+// 1. Delete Policy CR first (stops enforcement, allows cleanup job to delete ArgoCD CR)
+// 2. Delete ManagedClusterAddOn -> cleanup job runs and deletes ArgoCD CR and other resources
+// 3. Delete GitOpsCluster CR
 // When ArgoCD agent is enabled, AppProject is NOT included because argocd-agent propagates it from the hub.
 func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	argoCDSpec := generateArgoCDSpec(gitOpsCluster)
@@ -211,6 +203,8 @@ spec:
                 metadata:
                   name: acm-openshift-gitops
                   namespace: openshift-gitops
+                  labels:
+                    apps.open-cluster-management.io/gitopsaddon: "true"
                 spec:
 %s`,
 		gitOpsCluster.Name+"-argocd-policy", gitOpsCluster.Namespace,
@@ -297,6 +291,7 @@ argoCDAgent:
       principalServerPort: "%s"
       mode: "%s"
     tls:
+      secretName: argocd-agent-client-tls
       rootCASecretName: argocd-agent-ca`,
 			agentImage, serverAddress, serverPort, mode)
 	}

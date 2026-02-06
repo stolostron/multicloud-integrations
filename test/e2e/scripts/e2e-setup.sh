@@ -131,6 +131,20 @@ echo "Step 4.5: Applying ClusterManagementAddon and default AddOnTemplate..."
 kubectl apply -f gitopsaddon/addonTemplates/clusterManagementAddon.yaml --context ${HUB_CONTEXT}
 kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml --context ${HUB_CONTEXT}
 
+# Update AddOnTemplate images if using a custom E2E image
+if [ "${E2E_IMG}" != "quay.io/stolostron/multicloud-integrations:latest" ]; then
+  echo "  Patching AddOnTemplate images to use: ${E2E_IMG}"
+  # Patch gitops-addon template
+  kubectl get addontemplate gitops-addon -o json --context ${HUB_CONTEXT} | \
+    sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" | \
+    kubectl apply -f - --context ${HUB_CONTEXT} 2>/dev/null || true
+  # Patch gitops-addon-olm template
+  kubectl get addontemplate gitops-addon-olm -o json --context ${HUB_CONTEXT} | \
+    sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" | \
+    kubectl apply -f - --context ${HUB_CONTEXT} 2>/dev/null || true
+  echo "  ✓ AddOnTemplate images updated"
+fi
+
 # Step 5: Create GitOpsCluster
 echo ""
 echo "Step 5: Creating GitOpsCluster (with argoCDAgent.enabled=${ENABLE_ARGOCD_AGENT})..."
@@ -185,14 +199,14 @@ if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
     sleep 2
   done
 
-  echo "  Waiting for argocd-agent-principal-tls secret..."
-  for i in {1..60}; do
+  echo "  Waiting for argocd-agent-principal-tls secret (may take up to 6 minutes for leader election + reconciliation)..."
+  for i in {1..180}; do
     if kubectl get secret argocd-agent-principal-tls -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
-      echo "  ✓ Secret argocd-agent-principal-tls created (attempt $i/60)"
+      echo "  ✓ Secret argocd-agent-principal-tls created (attempt $i/180)"
       break
     fi
-    if [ $i -eq 60 ]; then
-      echo "✗ ERROR: Secret argocd-agent-principal-tls not created after 120s"
+    if [ $i -eq 180 ]; then
+      echo "✗ ERROR: Secret argocd-agent-principal-tls not created after 360s"
       kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50
       exit 1
     fi
@@ -406,6 +420,48 @@ echo "  Creating and labeling guestbook namespace on managed cluster..."
 kubectl create namespace guestbook --context ${SPOKE_CONTEXT} 2>/dev/null || true
 kubectl label namespace guestbook argocd.argoproj.io/managed-by=acm-openshift-gitops --overwrite --context ${SPOKE_CONTEXT}
 echo "  ✓ Guestbook namespace labeled for ArgoCD permission"
+
+# Create default AppProject in cluster1 namespace on hub for ArgoCD agent mode
+echo "  Creating default AppProject in cluster1 namespace on hub..."
+cat <<EOF | kubectl apply -f - --context ${HUB_CONTEXT}
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: cluster1
+spec:
+  clusterResourceWhitelist:
+  - group: '*'
+    kind: '*'
+  destinations:
+  - namespace: '*'
+    server: '*'
+  sourceRepos:
+  - '*'
+EOF
+echo "  ✓ Default AppProject created in cluster1 namespace on hub"
+
+# Also create default AppProject in openshift-gitops namespace on managed cluster
+# This is required because the ArgoCD application controller on the managed cluster
+# needs the AppProject to exist locally before it can reconcile the application
+echo "  Creating default AppProject in openshift-gitops namespace on managed cluster..."
+cat <<EOF | kubectl apply -f - --context ${SPOKE_CONTEXT}
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: ${GITOPS_NAMESPACE}
+spec:
+  clusterResourceWhitelist:
+  - group: '*'
+    kind: '*'
+  destinations:
+  - namespace: '*'
+    server: '*'
+  sourceRepos:
+  - '*'
+EOF
+echo "  ✓ Default AppProject created in openshift-gitops namespace on managed cluster"
 
 kubectl apply -f test/e2e/fixtures/app.yaml --context ${HUB_CONTEXT}
 sleep 30s

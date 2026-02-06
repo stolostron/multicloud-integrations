@@ -389,3 +389,90 @@ func TestBuildOLMSubscriptionManifests(t *testing.T) {
 	assert.NotNil(t, manifests[0].Raw)
 }
 
+func TestHasCustomOLMSubscriptionValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		olmSpec  *gitopsclusterV1beta1.OLMSubscriptionSpec
+		expected bool
+	}{
+		{
+			name:     "nil spec returns false",
+			olmSpec:  nil,
+			expected: false,
+		},
+		{
+			name:     "empty spec returns false",
+			olmSpec:  &gitopsclusterV1beta1.OLMSubscriptionSpec{},
+			expected: false,
+		},
+		{
+			name: "only enabled set returns false (enabled is not a custom value)",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Enabled: boolPtr(true),
+			},
+			expected: false,
+		},
+		{
+			name: "name set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Name: "argocd-operator",
+			},
+			expected: true,
+		},
+		{
+			name: "namespace set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Namespace: "operators",
+			},
+			expected: true,
+		},
+		{
+			name: "channel set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Channel: "alpha",
+			},
+			expected: true,
+		},
+		{
+			name: "source set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Source: "operatorhubio-catalog",
+			},
+			expected: true,
+		},
+		{
+			name: "sourceNamespace set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				SourceNamespace: "olm",
+			},
+			expected: true,
+		},
+		{
+			name: "installPlanApproval set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				InstallPlanApproval: "Manual",
+			},
+			expected: true,
+		},
+		{
+			name: "all custom values set returns true",
+			olmSpec: &gitopsclusterV1beta1.OLMSubscriptionSpec{
+				Name:                "argocd-operator",
+				Namespace:           "operators",
+				Channel:             "alpha",
+				Source:              "operatorhubio-catalog",
+				SourceNamespace:     "olm",
+				InstallPlanApproval: "Manual",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := HasCustomOLMSubscriptionValues(tt.olmSpec)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+

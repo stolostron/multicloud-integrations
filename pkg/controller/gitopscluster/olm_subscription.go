@@ -63,6 +63,17 @@ func IsOLMSubscriptionEnabled(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster)
 	return *gitOpsCluster.Spec.GitOpsAddon.OLMSubscription.Enabled
 }
 
+// HasCustomOLMSubscriptionValues checks if any custom OLM subscription values are specified
+// If custom values are specified, a dynamic template should be used instead of the static template
+func HasCustomOLMSubscriptionValues(olmSpec *gitopsclusterV1beta1.OLMSubscriptionSpec) bool {
+	if olmSpec == nil {
+		return false
+	}
+	// Check if any non-default values are specified
+	return olmSpec.Name != "" || olmSpec.Namespace != "" || olmSpec.Channel != "" ||
+		olmSpec.Source != "" || olmSpec.SourceNamespace != "" || olmSpec.InstallPlanApproval != ""
+}
+
 // GetOLMSubscriptionValues returns the OLM subscription values with defaults applied
 func GetOLMSubscriptionValues(olmSpec *gitopsclusterV1beta1.OLMSubscriptionSpec) (name, namespace, channel, source, sourceNamespace, installPlanApproval string) {
 	name = DefaultOLMSubscriptionName
@@ -204,4 +215,3 @@ func newManifestFromUnstructured(obj *unstructured.Unstructured) workv1.Manifest
 		},
 	}
 }
-

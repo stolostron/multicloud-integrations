@@ -298,24 +298,34 @@ func TestDefaultOperatorImages(t *testing.T) {
 func TestBuildAddonEnvVars(t *testing.T) {
 	envVars := buildAddonEnvVars()
 
-	// Should have all image env vars (excluding hub-only) + proxy + ArgoCD agent vars
-	expectedMinCount := len(utils.DefaultOperatorImages) - 1 + 3 + 4 // -1 for hub-only, +3 proxy, +4 agent
+	// Should have all image env vars (excluding hub-only) + proxy + ArgoCD agent vars + POD_NAMESPACE
+	expectedMinCount := len(utils.DefaultOperatorImages) - 1 + 3 + 4 + 1 // -1 for hub-only, +3 proxy, +4 agent, +1 POD_NAMESPACE
 
 	if len(envVars) < expectedMinCount {
 		t.Errorf("Expected at least %d env vars, got %d", expectedMinCount, len(envVars))
 	}
 
-	// Check that all env vars have placeholder values like {{VAR_NAME}}
+	// Check that all env vars have names and either Value or ValueFrom
 	for _, env := range envVars {
 		if env.Name == "" {
 			t.Error("Env var name should not be empty")
 		}
-		if env.Value == "" {
-			t.Errorf("Env var %s value should not be empty", env.Name)
-		}
-		// Value should be a placeholder like {{VAR_NAME}}
-		if len(env.Value) < 4 || env.Value[:2] != "{{" || env.Value[len(env.Value)-2:] != "}}" {
-			t.Errorf("Env var %s value should be a placeholder like {{VAR_NAME}}, got %s", env.Name, env.Value)
+		// POD_NAMESPACE uses ValueFrom (downward API), others use Value
+		if env.Name == "POD_NAMESPACE" {
+			if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil {
+				t.Errorf("POD_NAMESPACE should use ValueFrom with FieldRef")
+			}
+			if env.ValueFrom.FieldRef.FieldPath != "metadata.namespace" {
+				t.Errorf("POD_NAMESPACE FieldPath should be metadata.namespace, got %s", env.ValueFrom.FieldRef.FieldPath)
+			}
+		} else {
+			if env.Value == "" {
+				t.Errorf("Env var %s value should not be empty", env.Name)
+			}
+			// Value should be a placeholder like {{VAR_NAME}}
+			if len(env.Value) < 4 || env.Value[:2] != "{{" || env.Value[len(env.Value)-2:] != "}}" {
+				t.Errorf("Env var %s value should be a placeholder like {{VAR_NAME}}, got %s", env.Name, env.Value)
+			}
 		}
 	}
 
@@ -328,11 +338,12 @@ func TestBuildAddonEnvVars(t *testing.T) {
 
 	// Check that key spoke vars ARE included
 	requiredVars := map[string]bool{
-		utils.EnvGitOpsOperatorImage:   false,
-		utils.EnvArgoCDImage:           false,
-		utils.EnvHTTPProxy:             false,
-		utils.EnvArgoCDAgentEnabled:    false,
-		utils.EnvArgoCDAgentMode:       false,
+		"POD_NAMESPACE":              false,
+		utils.EnvGitOpsOperatorImage: false,
+		utils.EnvArgoCDImage:         false,
+		utils.EnvHTTPProxy:           false,
+		utils.EnvArgoCDAgentEnabled:  false,
+		utils.EnvArgoCDAgentMode:     false,
 	}
 
 	for _, env := range envVars {

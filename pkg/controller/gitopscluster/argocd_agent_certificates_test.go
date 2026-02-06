@@ -32,11 +32,11 @@ func TestVerifyCACertificateExists(t *testing.T) {
 	_ = gitopsclusterV1beta1.AddToScheme(scheme)
 
 	tests := []struct {
-		name        string
-		secretName  string
-		namespace   string
+		name         string
+		secretName   string
+		namespace    string
 		createSecret bool
-		expectError bool
+		expectError  bool
 	}{
 		{
 			name:         "CA secret exists",
@@ -87,11 +87,11 @@ func TestFindArgoCDAgentPrincipalService(t *testing.T) {
 	_ = gitopsclusterV1beta1.AddToScheme(scheme)
 
 	tests := []struct {
-		name           string
-		serviceName    string
-		serviceLabels  map[string]string
-		namespace      string
-		expectFound    bool
+		name          string
+		serviceName   string
+		serviceLabels map[string]string
+		namespace     string
+		expectFound   bool
 	}{
 		{
 			name:        "service found by hardcoded name - openshift-gitops-agent-principal",
@@ -192,7 +192,22 @@ func TestGetPrincipalHostNames(t *testing.T) {
 		Client: fakeClient,
 	}
 
-	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace")
+	// Create a GitOpsCluster with agent config including serverAddress
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster",
+			Namespace: "test-namespace",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					ServerAddress: "test-server.example.com",
+				},
+			},
+		},
+	}
+
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace", gitOpsCluster)
 
 	if len(hostnames) == 0 {
 		t.Error("getPrincipalHostNames() returned empty hostnames")
@@ -466,7 +481,22 @@ func TestGetPrincipalHostNames_WithRoute(t *testing.T) {
 		Client: fakeClient,
 	}
 
-	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace")
+	// Create a GitOpsCluster with agent config
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitopscluster",
+			Namespace: "test-namespace",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					ServerAddress: "agent-server.example.com",
+				},
+			},
+		},
+	}
+
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace", gitOpsCluster)
 
 	if len(hostnames) == 0 {
 		t.Error("getPrincipalHostNames() returned empty hostnames")
@@ -498,4 +528,3 @@ func TestGetPrincipalHostNames_WithRoute(t *testing.T) {
 		t.Error("getPrincipalHostNames() should include localhost")
 	}
 }
-

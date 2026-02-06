@@ -53,6 +53,9 @@ type ReconcileGitOpsCluster struct {
 	authClient kubernetes.Interface
 	scheme     *runtime.Scheme
 	lock       sync.Mutex
+	// apiReader is an uncached client for reading resources not in the controller's cache
+	// Used for Route discovery since Routes are not watched by the controller
+	apiReader client.Reader
 }
 
 // TokenConfig defines a token configuration used in ArgoCD cluster secret
@@ -101,6 +104,7 @@ func newReconciler(mgr manager.Manager) (reconcile.Reconciler, error) {
 		scheme:        mgr.GetScheme(),
 		authClient:    kubeClient,
 		lock:          sync.Mutex{},
+		apiReader:     mgr.GetAPIReader(),
 	}
 
 	return dsRS, nil
@@ -277,7 +281,8 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 
 		if err != nil && k8errors.IsNotFound(err) {
 			klog.Infof("GitOpsCluster %s/%s deleted", gitOpsCluster.Namespace, gitOpsCluster.Name)
-			// deleted? just skip to the next GitOpsCluster resource
+			// Clean up dynamic AddOnTemplates that were created for this GitOpsCluster
+			r.CleanupDynamicAddOnTemplates(&gitOpsCluster)
 			continue
 		}
 
@@ -662,7 +667,65 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	// 3b. Discover and validate server address and port if ArgoCD agent is enabled
+	// 3b. Create CA certificate first (needed for ArgoCD principal to start)
+	if argoCDAgentEnabled {
+		err := r.EnsureArgoCDAgentCASecret(context.TODO(), instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent CA certificate: %v", err)
+
+			msg := fmt.Sprintf("Failed to generate CA certificate: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after CA cert failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+
+		// Also ensure resource proxy TLS certificate (needed for principal to start)
+		err = r.EnsureArgoCDAgentResourceProxyTLSCert(context.TODO(), instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent resource proxy TLS certificate: %v", err)
+
+			msg := fmt.Sprintf("Failed to generate resource proxy TLS certificate: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after resource proxy TLS failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+	}
+
+	// 3c. Discover and validate server address and port if ArgoCD agent is enabled
 	if argoCDAgentEnabled {
 		// Discover server address and port from the ArgoCD agent principal service
 		err := r.DiscoverServerAddressAndPort(ctx, instance)
@@ -748,52 +811,20 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// Create AddOnDeploymentConfig and ManagedClusterAddon for each managed cluster namespace if GitOps addon is enabled
 	if gitopsAddonEnabled {
-		// Handle OLM subscription mode - create OLM AddOnTemplate instead of helm-based deployment
-		if olmSubscriptionEnabled {
-			klog.Infof("OLM subscription mode enabled for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+		// Handle AddOnTemplate creation based on mode:
+		// Mode 1: gitops-addon (static) - uses default from ClusterManagementAddOn
+		// Mode 2: gitops-addon-olm (static) - uses static template
+		// Mode 3: gitops-addon-{ns}-{name} (dynamic with argocd-agent)
+		// Mode 4: gitops-addon-olm-{ns}-{name} (dynamic with argocd-agent + OLM)
 
-			// Ensure OLM AddOnTemplate for this GitOpsCluster
-			err = r.EnsureOLMAddOnTemplate(instance)
-			if err != nil {
-				klog.Errorf("failed to ensure OLM AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
-				r.updateGitOpsClusterConditions(instance, "failed",
-					fmt.Sprintf("Failed to create OLM addon template: %v", err),
-					map[string]ConditionUpdate{
-						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
-							Status:  metav1.ConditionFalse,
-							Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
-							Message: fmt.Sprintf("Failed to create the OLM addon template for deploying OpenShift GitOps operator via subscription: %v", err),
-						},
-					})
-				err2 := r.Client.Status().Update(context.TODO(), instance)
-				if err2 != nil {
-					klog.Errorf("failed to update GitOpsCluster %s status after OLM AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
-					return 3, err2
-				}
-				return 3, err
-			}
-
-			r.updateGitOpsClusterConditions(instance, "", "",
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
-						Status:  metav1.ConditionTrue,
-						Reason:  gitopsclusterV1beta1.ReasonSuccess,
-						Message: "OLM AddOnTemplate created/updated successfully",
-					},
-				})
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Warningf("failed to update GitOpsCluster %s status after OLM AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
-			}
-		}
-
-		// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace (only needed for ArgoCD agent mode)
 		if argoCDAgentEnabled {
+			// ArgoCD agent is enabled - need dynamic templates with custom signer registration
 			argoNamespace := instance.Namespace
 			if argoNamespace == "" {
 				argoNamespace = utils.GitOpsNamespace
 			}
 
+			// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
 			if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
 				klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
 				r.updateGitOpsClusterConditions(instance, "failed",
@@ -814,42 +845,157 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			}
 			klog.Infof("Successfully ensured addon-manager-controller RBAC resources in ArgoCD namespace %s for ArgoCD agent mode", argoNamespace)
 
-			// Note: ArgoCD agent CA secret will be created later via certrotation
-			// when EnsureArgoCDAgentCASecret is called during certificate management
+			if olmSubscriptionEnabled {
+				// Mode 4: ArgoCD agent + OLM subscription (dynamic template with custom signer + OLM subscription)
+				klog.Infof("ArgoCD agent + OLM subscription mode enabled for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+				err = r.EnsureAddOnTemplateOLM(instance)
+				if err != nil {
+					klog.Errorf("failed to ensure ArgoCD agent OLM AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+					r.updateGitOpsClusterConditions(instance, "failed",
+						fmt.Sprintf("Failed to create ArgoCD agent OLM addon template: %v", err),
+						map[string]ConditionUpdate{
+							gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+								Status:  metav1.ConditionFalse,
+								Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+								Message: fmt.Sprintf("Failed to create the addon template for ArgoCD agent + OLM: %v", err),
+							},
+							gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+								Status:  metav1.ConditionFalse,
+								Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+								Message: fmt.Sprintf("Failed to create the OLM addon template: %v", err),
+							},
+						})
+					err2 := r.Client.Status().Update(context.TODO(), instance)
+					if err2 != nil {
+						klog.Errorf("failed to update GitOpsCluster %s status after ArgoCD agent OLM AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
+						return 3, err2
+					}
+					return 3, err
+				}
 
-			// Ensure AddOnTemplate for this GitOpsCluster (only when ArgoCD agent is enabled)
-			err = r.EnsureAddOnTemplate(instance)
-			if err != nil {
-				klog.Errorf("failed to ensure AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
-				r.updateGitOpsClusterConditions(instance, "failed",
-					fmt.Sprintf("Failed to create addon template: %v", err),
+				r.updateGitOpsClusterConditions(instance, "", "",
 					map[string]ConditionUpdate{
 						gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
-							Status:  metav1.ConditionFalse,
-							Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
-							Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "ArgoCD agent + OLM AddOnTemplate created/updated successfully",
+						},
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "OLM AddOnTemplate created/updated successfully",
 						},
 					})
 				err2 := r.Client.Status().Update(context.TODO(), instance)
 				if err2 != nil {
-					klog.Errorf("failed to update GitOpsCluster %s status after AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
-					return 3, err2
+					klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD agent OLM AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 				}
-				return 3, err
-			}
+			} else {
+				// Mode 3: ArgoCD agent without OLM (dynamic template with custom signer)
+				klog.Infof("ArgoCD agent mode enabled for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
+				err = r.EnsureAddOnTemplate(instance)
+				if err != nil {
+					klog.Errorf("failed to ensure AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+					r.updateGitOpsClusterConditions(instance, "failed",
+						fmt.Sprintf("Failed to create addon template: %v", err),
+						map[string]ConditionUpdate{
+							gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+								Status:  metav1.ConditionFalse,
+								Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+								Message: fmt.Sprintf("Failed to create the addon template required for deploying GitOps components to managed clusters: %v", err),
+							},
+						})
+					err2 := r.Client.Status().Update(context.TODO(), instance)
+					if err2 != nil {
+						klog.Errorf("failed to update GitOpsCluster %s status after AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
+						return 3, err2
+					}
+					return 3, err
+				}
 
-			r.updateGitOpsClusterConditions(instance, "", "",
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
-						Status:  metav1.ConditionTrue,
-						Reason:  gitopsclusterV1beta1.ReasonSuccess,
-						Message: "AddOnTemplate created/updated successfully",
-					},
-				})
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "AddOnTemplate created/updated successfully",
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
+				}
 			}
+		} else if olmSubscriptionEnabled {
+			// Mode 2: OLM subscription without ArgoCD agent
+			// Check if custom OLM subscription values are specified
+			hasCustomOLMValues := HasCustomOLMSubscriptionValues(instance.Spec.GitOpsAddon.OLMSubscription)
+			if hasCustomOLMValues {
+				// Mode 2b: OLM subscription with custom values (create dynamic template)
+				klog.Infof("OLM subscription mode with custom values enabled for GitOpsCluster %s/%s - creating dynamic OLM template", instance.Namespace, instance.Name)
+				err = r.EnsureOLMAddOnTemplate(instance)
+				if err != nil {
+					klog.Errorf("failed to ensure OLM AddOnTemplate for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+					r.updateGitOpsClusterConditions(instance, "failed",
+						fmt.Sprintf("Failed to create OLM addon template: %v", err),
+						map[string]ConditionUpdate{
+							gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+								Status:  metav1.ConditionFalse,
+								Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+								Message: fmt.Sprintf("Failed to create the OLM addon template: %v", err),
+							},
+							gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+								Status:  metav1.ConditionFalse,
+								Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+								Message: fmt.Sprintf("Failed to create the OLM addon template: %v", err),
+							},
+						})
+					err2 := r.Client.Status().Update(context.TODO(), instance)
+					if err2 != nil {
+						klog.Errorf("failed to update GitOpsCluster %s status after OLM AddOnTemplate failure: %s", instance.Namespace+"/"+instance.Name, err2)
+						return 3, err2
+					}
+					return 3, err
+				}
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterAddOnTemplateReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "OLM AddOnTemplate created/updated successfully",
+						},
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "OLM AddOnTemplate created/updated successfully",
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Warningf("failed to update GitOpsCluster %s status after OLM AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
+				}
+			} else {
+				// Mode 2: OLM subscription without custom values (use static template)
+				klog.Infof("OLM subscription mode enabled (without ArgoCD agent) for GitOpsCluster %s/%s - using static gitops-addon-olm template", instance.Namespace, instance.Name)
+				// Static template gitops-addon-olm is defined in addonTemplates.yaml
+				// No need to create dynamic template, just update the condition
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "Using static gitops-addon-olm AddOnTemplate",
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Warningf("failed to update GitOpsCluster %s status after OLM template setup: %s", instance.Namespace+"/"+instance.Name, err2)
+				}
+			}
+		} else {
+			// Mode 1: Default mode without ArgoCD agent and without OLM (uses static gitops-addon template)
+			klog.Infof("Default GitOps addon mode for GitOpsCluster %s/%s - using static gitops-addon template", instance.Namespace, instance.Name)
+			// Static template gitops-addon is defined in addonTemplates.yaml and set as default in ClusterManagementAddOn
 		}
 
 		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework
@@ -1182,6 +1328,10 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 			return 3, err
 		}
+
+		// Note: Hub ArgoCD CR must be configured by the user to use the generated TLS certificates
+		// The controller generates certificates but does NOT modify the hub ArgoCD CR
+		// See README.md for hub ArgoCD CR configuration examples
 	}
 
 	managedClustersStr := strings.Join(managedClusterNames, " ")

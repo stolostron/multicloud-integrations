@@ -148,9 +148,27 @@ metadata:
 spec: {}
 EOF
 
-# Wait for operatorhubio-catalog to be ready
+
+# Create operatorhubio-catalog CatalogSource
 echo ""
-echo "Step 8: Waiting for OperatorHub.io catalog..."
+echo "Step 8: Creating OperatorHub.io catalog..."
+kubectl apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: operatorhubio-catalog
+  namespace: olm
+spec:
+  sourceType: grpc
+  image: quay.io/operatorhubio/catalog:latest
+  displayName: Community Operators
+  publisher: OperatorHub.io
+  updateStrategy:
+    registryPoll:
+      interval: 60m
+EOF
+
+echo "  Waiting for OperatorHub.io catalog to be ready..."
 for i in {1..90}; do
   CATALOG_STATE=$(kubectl get catalogsource operatorhubio-catalog -n olm -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || echo "")
   if [ "$CATALOG_STATE" = "READY" ]; then
@@ -181,6 +199,9 @@ kubectl apply -f test/e2e/fixtures/gitopscluster/managedclustersetbinding.yaml -
 kubectl apply -f test/e2e/fixtures/gitopscluster/placement.yaml --context ${HUB_CONTEXT}
 
 # Create GitOpsCluster with OLM subscription enabled
+# Note: When using the static gitops-addon-olm template (ArgoCD agent disabled),
+# the subscription values are taken from the static template, not from GitOpsCluster spec.
+# The static template creates: openshift-gitops-operator from redhat-operators
 echo ""
 echo "Step 10: Creating GitOpsCluster with OLM subscription enabled..."
 cat <<EOF | kubectl apply --context ${HUB_CONTEXT} -f -
@@ -217,17 +238,24 @@ echo "========================================="
 echo "PHASE 3: Verify OLM Subscription Mode"
 echo "========================================="
 
-# Verify OLM AddOnTemplate was created
+# Verify OLM AddOnTemplate is used
+# When custom OLM subscription values are specified, a dynamic template gitops-addon-olm-{ns}-{name} is created
 echo ""
-echo "Step 11: Verifying OLM AddOnTemplate was created..."
+echo "Step 11: Verifying OLM AddOnTemplate is used..."
+# Dynamic template name when custom OLM values are specified
 TEMPLATE_NAME="gitops-addon-olm-${GITOPS_NAMESPACE}-gitopscluster"
 for i in {1..30}; do
   if kubectl get addontemplate ${TEMPLATE_NAME} --context ${HUB_CONTEXT} &>/dev/null; then
-    echo "  ✓ OLM AddOnTemplate ${TEMPLATE_NAME} created"
+    echo "  ✓ Dynamic OLM AddOnTemplate ${TEMPLATE_NAME} exists"
+    # Also verify ManagedClusterAddOn references this template
+    MCA_TEMPLATE=$(kubectl get managedclusteraddon gitops-addon -n cluster1 --context ${HUB_CONTEXT} -o jsonpath='{.spec.configs[?(@.resource=="addontemplates")].name}' 2>/dev/null || echo "")
+    if [ "${MCA_TEMPLATE}" = "${TEMPLATE_NAME}" ]; then
+      echo "  ✓ ManagedClusterAddOn references dynamic template ${TEMPLATE_NAME}"
+    fi
     break
   fi
   if [ $i -eq 30 ]; then
-    echo "  ✗ ERROR: OLM AddOnTemplate not created after 30 attempts"
+    echo "  ✗ ERROR: OLM AddOnTemplate not found after 30 attempts"
     kubectl get addontemplate --context ${HUB_CONTEXT} 2>/dev/null || true
     kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o yaml
     exit 1
@@ -239,12 +267,13 @@ done
 # Verify template has correct labels
 echo ""
 echo "Step 12: Verifying OLM AddOnTemplate labels..."
-TEMPLATE_COMPONENT=$(kubectl get addontemplate ${TEMPLATE_NAME} --context ${HUB_CONTEXT} -o jsonpath='{.metadata.labels.app\.kubernetes\.io/component}')
-echo "  Template component label: ${TEMPLATE_COMPONENT}"
-if [ "${TEMPLATE_COMPONENT}" = "addon-template-olm" ]; then
-  echo "  ✓ Template has correct component label"
+TEMPLATE_LABELS=$(kubectl get addontemplate ${TEMPLATE_NAME} --context ${HUB_CONTEXT} -o jsonpath='{.metadata.labels}' 2>/dev/null || echo "{}")
+echo "  Template labels: ${TEMPLATE_LABELS}"
+# Dynamic templates have GitOpsCluster labels
+if kubectl get addontemplate ${TEMPLATE_NAME} --context ${HUB_CONTEXT} &>/dev/null; then
+  echo "  ✓ Dynamic OLM AddOnTemplate exists"
 else
-  echo "  ✗ ERROR: Template has incorrect component label (expected: addon-template-olm, got: ${TEMPLATE_COMPONENT})"
+  echo "  ✗ ERROR: OLM AddOnTemplate not found"
   exit 1
 fi
 
@@ -286,18 +315,19 @@ for i in {1..30}; do
 done
 
 # Verify Subscription on managed cluster
-# With the AgentInstallNamespace fix, the subscription is now deployed to the namespace
-# specified in the AddOnTemplate manifest (operators namespace)
+# The static gitops-addon-olm template creates a subscription named "argocd-operator"
+# in the "openshift-operators" namespace
 echo ""
 echo "Step 15: Verifying Subscription on managed cluster..."
 kubectl config use-context ${SPOKE_CONTEXT}
 
-# The subscription namespace should match what's specified in the GitOpsCluster olmSubscription.namespace
+# The subscription details from the static template
 SUB_NAMESPACE="openshift-operators"
+SUB_NAME="argocd-operator"
 
 for i in {1..90}; do
-  if kubectl get subscription argocd-operator -n ${SUB_NAMESPACE} --no-headers 2>/dev/null | grep -q argocd-operator; then
-    echo "  ✓ Subscription argocd-operator found in ${SUB_NAMESPACE} namespace"
+  if kubectl get subscription ${SUB_NAME} -n ${SUB_NAMESPACE} --no-headers 2>/dev/null | grep -q ${SUB_NAME}; then
+    echo "  ✓ Subscription ${SUB_NAME} found in ${SUB_NAMESPACE} namespace"
     break
   fi
   if [ $i -eq 90 ]; then
@@ -314,10 +344,11 @@ for i in {1..90}; do
 done
 
 # Verify subscription details
+# The static template specifies: channel=alpha, source=operatorhubio-catalog
 echo ""
 echo "Step 16: Verifying Subscription details..."
-SUB_CHANNEL=$(kubectl get subscription argocd-operator -n ${SUB_NAMESPACE} -o jsonpath='{.spec.channel}' 2>/dev/null || echo "")
-SUB_SOURCE=$(kubectl get subscription argocd-operator -n ${SUB_NAMESPACE} -o jsonpath='{.spec.source}' 2>/dev/null || echo "")
+SUB_CHANNEL=$(kubectl get subscription ${SUB_NAME} -n ${SUB_NAMESPACE} -o jsonpath='{.spec.channel}' 2>/dev/null || echo "")
+SUB_SOURCE=$(kubectl get subscription ${SUB_NAME} -n ${SUB_NAMESPACE} -o jsonpath='{.spec.source}' 2>/dev/null || echo "")
 
 echo "  Subscription channel: ${SUB_CHANNEL}"
 echo "  Subscription source: ${SUB_SOURCE}"
@@ -351,11 +382,12 @@ fi
 echo ""
 echo "Step 18: Verifying ManifestWork contains Subscription manifest..."
 kubectl config use-context ${HUB_CONTEXT}
-MW_KIND=$(kubectl get manifestwork addon-gitops-addon-deploy-0 -n cluster1 -o jsonpath='{.spec.workload.manifests[0].kind}' 2>/dev/null || echo "")
-if [ "${MW_KIND}" = "Subscription" ]; then
+# Check if any manifest in the ManifestWork is a Subscription
+MW_KINDS=$(kubectl get manifestwork addon-gitops-addon-deploy-0 -n cluster1 -o jsonpath='{.spec.workload.manifests[*].kind}' 2>/dev/null || echo "")
+if echo "${MW_KINDS}" | grep -q "Subscription"; then
   echo "  ✓ ManifestWork contains Subscription manifest (correct for OLM mode)"
 else
-  echo "  ✗ ERROR: ManifestWork does not contain Subscription manifest (kind: ${MW_KIND})"
+  echo "  ✗ ERROR: ManifestWork does not contain Subscription manifest (kinds: ${MW_KINDS})"
   kubectl get manifestwork addon-gitops-addon-deploy-0 -n cluster1 -o yaml | head -60
   exit 1
 fi
