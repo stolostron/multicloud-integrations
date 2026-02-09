@@ -678,7 +678,8 @@ func TestDiscoverServerAddressAndPort(t *testing.T) {
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
+				Client:    fakeClient,
+				apiReader: fakeClient, // Use same fake client as apiReader for route discovery
 			}
 
 			err := reconciler.DiscoverServerAddressAndPort(context.TODO(), tt.gitOpsCluster)
@@ -1020,7 +1021,8 @@ func TestDiscoverFromRoute(t *testing.T) {
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
+				Client:    fakeClient,
+				apiReader: fakeClient, // Use same fake client as apiReader for route discovery
 			}
 
 			address, port, err := reconciler.discoverFromRoute(context.TODO(), tt.argoNamespace)
@@ -1330,7 +1332,8 @@ func TestDiscoverServerAddressAndPort_RoutePreference(t *testing.T) {
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
+				Client:    fakeClient,
+				apiReader: fakeClient, // Use same fake client as apiReader for route discovery
 			}
 
 			err := reconciler.DiscoverServerAddressAndPort(context.TODO(), tt.gitOpsCluster)

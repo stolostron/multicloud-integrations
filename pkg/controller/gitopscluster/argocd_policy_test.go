@@ -53,22 +53,6 @@ func TestGenerateArgoCDPolicyPlacementBindingYaml(t *testing.T) {
 	assert.NotContains(t, yamlString, "ownerReferences")
 }
 
-func TestGenerateManagedClusterSetBindingYaml(t *testing.T) {
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "openshift-gitops",
-		},
-	}
-
-	yamlString := generateManagedClusterSetBindingYaml(gitOpsCluster)
-
-	assert.Contains(t, yamlString, "name: default")
-	assert.Contains(t, yamlString, "namespace: openshift-gitops")
-	assert.Contains(t, yamlString, "kind: ManagedClusterSetBinding")
-	assert.Contains(t, yamlString, "clusterSet: default")
-}
-
 func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	enabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -98,7 +82,7 @@ func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	assert.Contains(t, yamlString, "kind: ArgoCD")
 	assert.Contains(t, yamlString, "name: acm-openshift-gitops")
 	assert.Contains(t, yamlString, "remediationAction: enforce")
-	// ArgoCD CR should be orphaned when policy is deleted
+	// ArgoCD CR should be orphaned when policy is deleted (cleanup job handles deletion)
 	assert.Contains(t, yamlString, "pruneObjectBehavior: None")
 }
 

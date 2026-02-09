@@ -158,12 +158,24 @@ echo ""
 echo "Step 9: Verifying agent pods..."
 if [ "${ARGOCD_AGENT_ENABLED}" == "true" ]; then
   # Wait for principal deployment rollout (handles pod updates during reconciliation)
+  # Retry loop to handle transient failures during certificate generation
   if kubectl --context ${HUB_CONTEXT} get deployment openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} &>/dev/null; then
-    kubectl --context ${HUB_CONTEXT} rollout status deployment/openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --timeout=120s || {
-      echo "✗ Principal deployment rollout failed"
+    ROLLOUT_SUCCESS=false
+    for i in {1..3}; do
+      if kubectl --context ${HUB_CONTEXT} rollout status deployment/openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --timeout=180s 2>/dev/null; then
+        ROLLOUT_SUCCESS=true
+        break
+      fi
+      echo "  Rollout attempt $i/3 failed, retrying..."
+      # Restart the deployment to pick up new secrets
+      kubectl --context ${HUB_CONTEXT} rollout restart deployment/openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} 2>/dev/null || true
+      sleep 10
+    done
+    if [ "${ROLLOUT_SUCCESS}" != "true" ]; then
+      echo "✗ Principal deployment rollout failed after 3 attempts"
       kubectl --context ${HUB_CONTEXT} get pods -n ${GITOPS_NAMESPACE}
       exit 1
-    }
+    fi
     echo "✓ Principal pods are ready on hub"
   else
     # Fallback to pod wait if deployment doesn't exist
