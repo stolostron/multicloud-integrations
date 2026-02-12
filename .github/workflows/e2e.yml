@@ -7,14 +7,9 @@ on:
       - main
 
 env:
-  # Common versions
   GO_VERSION: '1.24'
   GO_REQUIRED_MIN_VERSION: ''
   GOPATH: '/home/runner/work/multicloud-integrations/multicloud-integrations/go'
-  # ArgoCD images to pre-load (avoids rate limits)
-  ARGOCD_IMAGE: quay.io/argoproj/argocd:v2.13.0
-  ARGOCD_OPERATOR_IMAGE: quay.io/argoprojlabs/argocd-operator:latest
-  REDIS_IMAGE: redis:7.0.15-alpine
 
 defaults:
   run:
@@ -45,47 +40,23 @@ jobs:
         run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
       - name: build-images
         run: make build-images
-      - name: Pre-pull ArgoCD images
-        run: |
-          echo "Pre-pulling ArgoCD images to avoid rate limits..."
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
-          done
-          echo "All images pulled successfully"
       - name: setup kind
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: cluster1
       - name: setup kind
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: hub
-      - name: Load images into Kind clusters
+      - name: Load locally built image into Kind clusters
         run: |
-          echo "Loading images into Kind clusters..."
-          # Load multicloud-integrations image to hub (where controller runs)
-          kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
-          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
-          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
-          # Load ArgoCD image to hub (for applicationset-controller)
-          kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to hub
-          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Load ArgoCD image to cluster1 (for repo-server and application-controller)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Redis only needed on cluster1 (hub scales it down)
-          kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
-          echo "All images loaded successfully"
+          # Only the locally built image needs loading - it doesn't exist in any registry.
+          # All other images (argocd, argocd-operator, redis) are in public registries
+          # and will be pulled by the Kind nodes at runtime.
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
       - name: Run e2e test
         run: |
           make test-e2e
@@ -109,66 +80,30 @@ jobs:
         with:
           fetch-depth: 1
           path: go/src/github.com/open-cluster-management/multicloud-integrations
-      
       - name: install Go
         uses: actions/setup-go@v3
         with:
           go-version: ${{ env.GO_VERSION }}
-      
       - name: Add GOPATH/bin to PATH
         run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
-      
       - name: install imagebuilder
         run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
-      
       - name: build-images
         run: make build-images
-      
-      - name: Pre-pull ArgoCD images
-        run: |
-          echo "Pre-pulling ArgoCD images to avoid rate limits..."
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
-          done
-          echo "All images pulled successfully"
-      
       - name: setup kind (cluster1)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: cluster1
-      
       - name: setup kind (hub)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: hub
-      
-      - name: Load images into Kind clusters
+      - name: Load locally built image into Kind clusters
         run: |
-          echo "Loading images into Kind clusters..."
-          # Load multicloud-integrations image to hub (where controller runs)
-          kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
-          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
-          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
-          # Load ArgoCD image to hub (for applicationset-controller)
-          kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to hub
-          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Load ArgoCD image to cluster1 (for repo-server and application-controller)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Redis only needed on cluster1 (hub scales it down)
-          kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
-          echo "All images loaded successfully"
-      
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
       - name: Run e2e gitopsaddon test
         env:
           KUBECONFIG: /home/runner/.kube/config
@@ -191,66 +126,30 @@ jobs:
         with:
           fetch-depth: 1
           path: go/src/github.com/open-cluster-management/multicloud-integrations
-      
       - name: install Go
         uses: actions/setup-go@v3
         with:
           go-version: ${{ env.GO_VERSION }}
-      
       - name: Add GOPATH/bin to PATH
         run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
-      
       - name: install imagebuilder
         run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
-      
       - name: build-images
         run: make build-images
-      
-      - name: Pre-pull ArgoCD images
-        run: |
-          echo "Pre-pulling ArgoCD images to avoid rate limits..."
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
-          done
-          echo "All images pulled successfully"
-      
       - name: setup kind (cluster1)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: cluster1
-      
       - name: setup kind (hub)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: hub
-      
-      - name: Load images into Kind clusters
+      - name: Load locally built image into Kind clusters
         run: |
-          echo "Loading images into Kind clusters..."
-          # Load multicloud-integrations image to hub (where controller runs)
-          kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
-          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
-          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
-          # Load ArgoCD image to hub (for applicationset-controller)
-          kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to hub
-          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Load ArgoCD image to cluster1 (for repo-server and application-controller)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Redis only needed on cluster1 (hub scales it down)
-          kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
-          echo "All images loaded successfully"
-      
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
       - name: Run e2e gitopsaddon cleanup test
         env:
           KUBECONFIG: /home/runner/.kube/config
@@ -283,47 +182,20 @@ jobs:
         run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
       - name: build-images
         run: make build-images
-      - name: Pre-pull ArgoCD images
-        run: |
-          echo "Pre-pulling ArgoCD images to avoid rate limits..."
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.ARGOCD_OPERATOR_IMAGE }} && break || sleep 10
-          done
-          for i in 1 2 3; do
-            docker pull ${{ env.REDIS_IMAGE }} && break || sleep 10
-          done
-          echo "All images pulled successfully"
       - name: setup kind (cluster1)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: cluster1
       - name: setup kind (hub)
         uses: engineerd/setup-kind@v0.5.0
         with:
-          version: v0.14.0
+          version: v0.25.0
           name: hub
-      - name: Load images into Kind clusters
+      - name: Load locally built image into Kind clusters
         run: |
-          echo "Loading images into Kind clusters..."
-          # Load multicloud-integrations image to hub (where controller runs)
-          kind load docker-image --name=hub quay.io/stolostron/multicloud-integrations:latest
-          # Load multicloud-integrations image to cluster1 (where gitops-addon runs)
-          kind load docker-image --name=cluster1 quay.io/stolostron/multicloud-integrations:latest
-          # Load ArgoCD image to hub (for applicationset-controller)
-          kind load docker-image --name=hub ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to hub
-          kind load docker-image --name=hub ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Load ArgoCD image to cluster1 (for repo-server and application-controller)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_IMAGE }}
-          # Load ArgoCD operator image to cluster1 (for gitops-addon deploying operator)
-          kind load docker-image --name=cluster1 ${{ env.ARGOCD_OPERATOR_IMAGE }}
-          # Redis only needed on cluster1 (hub scales it down)
-          kind load docker-image --name=cluster1 ${{ env.REDIS_IMAGE }}
-          echo "All images loaded successfully"
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
       - name: Run e2e OLM subscription test
         env:
           KUBECONFIG: /home/runner/.kube/config

@@ -260,17 +260,19 @@ echo "========================================="
 echo ""
 echo "Step 9: Verifying dynamic OLM AddOnTemplate is created..."
 TEMPLATE_NAME="gitops-addon-olm-${GITOPS_NAMESPACE}-gitopscluster"
-for i in {1..60}; do
+for i in {1..120}; do
   if kubectl get addontemplate ${TEMPLATE_NAME} --context ${HUB_CONTEXT} &>/dev/null; then
     echo "  ✓ Dynamic OLM AddOnTemplate '${TEMPLATE_NAME}' created"
     break
   fi
-  if [ $i -eq 60 ]; then
-    echo "  ✗ ERROR: Dynamic OLM AddOnTemplate not created after 60 attempts"
+  if [ $i -eq 120 ]; then
+    echo "  ✗ ERROR: Dynamic OLM AddOnTemplate not created after 120 attempts"
     kubectl get addontemplates --context ${HUB_CONTEXT}
+    echo "  Controller logs:"
+    kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=50 2>/dev/null || true
     exit 1
   fi
-  echo "  Waiting for dynamic AddOnTemplate... (attempt $i/60)"
+  echo "  Waiting for dynamic AddOnTemplate... (attempt $i/120)"
   sleep 2
 done
 

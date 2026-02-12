@@ -35,13 +35,8 @@ IMAGE_NAME_AND_VERSION ?= $(REGISTRY)/multicloud-integrations:$(VERSION)
 CLUSTERADM_VERSION ?= v1.1.1
 export GOPACKAGES   = $(shell go list ./... | grep -v /manager | grep -v /bindata  | grep -v /vendor | grep -v /internal | grep -v /build | grep -v /test | grep -v /e2e )
 
-TEST_TMP :=/tmp
-export KUBEBUILDER_ASSETS ?=$(TEST_TMP)/kubebuilder/bin
 K8S_VERSION ?=1.28.3
-GOHOSTOS ?=$(shell go env GOHOSTOS)
-GOHOSTARCH ?= $(shell go env GOHOSTARCH)
-KB_TOOLS_ARCHIVE_NAME :=kubebuilder-tools-$(K8S_VERSION)-$(GOHOSTOS)-$(GOHOSTARCH).tar.gz
-KB_TOOLS_ARCHIVE_PATH := $(TEST_TMP)/$(KB_TOOLS_ARCHIVE_NAME)
+SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 .PHONY: build
 
@@ -101,31 +96,25 @@ lint-go:
 .PHONY: test
 
 # download the kubebuilder-tools to get kube-apiserver binaries from it
-ensure-kubebuilder-tools:
-ifeq "" "$(wildcard $(KUBEBUILDER_ASSETS))"
-	$(info Downloading kube-apiserver into '$(KUBEBUILDER_ASSETS)')
-	mkdir -p '$(KUBEBUILDER_ASSETS)'
-	curl -s -f -L https://storage.googleapis.com/kubebuilder-tools/$(KB_TOOLS_ARCHIVE_NAME) -o '$(KB_TOOLS_ARCHIVE_PATH)'
-	tar -C '$(KUBEBUILDER_ASSETS)' --strip-components=2 -zvxf '$(KB_TOOLS_ARCHIVE_PATH)'
-else
-	$(info Using existing kube-apiserver from "$(KUBEBUILDER_ASSETS)")
-endif
-.PHONY: ensure-kubebuilder-tools
+.PHONY: setup-envtest
+setup-envtest: $(SETUP_ENVTEST)
+$(SETUP_ENVTEST): $(LOCALBIN)
+	test -s $(SETUP_ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
 test: test-unit
 
-test-unit: ensure-kubebuilder-tools
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./pkg/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./propagation-controller/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./gitopsaddon/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./maestroapplication/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -timeout 300s -v ./cmd/...
+test-unit: setup-envtest
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./pkg/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./propagation-controller/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./gitopsaddon/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./maestroapplication/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./cmd/...
 
-test-integration: ensure-kubebuilder-tools
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./pkg/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./propagation-controller/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./gitopsaddon/...
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test -tags=integration -timeout 300s -v ./maestroapplication/...
+test-integration: setup-envtest
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./pkg/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./propagation-controller/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./gitopsaddon/...
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./maestroapplication/...
 
 .PHONY: manifests
 manifests: controller-gen

@@ -35,6 +35,9 @@ import (
 //go:embed charts/openshift-gitops-operator/**
 var testFS embed.FS
 
+//go:embed routes-openshift-crd/**
+var testRouteCRDFS embed.FS
+
 func TestParseImageReference(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -386,7 +389,7 @@ func TestApplyCRDIfNotExists(t *testing.T) {
 				}
 			}
 
-			err := reconciler.applyCRDIfNotExists(tt.resource, tt.apiVersion, tt.yamlPath)
+			err := reconciler.applyCRDIfNotExists(testFS, tt.resource, tt.apiVersion, tt.yamlPath)
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -546,7 +549,7 @@ func TestApplyCRDIfNotExists_DirectCRDCheck(t *testing.T) {
 
 			// Run the function with a non-existent yaml path
 			// When CRD exists, it should skip without needing to read the yaml
-			err = reconciler.applyCRDIfNotExists(tt.resource, tt.apiVersion, "charts/nonexistent.yaml")
+			err = reconciler.applyCRDIfNotExists(testFS, tt.resource, tt.apiVersion, "charts/nonexistent.yaml")
 
 			if tt.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())

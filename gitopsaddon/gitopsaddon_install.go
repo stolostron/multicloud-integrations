@@ -43,14 +43,9 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 		Name: GitOpsOperatorNamespace,
 	}
 
-	// Install dependency CRDs if they don't already exist
-	// These stub CRDs are needed for Kind/EKS clusters that don't have OCP-specific resources
-	err := r.applyCRDIfNotExists("gitopsservices", "pipelines.openshift.io/v1alpha1", "charts/openshift-gitops-operator/templates/crds/gitopsservices.pipelines.openshift.io.crd.yaml")
-	if err != nil {
-		return err
-	}
-
-	err = r.applyCRDIfNotExists("routes", "route.openshift.io/v1", "charts/openshift-gitops-operator/templates/crds/routes.route.openshift.io.crd.yaml")
+	// Install the Route CRD if it doesn't already exist (e.g. on Kind/EKS clusters without OCP)
+	// The Route CRD is maintained separately from the operator chart to avoid overwriting OCP-provided Routes
+	err := r.applyCRDIfNotExists(RouteCRDFS, "routes", "route.openshift.io/v1", "routes-openshift-crd/routes.route.openshift.io.crd.yaml")
 	if err != nil {
 		return err
 	}
