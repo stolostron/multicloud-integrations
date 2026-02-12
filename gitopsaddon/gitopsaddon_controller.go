@@ -35,6 +35,9 @@ import (
 //go:embed charts/openshift-gitops-operator/**
 var ChartFS embed.FS
 
+//go:embed routes-openshift-crd/**
+var RouteCRDFS embed.FS
+
 // GitOpsNamespace is exported from pkg/utils for backward compatibility
 const GitOpsNamespace = utils.GitOpsNamespace
 
@@ -44,9 +47,10 @@ const GitOpsOperatorNamespace = utils.GitOpsOperatorNamespace
 // GitopsAddonReconciler reconciles a openshift gitops operator
 type GitopsAddonReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   *rest.Config
-	Interval int
+	Scheme    *runtime.Scheme
+	Config    *rest.Config
+	Interval  int
+	APIReader client.Reader // uncached reader for startup operations
 
 	// Config holds all image and configuration settings
 	AddonConfig *utils.GitOpsAddonConfig
@@ -69,6 +73,7 @@ func SetupWithManager(mgr manager.Manager, interval int, config *utils.GitOpsAdd
 		Scheme:      mgr.GetScheme(),
 		Config:      mgr.GetConfig(),
 		Interval:    interval,
+		APIReader:   mgr.GetAPIReader(),
 		AddonConfig: config,
 	}
 
@@ -95,6 +100,17 @@ func SetupCleanupWithManager(mgr manager.Manager, config *utils.GitOpsAddonConfi
 // Start implements manager.Runnable and blocks until the context is cancelled
 func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
 	klog.Info("Starting Gitops Addon controller")
+
+	// Clear any stale pause marker from a previous cleanup cycle.
+	// The cleanup Job creates a pause marker ConfigMap to prevent reconciliation during cleanup.
+	// On OCP (OLM mode), the Deployment runs in openshift-operators but the marker is in
+	// open-cluster-management-agent-addon, so the owner reference can't be set and
+	// the marker is never garbage collected. Since the controller is starting fresh,
+	// any existing marker is stale and should be removed.
+	// We use the uncached APIReader here because the controller-runtime informer cache
+	// may not have synced ConfigMaps yet at startup, causing the cached Get to miss
+	// markers that actually exist.
+	ClearStalePauseMarker(ctx, r.Client, r.APIReader)
 
 	// Perform initial reconciliation
 	r.reconcile(ctx)

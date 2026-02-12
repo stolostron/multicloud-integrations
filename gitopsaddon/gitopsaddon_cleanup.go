@@ -26,7 +26,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -111,6 +111,27 @@ func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOp
 		klog.Info("Step 5: Skipping cleanup verification (wait duration is 0)")
 	}
 
+	// Step 6: Delete the pause marker now that cleanup is done.
+	// This prevents a stale marker from blocking the addon if it is re-deployed.
+	klog.Info("Step 6: Deleting pause marker after successful cleanup")
+	ClearStalePauseMarker(ctx, c)
+
+	// Final Step: Delete the gitops-addon ClusterRoleBinding (self-referencing RBAC)
+	// This MUST be the very last action because it removes the cleanup Job's permissions.
+	// It was intentionally skipped during Step 4 to preserve permissions for resource cleanup.
+	klog.Info("Final Step: Deleting gitops-addon ClusterRoleBinding (self-referencing RBAC)")
+	addonCRB := &unstructured.Unstructured{}
+	addonCRB.SetAPIVersion("rbac.authorization.k8s.io/v1")
+	addonCRB.SetKind("ClusterRoleBinding")
+	addonCRB.SetName(AddonDeploymentName)
+	if delErr := c.Delete(ctx, addonCRB); delErr != nil {
+		if !apierrors.IsNotFound(delErr) {
+			klog.Warningf("Failed to delete gitops-addon ClusterRoleBinding: %v", delErr)
+		}
+	} else {
+		klog.Info("Successfully deleted gitops-addon ClusterRoleBinding")
+	}
+
 	if len(errors) > 0 {
 		klog.Errorf("Gitops agent addon uninstall completed with %d error(s)", len(errors))
 		// Return the first error but log all of them
@@ -134,7 +155,7 @@ func deleteGitOpsServiceCR(ctx context.Context, c client.Client) error {
 
 	err := c.Delete(ctx, gitOpsService)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			klog.Info("GitOpsService CR not found (expected if not using OLM mode)")
 			return nil
 		}
@@ -177,7 +198,7 @@ func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namesp
 		client.InNamespace(namespace),
 		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return err
@@ -185,7 +206,7 @@ func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namesp
 
 	for _, sub := range subscriptions.Items {
 		klog.Infof("Deleting Subscription: %s/%s", namespace, sub.GetName())
-		if err := c.Delete(ctx, &sub); err != nil && !errors.IsNotFound(err) {
+		if err := c.Delete(ctx, &sub); err != nil && !apierrors.IsNotFound(err) {
 			klog.Warningf("Failed to delete Subscription %s: %v", sub.GetName(), err)
 		}
 	}
@@ -201,7 +222,7 @@ func deleteCSVsInNamespace(ctx context.Context, c client.Client, namespace strin
 
 	err := c.List(ctx, csvs, client.InNamespace(namespace))
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return err
@@ -212,7 +233,7 @@ func deleteCSVsInNamespace(ctx context.Context, c client.Client, namespace strin
 		// Delete argocd-operator or openshift-gitops-operator CSVs
 		if containsArgoCD(name) {
 			klog.Infof("Deleting CSV: %s/%s", namespace, name)
-			if err := c.Delete(ctx, &csv); err != nil && !errors.IsNotFound(err) {
+			if err := c.Delete(ctx, &csv); err != nil && !apierrors.IsNotFound(err) {
 				klog.Warningf("Failed to delete CSV %s: %v", name, err)
 			}
 		}
@@ -266,7 +287,7 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 			for _, argoCD := range argoCDList.Items {
 				name := argoCD.GetName()
 				klog.Infof("Deleting ArgoCD CR: %s/%s (elapsed: %v)", GitOpsNamespace, name, elapsed)
-				if err := c.Delete(ctx, &argoCD); err != nil && !errors.IsNotFound(err) {
+				if err := c.Delete(ctx, &argoCD); err != nil && !apierrors.IsNotFound(err) {
 					klog.Warningf("Failed to delete ArgoCD CR %s: %v", name, err)
 				} else {
 					deleted = true
@@ -406,12 +427,22 @@ func deleteResourcesByType(ctx context.Context, c client.Client, resourceTypes [
 					continue
 				}
 
+				// IMPORTANT: Skip the gitops-addon ClusterRoleBinding during operator resource cleanup.
+				// This is the service account's own RBAC - deleting it would remove the cleanup Job's
+				// permissions and prevent it from cleaning up remaining resources.
+				// The gitops-addon ClusterRoleBinding is deleted as the very last step in
+				// uninstallGitopsAgentInternal after all other resources are cleaned up.
+				if rt.kind == "ClusterRoleBinding" && item.GetName() == AddonDeploymentName {
+					klog.Infof("Skipping %s %s (self-referencing RBAC, will be deleted last)", rt.kind, item.GetName())
+					continue
+				}
+
 				location := item.GetName()
 				if namespace != "" {
 					location = fmt.Sprintf("%s/%s", namespace, item.GetName())
 				}
 				klog.Infof("Deleting %s: %s", rt.kind, location)
-				if err := c.Delete(ctx, &item); err != nil && !errors.IsNotFound(err) {
+				if err := c.Delete(ctx, &item); err != nil && !apierrors.IsNotFound(err) {
 					klog.Warningf("Failed to delete %s %s: %v", rt.kind, location, err)
 				}
 				allDeleted = false
@@ -480,7 +511,7 @@ func createPauseMarker(ctx context.Context, c client.Client) error {
 		Namespace: AddonNamespace,
 	}
 	if err := c.Get(ctx, deploymentKey, deployment); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			klog.Warningf("Deployment %s not found in namespace %s, creating pause marker without owner reference", AddonDeploymentName, AddonNamespace)
 			// Continue without owner reference if deployment doesn't exist
 		} else {
@@ -521,12 +552,53 @@ func createPauseMarker(ctx context.Context, c client.Client) error {
 	}
 
 	err := c.Create(ctx, pauseMarker)
-	if err != nil && !errors.IsAlreadyExists(err) {
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create pause marker: %w", err)
 	}
 
 	klog.Infof("Pause marker created successfully in namespace: %s", AddonNamespace)
 	return nil
+}
+
+// ClearStalePauseMarker deletes the pause marker ConfigMap if it exists.
+// Called at controller startup to clear markers left over from a previous cleanup cycle.
+// On OCP (OLM mode), the pause marker can't use owner references because the Deployment
+// and the marker are in different namespaces, so the marker is never garbage collected.
+//
+// The reader parameter is used for the Get operation - at controller startup this should
+// be an uncached API reader (mgr.GetAPIReader()) because the controller-runtime cache
+// may not have synced ConfigMaps yet when Start() is called.
+// The client parameter is used for the Delete operation.
+func ClearStalePauseMarker(ctx context.Context, c client.Client, readers ...client.Reader) {
+	// Use provided reader for Get, or fall back to the client
+	var reader client.Reader = c
+	if len(readers) > 0 && readers[0] != nil {
+		reader = readers[0]
+	}
+
+	pauseMarker := &corev1.ConfigMap{}
+	key := types.NamespacedName{
+		Name:      PauseMarkerName,
+		Namespace: AddonNamespace,
+	}
+
+	err := reader.Get(ctx, key, pauseMarker)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.Info("No stale pause marker found at startup")
+			return // No marker, nothing to do
+		}
+		klog.Warningf("Error checking for stale pause marker: %v", err)
+		return
+	}
+
+	klog.Infof("Found stale pause marker from previous cleanup (timestamp: %s), deleting it",
+		pauseMarker.Data["timestamp"])
+	if err := c.Delete(ctx, pauseMarker); err != nil && !apierrors.IsNotFound(err) {
+		klog.Warningf("Failed to delete stale pause marker: %v", err)
+	} else {
+		klog.Info("Successfully deleted stale pause marker")
+	}
 }
 
 // IsPaused checks if the gitops-addon controller should be paused
@@ -541,7 +613,7 @@ func IsPaused(ctx context.Context, c client.Client) bool {
 
 	err := c.Get(ctx, key, pauseMarker)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return false
 		}
 		klog.Warningf("Error checking pause marker: %v", err)
@@ -614,7 +686,7 @@ func verifyNamespaceCleanup(ctx context.Context, c client.Client, namespace stri
 		client.InNamespace(namespace),
 		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
 
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return false, err
 	}
 

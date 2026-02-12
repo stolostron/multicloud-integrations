@@ -231,6 +231,261 @@ func TestIsPaused(t *testing.T) {
 	}
 }
 
+// TestClearStalePauseMarker tests the ClearStalePauseMarker function
+func TestClearStalePauseMarker(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name            string
+		existingObjects []client.Object
+		expectDeleted   bool
+	}{
+		{
+			name: "no_marker_exists_noop",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+			},
+			expectDeleted: false,
+		},
+		{
+			name: "stale_marker_deleted",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels: map[string]string{
+							"app": "gitops-addon",
+						},
+					},
+					Data: map[string]string{
+						"paused":    "true",
+						"reason":    "cleanup",
+						"timestamp": "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+			expectDeleted: true,
+		},
+		{
+			name: "marker_with_owner_ref_deleted",
+			existingObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: AddonNamespace,
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels: map[string]string{
+							"app": "gitops-addon",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "apps/v1",
+								Kind:       "Deployment",
+								Name:       AddonDeploymentName,
+								UID:        "old-uid",
+							},
+						},
+					},
+					Data: map[string]string{
+						"paused":    "true",
+						"reason":    "cleanup",
+						"timestamp": "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+			expectDeleted: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			err := clientgoscheme.AddToScheme(scheme)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			testClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			// Should not panic regardless of state
+			ClearStalePauseMarker(context.TODO(), testClient)
+
+			// Verify the marker is gone
+			paused := IsPaused(context.TODO(), testClient)
+			if tt.expectDeleted {
+				g.Expect(paused).To(gomega.BeFalse(), "Expected pause marker to be deleted")
+			} else {
+				g.Expect(paused).To(gomega.BeFalse(), "Expected no pause marker")
+			}
+
+			// Double-check: ConfigMap should not exist
+			cm := &corev1.ConfigMap{}
+			err = testClient.Get(context.TODO(), types.NamespacedName{
+				Name:      PauseMarkerName,
+				Namespace: AddonNamespace,
+			}, cm)
+			if tt.expectDeleted {
+				g.Expect(err).To(gomega.HaveOccurred(), "Expected ConfigMap to be deleted")
+			}
+		})
+	}
+}
+
+// TestClearStalePauseMarkerWithExplicitReader tests the ClearStalePauseMarker function
+// with an explicit reader parameter, simulating the real startup scenario where
+// the controller-runtime cache (client.Client) may not have synced yet but
+// the uncached APIReader can see the marker.
+func TestClearStalePauseMarkerWithExplicitReader(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	tests := []struct {
+		name                string
+		readerObjects       []client.Object // objects visible to the reader
+		clientObjects       []client.Object // objects visible to the client
+		expectDeleted       bool
+		description         string
+	}{
+		{
+			name: "reader_sees_marker_client_does_not",
+			// Simulate: uncached APIReader sees the marker, but cached client doesn't yet
+			readerObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels:    map[string]string{"app": "gitops-addon"},
+					},
+					Data: map[string]string{
+						"paused":    "true",
+						"reason":    "cleanup",
+						"timestamp": "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+			// Client also has it (fake client shares state, so delete works)
+			clientObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels:    map[string]string{"app": "gitops-addon"},
+					},
+					Data: map[string]string{
+						"paused":    "true",
+						"reason":    "cleanup",
+						"timestamp": "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+			expectDeleted: true,
+			description:   "Reader finds marker and client deletes it",
+		},
+		{
+			name: "reader_sees_no_marker",
+			readerObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace},
+				},
+			},
+			clientObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace},
+				},
+			},
+			expectDeleted: false,
+			description:   "No marker exists, no-op",
+		},
+		{
+			name: "nil_reader_falls_back_to_client",
+			readerObjects: nil, // nil reader - should fall back to client
+			clientObjects: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      PauseMarkerName,
+						Namespace: AddonNamespace,
+						Labels:    map[string]string{"app": "gitops-addon"},
+					},
+					Data: map[string]string{
+						"paused":    "true",
+						"reason":    "cleanup",
+						"timestamp": "2025-01-01T00:00:00Z",
+					},
+				},
+			},
+			expectDeleted: true,
+			description:   "Nil reader falls back to client which finds and deletes marker",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build the main client (used for Delete)
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			if len(tt.clientObjects) > 0 {
+				clientBuilder = clientBuilder.WithObjects(tt.clientObjects...)
+			}
+			testClient := clientBuilder.Build()
+
+			if tt.readerObjects == nil {
+				// Pass nil reader - should fall back to client
+				ClearStalePauseMarker(context.TODO(), testClient, nil)
+			} else {
+				// Build a separate reader (simulates uncached APIReader)
+				readerBuilder := fake.NewClientBuilder().WithScheme(scheme)
+				if len(tt.readerObjects) > 0 {
+					readerBuilder = readerBuilder.WithObjects(tt.readerObjects...)
+				}
+				testReader := readerBuilder.Build()
+
+				ClearStalePauseMarker(context.TODO(), testClient, testReader)
+			}
+
+			// Verify result
+			cm := &corev1.ConfigMap{}
+			getErr := testClient.Get(context.TODO(), types.NamespacedName{
+				Name:      PauseMarkerName,
+				Namespace: AddonNamespace,
+			}, cm)
+
+			if tt.expectDeleted {
+				g.Expect(getErr).To(gomega.HaveOccurred(), tt.description+": marker should be deleted")
+			} else {
+				// Marker didn't exist to begin with
+				paused := IsPaused(context.TODO(), testClient)
+				g.Expect(paused).To(gomega.BeFalse(), tt.description+": should not be paused")
+			}
+		})
+	}
+}
+
 // TestContainsArgoCD tests the containsArgoCD helper function
 func TestContainsArgoCD(t *testing.T) {
 	tests := []struct {
