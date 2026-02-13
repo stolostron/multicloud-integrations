@@ -65,7 +65,6 @@ jobs:
 
   e2e-gitopsaddon:
     name: e2e-gitopsaddon
-    needs: e2e
     runs-on: ubuntu-latest
     steps:
       - name: Free up disk space
@@ -111,7 +110,6 @@ jobs:
 
   e2e-gitopsaddon-cleanup:
     name: e2e-gitopsaddon-cleanup
-    needs: e2e-gitopsaddon
     runs-on: ubuntu-latest
     steps:
       - name: Free up disk space
@@ -155,9 +153,98 @@ jobs:
           KUBECONFIG: /home/runner/.kube/config
         run: make test-e2e-gitopsaddon-cleanup
 
+  e2e-gitopsaddon-agent:
+    name: e2e-gitopsaddon-agent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: hub
+      - name: Load locally built image into Kind clusters
+        run: |
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+      - name: Run e2e gitopsaddon agent test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-gitopsaddon-agent
+
+  e2e-gitopsaddon-agent-cleanup:
+    name: e2e-gitopsaddon-agent-cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: hub
+      - name: Load locally built image into Kind clusters
+        run: |
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+      - name: Run e2e gitopsaddon agent cleanup test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-gitopsaddon-agent-cleanup
+
   e2e-olm-subscription:
     name: e2e-olm-subscription
-    needs: e2e-gitopsaddon-cleanup
     runs-on: ubuntu-latest
     steps:
       - name: Free up disk space
@@ -200,3 +287,138 @@ jobs:
         env:
           KUBECONFIG: /home/runner/.kube/config
         run: make test-e2e-olm-subscription
+
+  e2e-olm-subscription-cleanup:
+    name: e2e-olm-subscription-cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: hub
+      - name: Load locally built image into Kind clusters
+        run: |
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+      - name: Run e2e OLM subscription cleanup test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-olm-subscription-cleanup
+
+  e2e-olm-subscription-agent:
+    name: e2e-olm-subscription-agent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: hub
+      - name: Load locally built image into Kind clusters
+        run: |
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+      - name: Run e2e OLM subscription agent test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-olm-subscription-agent
+
+  e2e-olm-subscription-agent-cleanup:
+    name: e2e-olm-subscription-agent-cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+        working-directory: /
+      - name: checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          path: go/src/github.com/open-cluster-management/multicloud-integrations
+      - name: install Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Add GOPATH/bin to PATH
+        run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
+      - name: install imagebuilder
+        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
+      - name: build-images
+        run: make build-images
+      - name: setup kind (cluster1)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: cluster1
+      - name: setup kind (hub)
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.25.0
+          name: hub
+      - name: Load locally built image into Kind clusters
+        run: |
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+      - name: Run e2e OLM subscription agent cleanup test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: make test-e2e-olm-subscription-agent-cleanup
