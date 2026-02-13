@@ -201,6 +201,18 @@ test-e2e-gitopsaddon-cleanup-full:
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log'
 	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log' && echo "✓ E2E GitOps Addon Cleanup Full Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup-full.log"
 
+# test-e2e-gitopsaddon-agent: For CI - assumes clusters and images exist, verifies GitOps addon WITH ArgoCD agent
+.PHONY: test-e2e-gitopsaddon-agent
+test-e2e-gitopsaddon-agent: manifests
+	@echo "===== E2E GitOps Addon Agent Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-agent-full.sh 2>&1 | tee /tmp/e2e-gitopsaddon-agent.log' && echo "✓ E2E GitOps Addon Agent Test Complete - Logs: /tmp/e2e-gitopsaddon-agent.log"
+
+# test-e2e-gitopsaddon-agent-cleanup: For CI - assumes clusters and images exist, verifies GitOps addon cleanup WITH ArgoCD agent
+.PHONY: test-e2e-gitopsaddon-agent-cleanup
+test-e2e-gitopsaddon-agent-cleanup: manifests
+	@echo "===== E2E GitOps Addon Agent Cleanup Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-agent-cleanup-full.sh 2>&1 | tee /tmp/e2e-gitopsaddon-agent-cleanup.log' && echo "✓ E2E GitOps Addon Agent Cleanup Test Complete - Logs: /tmp/e2e-gitopsaddon-agent-cleanup.log"
+
 # test-e2e-gitopsaddon-agent-full: For local - creates clusters, builds images, verifies GitOps addon WITH ArgoCD agent
 .PHONY: test-e2e-gitopsaddon-agent-full
 test-e2e-gitopsaddon-agent-full:
@@ -243,10 +255,11 @@ test-e2e-olm-subscription-full:
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log'
 	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log' && echo "✓ E2E OLM Subscription Full Test Complete - Logs: /tmp/e2e-olm-subscription-full.log"
 
-# test-e2e-olm-subscription-cleanup: For CI - verifies OLM subscription cleanup (assumes setup already done)
+# test-e2e-olm-subscription-cleanup: For CI - assumes clusters and images exist, verifies OLM subscription cleanup
 .PHONY: test-e2e-olm-subscription-cleanup
-test-e2e-olm-subscription-cleanup:
-	@bash -o pipefail -c 'CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription-cleanup.sh 2>&1 | tee /tmp/e2e-olm-subscription-cleanup.log' && echo "✓ E2E OLM Subscription Cleanup Test Complete - Logs: /tmp/e2e-olm-subscription-cleanup.log"
+test-e2e-olm-subscription-cleanup: manifests
+	@echo "===== E2E OLM Subscription Cleanup Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription-cleanup.sh 2>&1 | tee /tmp/e2e-olm-subscription-cleanup.log' && echo "✓ E2E OLM Subscription Cleanup Test Complete - Logs: /tmp/e2e-olm-subscription-cleanup.log"
 
 # test-e2e-olm-subscription-cleanup-full: For local - creates clusters, builds images, verifies OLM subscription cleanup (no agent)
 .PHONY: test-e2e-olm-subscription-cleanup-full
@@ -258,6 +271,18 @@ test-e2e-olm-subscription-cleanup-full:
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-cleanup-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-cleanup-full.log'
 	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-olm-subscription-cleanup-full.log' && echo "✓ E2E OLM Subscription Cleanup Full Test Complete - Logs: /tmp/e2e-olm-subscription-cleanup-full.log"
+
+# test-e2e-olm-subscription-agent: For CI - assumes clusters and images exist, verifies OLM subscription WITH ArgoCD agent
+.PHONY: test-e2e-olm-subscription-agent
+test-e2e-olm-subscription-agent: manifests
+	@echo "===== E2E OLM Subscription Agent Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription-agent-full.sh 2>&1 | tee /tmp/e2e-olm-subscription-agent.log' && echo "✓ E2E OLM Subscription Agent Test Complete - Logs: /tmp/e2e-olm-subscription-agent.log"
+
+# test-e2e-olm-subscription-agent-cleanup: For CI - assumes clusters and images exist, verifies OLM subscription cleanup WITH ArgoCD agent
+.PHONY: test-e2e-olm-subscription-agent-cleanup
+test-e2e-olm-subscription-agent-cleanup: manifests
+	@echo "===== E2E OLM Subscription Agent Cleanup Test (CI mode) ====="
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription-agent-cleanup-full.sh 2>&1 | tee /tmp/e2e-olm-subscription-agent-cleanup.log' && echo "✓ E2E OLM Subscription Agent Cleanup Test Complete - Logs: /tmp/e2e-olm-subscription-agent-cleanup.log"
 
 # test-e2e-olm-subscription-agent-full: For local - creates clusters, builds images, verifies OLM subscription WITH ArgoCD agent
 .PHONY: test-e2e-olm-subscription-agent-full
