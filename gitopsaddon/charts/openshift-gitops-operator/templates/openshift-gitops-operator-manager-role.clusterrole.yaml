@@ -161,12 +161,12 @@ rules:
   resources:
   - applications
   - appprojects
-  - argocds
-  - argocds/finalizers
-  - argocds/status
   - argocdexports
   - argocdexports/finalizers
   - argocdexports/status
+  - argocds
+  - argocds/finalizers
+  - argocds/status
   - rolloutmanagers
   verbs:
   - create
@@ -457,3 +457,19 @@ rules:
   - get
   - update
   - watch
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create

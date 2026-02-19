@@ -9,6 +9,7 @@ spec:
   ports:
   - name: https
     port: 8443
+    protocol: TCP
     targetPort: 8080
   selector:
     control-plane: gitops-operator

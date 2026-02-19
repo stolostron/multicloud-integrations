@@ -19,6 +19,8 @@ spec:
     spec:
       containers:
       - args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
         - --leader-elect
         command:
         {{- if contains "argoprojlabs" .Values.global.operatorImages.GITOPS_OPERATOR_IMAGE }}
@@ -27,13 +29,16 @@ spec:
         - /usr/local/bin/manager
         {{- end }}
         env:
-        # Operator configuration
         - name: WATCH_NAMESPACE
           value: ""
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: "*"
         - name: DISABLE_DEFAULT_ARGOCD_INSTANCE
           value: "true"
+        - name: OPERATOR_NAME
+          value: gitops-operator
+        - name: ENABLE_CONVERSION_WEBHOOK
+          value: "false"
         # Image environment variables - only set if values are provided
         # If not set, the operator will use its built-in defaults
         {{- if .Values.global.operatorImages.ARGOCD_IMAGE }}
