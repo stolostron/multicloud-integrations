@@ -285,8 +285,7 @@ The Policy must include:
 - **Namespace**: Target namespace for the guestbook application
 
 > **Note:** The `default` AppProject does NOT need to be in the Policy. The ArgoCD agent
-> principal automatically propagates AppProjects from the hub to managed clusters
-> (see `do-not-edit-argocd-agent/test/e2e/appproject_test.go`). The `default` AppProject
+> principal automatically propagates AppProjects from the hub to managed clusters. The `default` AppProject
 > is created on the hub in the managed cluster's namespace alongside the Application.
 
 ```bash

@@ -167,8 +167,10 @@ cleanup_scenario() {
             log_warn "ManagedClusterAddOn deletion timed out or failed"
             log_warn "The pre-delete cleanup Job may have failed on the managed cluster."
             log_warn "Check: kubectl get jobs -n open-cluster-management-agent-addon on $cluster_name"
-            # Do NOT force-patch finalizers here - the Job should be investigated
-            # Wait a bit more and check if it's gone
+            # Do NOT force-remove finalizers here - if the pre-delete Job can't complete,
+            # something is wrong (e.g. operator crashed, addon image broken). That needs
+            # to be fixed, not papered over. The initial cleanup_all -> cleanup_managed_cluster_direct
+            # handles stuck resources with force-removal as a last resort.
             sleep 15
             if kubectl get managedclusteraddon gitops-addon -n $cluster_name 2>/dev/null; then
                 log_warn "ManagedClusterAddOn still exists after extended wait"
@@ -258,11 +260,6 @@ cleanup_all() {
     # Delete all AddOnTemplates managed by us (dynamic ones)
     kubectl delete addontemplate -l app.kubernetes.io/managed-by=multicloud-integrations --ignore-not-found 2>/dev/null || true
 
-    # Delete stale cluster secrets in openshift-gitops namespace
-    log_info "Removing stale cluster secrets..."
-    kubectl delete secret cluster-$KIND_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
-    kubectl delete secret cluster-$OCP_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
-
     # Delete stale Applications and AppProjects in managed cluster namespaces on hub
     log_info "Removing stale hub-side Applications and AppProjects..."
     kubectl delete applications.argoproj.io --all -n $OCP_CLUSTER_NAME --ignore-not-found --wait=false 2>/dev/null || true
@@ -307,7 +304,17 @@ cleanup_all() {
     fi
 
     # ============================================
-    # STEP 4: Verify cleanup
+    # STEP 4: Delete stale cluster secrets
+    # Done AFTER cleanup_scenario calls so the controller can't re-create them
+    # (cleanup_scenario deletes Placement + GitOpsCluster first, stopping the controller)
+    # ============================================
+    export KUBECONFIG=$HUB_KUBECONFIG
+    log_info "Removing stale cluster secrets..."
+    kubectl delete secret cluster-$KIND_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
+    kubectl delete secret cluster-$OCP_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
+
+    # ============================================
+    # STEP 5: Verify cleanup
     # ============================================
     
     log_info "--- Verifying cleanup ---"
@@ -317,7 +324,11 @@ cleanup_all() {
     export KUBECONFIG=$KIND_KUBECONFIG
     local kind_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$kind_argocd_count" -gt 0 ]; then
-        log_warn "KIND cluster still has $kind_argocd_count ArgoCD CR(s) - force deleting"
+        log_warn "KIND cluster still has $kind_argocd_count ArgoCD CR(s) - stripping finalizers and deleting"
+        for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
+            kubectl patch $argocd_name -n openshift-gitops --type=json \
+                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+        done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
     else
         log_info "KIND cluster: ArgoCD CRs cleaned up"
@@ -327,7 +338,11 @@ cleanup_all() {
     export KUBECONFIG=$OCP_KUBECONFIG
     local ocp_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$ocp_argocd_count" -gt 0 ]; then
-        log_warn "OCP cluster still has $ocp_argocd_count ArgoCD CR(s) - force deleting"
+        log_warn "OCP cluster still has $ocp_argocd_count ArgoCD CR(s) - stripping finalizers and deleting"
+        for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
+            kubectl patch $argocd_name -n openshift-gitops --type=json \
+                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+        done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
     else
         log_info "OCP cluster: ArgoCD CRs cleaned up"
@@ -345,8 +360,12 @@ cleanup_all() {
     sleep 5
     ocp_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$ocp_argocd_count" -gt 0 ]; then
-        log_warn "OCP cluster STILL has $ocp_argocd_count ArgoCD CR(s) after operator removal!"
+        log_warn "OCP cluster STILL has $ocp_argocd_count ArgoCD CR(s) after operator removal - stripping finalizers"
         kubectl get argocd -n openshift-gitops 2>/dev/null || true
+        for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
+            kubectl patch $argocd_name -n openshift-gitops --type=json \
+                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+        done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
     else
         log_info "OCP cluster: Confirmed clean (no ArgoCD CRs, no operator)"
@@ -373,7 +392,12 @@ cleanup_managed_cluster_direct() {
     kubectl delete configmap gitops-addon-pause -n open-cluster-management-agent-addon --ignore-not-found 2>/dev/null || true
 
     # Delete ALL ArgoCD CRs (both acm-openshift-gitops and the default openshift-gitops)
+    # Must strip finalizers first - if the operator is crashed it can't process them
     log_info "$cluster_name: Removing ALL ArgoCD CRs in openshift-gitops namespace..."
+    for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
+        kubectl patch $argocd_name -n openshift-gitops --type=json \
+            -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+    done
     kubectl delete argocd --all -n openshift-gitops --wait=false 2>/dev/null || true
 
     # ============================================
@@ -423,7 +447,11 @@ cleanup_managed_cluster_direct() {
     # 8. Verify no ArgoCD CRs remain (operator might have recreated them during cleanup)
     local remaining=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$remaining" -gt 0 ]; then
-        log_warn "$cluster_name: ArgoCD CRs still exist after cleanup, force deleting..."
+        log_warn "$cluster_name: ArgoCD CRs still exist after cleanup - stripping finalizers and deleting..."
+        for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
+            kubectl patch $argocd_name -n openshift-gitops --type=json \
+                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+        done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
     fi
 
@@ -626,7 +654,7 @@ add_rbac_and_app_to_policy() {
 
 # Add RBAC only to Policy (for agent mode - apps are created separately on hub)
 # In agent mode, the principal dispatches BOTH Applications AND AppProjects from
-# the hub to managed clusters (see do-not-edit-argocd-agent/test/e2e/appproject_test.go).
+# the hub to managed clusters.
 # The default AppProject is created on the hub in the managed cluster's namespace by
 # create_guestbook_app_agent_mode(), and the principal propagates it to the agent.
 # We do NOT need to add AppProject to the Policy.

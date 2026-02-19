@@ -8,7 +8,7 @@ CONTROLLER_NAMESPACE="open-cluster-management"
 GITOPS_NAMESPACE="openshift-gitops"
 E2E_IMG="${E2E_IMG:-quay.io/stolostron/multicloud-integrations:latest}"
 ENABLE_ARGOCD_AGENT="${ENABLE_ARGOCD_AGENT:-false}"
-ARGOCD_AGENT_IMG="${ARGOCD_AGENT_IMG:-ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest}"
+ARGOCD_AGENT_IMG="${ARGOCD_AGENT_IMG:-quay.io/argoprojlabs/argocd-agent:v0.6.0}"
 
 echo "========================================="
 echo "E2E SETUP - Installing Components"
@@ -116,7 +116,7 @@ ARGOCD_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-oper
 echo "  Setting GITOPS_OPERATOR_IMAGE to ${ARGOCD_OPERATOR_IMAGE} for e2e tests..."
 kubectl set env deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} GITOPS_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE}
 # Set public ArgoCD agent image for e2e tests (registry.redhat.io requires auth)
-ARGOCD_AGENT_IMAGE="${ARGOCD_AGENT_IMAGE:-ghcr.io/argoproj-labs/argocd-agent/argocd-agent:latest}"
+ARGOCD_AGENT_IMAGE="${ARGOCD_AGENT_IMAGE:-quay.io/argoprojlabs/argocd-agent:v0.6.0}"
 echo "  Setting ARGOCD_AGENT_IMAGE_OVERRIDE to ${ARGOCD_AGENT_IMAGE} for e2e tests..."
 kubectl set env deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} ARGOCD_AGENT_IMAGE_OVERRIDE=${ARGOCD_AGENT_IMAGE}
 echo "  Waiting for controller to be ready..."
@@ -242,6 +242,23 @@ if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
     fi
   fi
 
+  # Patch hub's default AppProject to add sourceNamespaces so the principal can
+  # match it to agents and dispatch it. Without this, DoesAgentMatchWithProject()
+  # returns false because it requires both destinations AND sourceNamespaces to match.
+  echo "  Patching default AppProject with sourceNamespaces for agent dispatch..."
+  for i in {1..30}; do
+    if kubectl get appproject default -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+      kubectl patch appproject default -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --type=merge \
+        -p '{"spec":{"sourceNamespaces":["*"]}}'
+      echo "  ✓ Default AppProject patched with sourceNamespaces: [\"*\"]"
+      break
+    fi
+    if [ $i -eq 30 ]; then
+      echo "  Warning: default AppProject not found, principal may not dispatch AppProjects to agents"
+    fi
+    sleep 2
+  done
+
   echo "  Restarting ArgoCD principal pods to pick up controller-generated secrets..."
   kubectl delete pod -l app.kubernetes.io/name=openshift-gitops-agent-principal -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} || true
   echo "  Waiting for principal pods to be recreated and ready..."
@@ -313,7 +330,7 @@ for i in {1..30}; do
 done
 
 echo "  Waiting for ArgoCD CR on managed cluster..."
-echo "  (ArgoCD CR is created by gitops-addon directly, with Policy framework as optional enhancement)"
+echo "  (ArgoCD CR is created by Policy framework on the managed cluster)"
 
 # Wait for ArgoCD CR to be created on managed cluster (by Policy)
 for i in {1..60}; do
@@ -410,20 +427,114 @@ else
   sleep 10
 fi
 
-# Step 9: Deploy test application
+# Step 9: Add RBAC and deploy test application via Policy
 echo ""
-echo "Step 9: Deploying test application..."
+echo "Step 9: Adding RBAC and test application via Policy..."
 
-# Create and label guestbook namespace on managed cluster for ArgoCD permission
-# The namespace must be labeled with the ArgoCD instance name to allow deployments
-echo "  Creating and labeling guestbook namespace on managed cluster..."
-kubectl create namespace guestbook --context ${SPOKE_CONTEXT} 2>/dev/null || true
-kubectl label namespace guestbook argocd.argoproj.io/managed-by=acm-openshift-gitops --overwrite --context ${SPOKE_CONTEXT}
-echo "  ✓ Guestbook namespace labeled for ArgoCD permission"
+POLICY_NAME="gitopscluster-argocd-policy"
 
-# Create default AppProject in cluster1 namespace on hub for ArgoCD agent mode
-echo "  Creating default AppProject in cluster1 namespace on hub..."
-cat <<EOF | kubectl apply -f - --context ${HUB_CONTEXT}
+# Wait for Policy to be created by the controller
+echo "  Waiting for Policy ${POLICY_NAME} to be created..."
+for i in {1..60}; do
+  if kubectl get policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+    echo "  ✓ Policy ${POLICY_NAME} found (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: Policy ${POLICY_NAME} not created after 60 attempts"
+    kubectl logs deployment/multicloud-integrations-gitops -n ${CONTROLLER_NAMESPACE} --context ${HUB_CONTEXT} --tail=30
+    exit 1
+  fi
+  echo "  Waiting for Policy... (attempt $i/60)"
+  sleep 5
+done
+
+if [ "${ENABLE_ARGOCD_AGENT}" == "true" ]; then
+  # Agent mode: Add RBAC + guestbook namespace to Policy
+  # Apps are created separately on hub in managed cluster namespace
+  echo "  Agent mode: Adding RBAC and guestbook namespace to Policy..."
+  kubectl patch policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --type=json -p='[
+    {
+      "op": "add",
+      "path": "/spec/policy-templates/-",
+      "value": {
+        "objectDefinition": {
+          "apiVersion": "policy.open-cluster-management.io/v1",
+          "kind": "ConfigurationPolicy",
+          "metadata": {
+            "name": "'${POLICY_NAME}'-rbac"
+          },
+          "spec": {
+            "remediationAction": "enforce",
+            "severity": "medium",
+            "object-templates": [
+              {
+                "complianceType": "musthave",
+                "objectDefinition": {
+                  "apiVersion": "rbac.authorization.k8s.io/v1",
+                  "kind": "ClusterRoleBinding",
+                  "metadata": {
+                    "name": "acm-openshift-gitops-cluster-admin"
+                  },
+                  "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "cluster-admin"
+                  },
+                  "subjects": [
+                    {
+                      "kind": "ServiceAccount",
+                      "name": "acm-openshift-gitops-argocd-application-controller",
+                      "namespace": "openshift-gitops"
+                    }
+                  ]
+                }
+              },
+              {
+                "complianceType": "musthave",
+                "objectDefinition": {
+                  "apiVersion": "v1",
+                  "kind": "Namespace",
+                  "metadata": {
+                    "name": "guestbook"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]'
+  echo "  ✓ RBAC and guestbook namespace added to Policy"
+
+  # Wait for Policy to be compliant
+  echo "  Waiting for Policy to be compliant..."
+  for i in {1..90}; do
+    COMPLIANT=$(kubectl get policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.compliant}' 2>/dev/null || echo "")
+    if [ "${COMPLIANT}" == "Compliant" ]; then
+      echo "  ✓ Policy is Compliant (attempt $i/90)"
+      break
+    fi
+    if [ $i -eq 90 ]; then
+      echo "  ✗ ERROR: Policy not compliant after 90 attempts (status: ${COMPLIANT})"
+      exit 1
+    fi
+    echo "  Waiting for Policy compliance... (attempt $i/90, status: ${COMPLIANT})"
+    sleep 5
+  done
+
+  # Get the agent server URL (discovered by controller)
+  echo "  Getting agent server address..."
+  SERVER_ADDRESS=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.spec.gitopsAddon.argoCDAgent.serverAddress}' 2>/dev/null || echo "")
+  SERVER_PORT=$(kubectl get gitopscluster gitopscluster -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.spec.gitopsAddon.argoCDAgent.serverPort}' 2>/dev/null || echo "443")
+  if [ -z "${SERVER_PORT}" ]; then SERVER_PORT="443"; fi
+  AGENT_SERVER_URL="https://${SERVER_ADDRESS}:${SERVER_PORT}?agentName=cluster1"
+  echo "  Agent server URL: ${AGENT_SERVER_URL}"
+
+  # Create AppProject + Application on hub in managed cluster namespace
+  echo "  Creating AppProject in cluster1 namespace on hub..."
+  cat <<EOF | kubectl apply -f - --context ${HUB_CONTEXT}
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
@@ -439,31 +550,136 @@ spec:
   sourceRepos:
   - '*'
 EOF
-echo "  ✓ Default AppProject created in cluster1 namespace on hub"
+  echo "  ✓ Default AppProject created in cluster1 namespace on hub"
 
-# Also create default AppProject in openshift-gitops namespace on managed cluster
-# This is required because the ArgoCD application controller on the managed cluster
-# needs the AppProject to exist locally before it can reconcile the application
-echo "  Creating default AppProject in openshift-gitops namespace on managed cluster..."
-cat <<EOF | kubectl apply -f - --context ${SPOKE_CONTEXT}
+  echo "  Creating guestbook Application on hub in cluster1 namespace..."
+  cat <<EOF | kubectl apply -f - --context ${HUB_CONTEXT}
 apiVersion: argoproj.io/v1alpha1
-kind: AppProject
+kind: Application
 metadata:
-  name: default
-  namespace: ${GITOPS_NAMESPACE}
+  name: guestbook
+  namespace: cluster1
 spec:
-  clusterResourceWhitelist:
-  - group: '*'
-    kind: '*'
-  destinations:
-  - namespace: '*'
-    server: '*'
-  sourceRepos:
-  - '*'
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    server: "${AGENT_SERVER_URL}"
+    namespace: guestbook
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
 EOF
-echo "  ✓ Default AppProject created in openshift-gitops namespace on managed cluster"
+  echo "  ✓ Guestbook Application created on hub"
+else
+  # Non-agent mode: Add RBAC + guestbook namespace + Application to Policy
+  echo "  Non-agent mode: Adding RBAC, guestbook namespace, and Application to Policy..."
+  kubectl patch policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --type=json -p='[
+    {
+      "op": "add",
+      "path": "/spec/policy-templates/-",
+      "value": {
+        "objectDefinition": {
+          "apiVersion": "policy.open-cluster-management.io/v1",
+          "kind": "ConfigurationPolicy",
+          "metadata": {
+            "name": "'${POLICY_NAME}'-rbac"
+          },
+          "spec": {
+            "remediationAction": "enforce",
+            "severity": "medium",
+            "object-templates": [
+              {
+                "complianceType": "musthave",
+                "objectDefinition": {
+                  "apiVersion": "rbac.authorization.k8s.io/v1",
+                  "kind": "ClusterRoleBinding",
+                  "metadata": {
+                    "name": "acm-openshift-gitops-cluster-admin"
+                  },
+                  "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "cluster-admin"
+                  },
+                  "subjects": [
+                    {
+                      "kind": "ServiceAccount",
+                      "name": "acm-openshift-gitops-argocd-application-controller",
+                      "namespace": "openshift-gitops"
+                    }
+                  ]
+                }
+              },
+              {
+                "complianceType": "musthave",
+                "objectDefinition": {
+                  "apiVersion": "v1",
+                  "kind": "Namespace",
+                  "metadata": {
+                    "name": "guestbook"
+                  }
+                }
+              },
+              {
+                "complianceType": "musthave",
+                "objectDefinition": {
+                  "apiVersion": "argoproj.io/v1alpha1",
+                  "kind": "Application",
+                  "metadata": {
+                    "name": "guestbook",
+                    "namespace": "openshift-gitops"
+                  },
+                  "spec": {
+                    "project": "default",
+                    "source": {
+                      "repoURL": "https://github.com/argoproj/argocd-example-apps",
+                      "targetRevision": "HEAD",
+                      "path": "guestbook"
+                    },
+                    "destination": {
+                      "server": "https://kubernetes.default.svc",
+                      "namespace": "guestbook"
+                    },
+                    "syncPolicy": {
+                      "automated": {
+                        "prune": true,
+                        "selfHeal": true
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]'
+  echo "  ✓ RBAC, guestbook namespace, and Application added to Policy"
 
-kubectl apply -f test/e2e/fixtures/app.yaml --context ${HUB_CONTEXT}
+  # Wait for Policy to be compliant
+  echo "  Waiting for Policy to be compliant..."
+  for i in {1..90}; do
+    COMPLIANT=$(kubectl get policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.compliant}' 2>/dev/null || echo "")
+    if [ "${COMPLIANT}" == "Compliant" ]; then
+      echo "  ✓ Policy is Compliant (attempt $i/90)"
+      break
+    fi
+    if [ $i -eq 90 ]; then
+      echo "  ✗ ERROR: Policy not compliant after 90 attempts (status: ${COMPLIANT})"
+      exit 1
+    fi
+    echo "  Waiting for Policy compliance... (attempt $i/90, status: ${COMPLIANT})"
+    sleep 5
+  done
+fi
+
 sleep 30s
 
 echo ""
