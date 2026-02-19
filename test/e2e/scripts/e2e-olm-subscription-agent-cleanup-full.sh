@@ -64,8 +64,8 @@ else
   echo "  Note: Subscription may have been created differently"
 fi
 
-# Verify ArgoCD operator is running
-OPERATOR_PODS=$(kubectl get pods -n ${SUB_NAMESPACE} -l control-plane=controller-manager --no-headers 2>/dev/null | grep Running | wc -l)
+# Verify ArgoCD operator is running (Helm chart deploys to openshift-gitops-operator)
+OPERATOR_PODS=$(kubectl get pods -n openshift-gitops-operator -l control-plane=gitops-operator --no-headers 2>/dev/null | grep Running | wc -l)
 if [ "${OPERATOR_PODS}" -gt 0 ]; then
   echo "  ✓ ArgoCD operator pod is running"
 else

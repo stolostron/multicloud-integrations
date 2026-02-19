@@ -88,12 +88,21 @@ echo "========================================="
 echo "Verifying Application Sync (Agent Mode)"
 echo "========================================="
 
-# Step 1: Deploy a test application on hub
+# Step 1: Verify test application on hub (created by e2e-setup.sh via Policy + agent mode)
 echo ""
-echo "Step 1: Creating application on hub..."
-kubectl apply -f test/e2e/fixtures/app.yaml --context ${HUB_CONTEXT}
-kubectl wait --for=jsonpath='{.metadata.name}'=guestbook --timeout=60s application/guestbook -n cluster1 --context ${HUB_CONTEXT} 2>/dev/null || true
-echo "  ✓ Application created on hub (cluster1 namespace)"
+echo "Step 1: Verifying application exists on hub..."
+for i in {1..30}; do
+  if kubectl get application guestbook -n cluster1 --context ${HUB_CONTEXT} &>/dev/null; then
+    echo "  ✓ Application 'guestbook' exists on hub (cluster1 namespace)"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "  ✗ ERROR: Application 'guestbook' not found on hub after 30 attempts"
+    exit 1
+  fi
+  echo "  Waiting for Application... (attempt $i/30)"
+  sleep 2
+done
 
 # Step 2: Verify app is synced to managed cluster
 echo ""
