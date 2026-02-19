@@ -61,10 +61,10 @@ fi
 
 echo ""
 echo "Verifying ArgoCD CR exists before cleanup..."
-if kubectl get argocd openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
-  echo "  ✓ ArgoCD CR 'openshift-gitops' exists"
+if kubectl get argocd acm-openshift-gitops -n ${GITOPS_NAMESPACE} &>/dev/null; then
+  echo "  ✓ ArgoCD CR 'acm-openshift-gitops' exists (created by Policy)"
 else
-  echo "  Note: ArgoCD CR may have a different name"
+  echo "  Note: ArgoCD CR 'acm-openshift-gitops' not found"
 fi
 
 echo ""
