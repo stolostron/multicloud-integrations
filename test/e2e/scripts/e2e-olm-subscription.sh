@@ -441,32 +441,38 @@ echo "========================================="
 echo "PHASE 4: Verify Full ArgoCD Stack"
 echo "========================================="
 
-# Step 21: Create openshift-gitops namespace and ArgoCD CR
+# Step 21: Wait for ArgoCD CR to be created by Policy on managed cluster
 ARGOCD_NAMESPACE="openshift-gitops"
+ARGOCD_CR_NAME="acm-openshift-gitops"
 echo ""
-echo "Step 21: Creating ArgoCD CR in ${ARGOCD_NAMESPACE} namespace..."
+echo "Step 21: Waiting for ArgoCD CR to be created by Policy on managed cluster..."
+echo "  (ArgoCD CR is created by Policy framework, not directly)"
 kubectl create namespace ${ARGOCD_NAMESPACE} 2>/dev/null || true
 
-cat <<EOF | kubectl apply -f -
-apiVersion: argoproj.io/v1beta1
-kind: ArgoCD
-metadata:
-  name: openshift-gitops
-  namespace: ${ARGOCD_NAMESPACE}
-spec:
-  server:
-    route:
-      enabled: false
-EOF
-echo "  ✓ ArgoCD CR created"
+for i in {1..90}; do
+  if kubectl get argocd ${ARGOCD_CR_NAME} -n ${ARGOCD_NAMESPACE} &>/dev/null; then
+    echo "  ✓ ArgoCD CR '${ARGOCD_CR_NAME}' found (attempt $i/90)"
+    break
+  fi
+  if [ $i -eq 90 ]; then
+    echo "  ✗ ERROR: ArgoCD CR '${ARGOCD_CR_NAME}' not found after 90 attempts"
+    echo "  Checking Policy status on hub..."
+    kubectl --context ${HUB_CONTEXT} get policy -n ${GITOPS_NAMESPACE} 2>/dev/null || true
+    echo "  Checking addon pod logs on managed cluster..."
+    kubectl logs -n open-cluster-management-agent-addon -l app=gitops-addon --tail=30 2>/dev/null || true
+    exit 1
+  fi
+  echo "  Waiting for ArgoCD CR (created by Policy)... (attempt $i/90)"
+  sleep 5
+done
 
 # Step 22: Wait for ArgoCD controller pods to be created (verify ArgoCD CR is reconciled)
 echo ""
 echo "Step 22: Verifying ArgoCD CR is reconciled (waiting for controller pods)..."
 for i in {1..90}; do
-  APP_CONTROLLER=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=openshift-gitops-application-controller --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
-  REPO_SERVER=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=openshift-gitops-repo-server --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
-  REDIS=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=openshift-gitops-redis --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
+  APP_CONTROLLER=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=${ARGOCD_CR_NAME}-application-controller --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
+  REPO_SERVER=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=${ARGOCD_CR_NAME}-repo-server --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
+  REDIS=$(kubectl get pods -n ${ARGOCD_NAMESPACE} -l app.kubernetes.io/name=${ARGOCD_CR_NAME}-redis --no-headers 2>/dev/null | grep -E 'Running|ContainerCreating' | head -1 || echo "")
   
   if [ -n "$APP_CONTROLLER" ] && [ -n "$REPO_SERVER" ] && [ -n "$REDIS" ]; then
     echo "  ✓ ArgoCD controller pods created:"
@@ -478,7 +484,7 @@ for i in {1..90}; do
   if [ $i -eq 90 ]; then
     echo "  ✗ ERROR: ArgoCD controller pods not created after 90 attempts"
     echo "  Checking ArgoCD CR status..."
-    kubectl get argocd openshift-gitops -n ${ARGOCD_NAMESPACE} -o yaml 2>/dev/null || true
+    kubectl get argocd ${ARGOCD_CR_NAME} -n ${ARGOCD_NAMESPACE} -o yaml 2>/dev/null || true
     echo "  Checking pods..."
     kubectl get pods -n ${ARGOCD_NAMESPACE} 2>/dev/null || true
     exit 1
@@ -502,42 +508,135 @@ for i in {1..60}; do
   if [ $i -eq 60 ]; then
     echo "  ⚠ Warning: Not all ArgoCD pods ready after 60 attempts ($READY_PODS/$TOTAL_PODS running)"
     kubectl get pods -n ${ARGOCD_NAMESPACE} 2>/dev/null || true
-    # Continue anyway - we just need to verify reconciliation started
     break
   fi
   echo "  Waiting for ArgoCD pods... (attempt $i/60, $READY_PODS/$TOTAL_PODS running)"
   sleep 5
 done
 
-# Step 24: Create ArgoCD Application to verify Application reconciliation
+# Step 24: Add RBAC and Application to Policy
 echo ""
-echo "Step 24: Creating ArgoCD Application to verify reconciliation..."
-kubectl create namespace guestbook 2>/dev/null || true
-kubectl label namespace guestbook argocd.argoproj.io/managed-by=${ARGOCD_NAMESPACE} --overwrite 2>/dev/null || true
+echo "Step 24: Adding RBAC and guestbook Application to Policy..."
+kubectl config use-context ${HUB_CONTEXT}
 
-cat <<EOF | kubectl apply -f -
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: guestbook
-  namespace: ${ARGOCD_NAMESPACE}
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/argoproj/argocd-example-apps.git
-    targetRevision: HEAD
-    path: guestbook
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: guestbook
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-    - CreateNamespace=true
-EOF
-echo "  ✓ ArgoCD Application created"
+POLICY_NAME="gitopscluster-argocd-policy"
+
+# Wait for Policy to exist
+for i in {1..60}; do
+  if kubectl get policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} &>/dev/null; then
+    echo "  ✓ Policy ${POLICY_NAME} found (attempt $i/60)"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo "  ✗ ERROR: Policy ${POLICY_NAME} not created after 60 attempts"
+    exit 1
+  fi
+  echo "  Waiting for Policy... (attempt $i/60)"
+  sleep 5
+done
+
+# Patch Policy to add RBAC + guestbook namespace + Application (non-agent mode)
+kubectl patch policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} --type=json -p='[
+  {
+    "op": "add",
+    "path": "/spec/policy-templates/-",
+    "value": {
+      "objectDefinition": {
+        "apiVersion": "policy.open-cluster-management.io/v1",
+        "kind": "ConfigurationPolicy",
+        "metadata": {
+          "name": "'${POLICY_NAME}'-rbac"
+        },
+        "spec": {
+          "remediationAction": "enforce",
+          "severity": "medium",
+          "object-templates": [
+            {
+              "complianceType": "musthave",
+              "objectDefinition": {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {
+                  "name": "acm-openshift-gitops-cluster-admin"
+                },
+                "roleRef": {
+                  "apiGroup": "rbac.authorization.k8s.io",
+                  "kind": "ClusterRole",
+                  "name": "cluster-admin"
+                },
+                "subjects": [
+                  {
+                    "kind": "ServiceAccount",
+                    "name": "acm-openshift-gitops-argocd-application-controller",
+                    "namespace": "openshift-gitops"
+                  }
+                ]
+              }
+            },
+            {
+              "complianceType": "musthave",
+              "objectDefinition": {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                  "name": "guestbook"
+                }
+              }
+            },
+            {
+              "complianceType": "musthave",
+              "objectDefinition": {
+                "apiVersion": "argoproj.io/v1alpha1",
+                "kind": "Application",
+                "metadata": {
+                  "name": "guestbook",
+                  "namespace": "openshift-gitops"
+                },
+                "spec": {
+                  "project": "default",
+                  "source": {
+                    "repoURL": "https://github.com/argoproj/argocd-example-apps",
+                    "targetRevision": "HEAD",
+                    "path": "guestbook"
+                  },
+                  "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": "guestbook"
+                  },
+                  "syncPolicy": {
+                    "automated": {
+                      "prune": true,
+                      "selfHeal": true
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+]'
+echo "  ✓ RBAC and guestbook Application added to Policy"
+
+# Wait for Policy to be compliant
+echo "  Waiting for Policy to be compliant..."
+for i in {1..90}; do
+  COMPLIANT=$(kubectl get policy ${POLICY_NAME} -n ${GITOPS_NAMESPACE} --context ${HUB_CONTEXT} -o jsonpath='{.status.compliant}' 2>/dev/null || echo "")
+  if [ "${COMPLIANT}" == "Compliant" ]; then
+    echo "  ✓ Policy is Compliant (attempt $i/90)"
+    break
+  fi
+  if [ $i -eq 90 ]; then
+    echo "  ⚠ Warning: Policy not fully compliant after 90 attempts (status: ${COMPLIANT})"
+    break
+  fi
+  echo "  Waiting for Policy compliance... (attempt $i/90, status: ${COMPLIANT})"
+  sleep 5
+done
+
+kubectl config use-context ${SPOKE_CONTEXT}
 
 # Step 25: Verify Application is being reconciled (sync status exists)
 echo ""
@@ -546,7 +645,6 @@ for i in {1..60}; do
   SYNC_STATUS=$(kubectl get application guestbook -n ${ARGOCD_NAMESPACE} -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
   HEALTH_STATUS=$(kubectl get application guestbook -n ${ARGOCD_NAMESPACE} -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
   
-  # Check if application has been reconciled (has any status)
   if [ -n "$SYNC_STATUS" ] || [ -n "$HEALTH_STATUS" ]; then
     echo "  ✓ ArgoCD Application is being reconciled:"
     echo "    - Sync Status: ${SYNC_STATUS:-'(pending)'}"
@@ -557,7 +655,6 @@ for i in {1..60}; do
     echo "  ⚠ Warning: Application not showing status after 60 attempts"
     echo "  Checking Application..."
     kubectl get application guestbook -n ${ARGOCD_NAMESPACE} -o yaml 2>/dev/null | head -50 || true
-    # Don't fail - reconciliation might just be slow
     break
   fi
   echo "  Waiting for Application reconciliation... (attempt $i/60)"
@@ -588,6 +685,6 @@ echo "  - GitOpsCluster OLMSubscriptionReady condition is True"
 echo "  - ManifestWork contains Subscription (not helm deployment)"
 echo "  - Subscription deployed to correct namespace (${SUB_NAMESPACE})"
 echo "  - ArgoCD operator pod created via OLM"
-echo "  - ArgoCD CR reconciled successfully (controller pods created)"
+echo "  - ArgoCD CR created by Policy framework (acm-openshift-gitops)"
 echo "  - ArgoCD Application reconciliation verified"
 echo ""
