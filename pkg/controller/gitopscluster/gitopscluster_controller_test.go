@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
@@ -1203,21 +1204,17 @@ func TestReconcileCreateSecretInOpenshiftGitops(t *testing.T) {
 	}
 	g.Expect(expectedSecretCreated(c, gitOpsMsaClusterSecretKey)).ToNot(gomega.BeNil())
 
-	// Update gitops cluster to use a non-existent managed service account,
-	// expects to fail to create the new cluster secret but old cluster secret should be removed
+	// Update gitops cluster to use a non-existent managed service account.
+	// The old cluster secret should NOT be removed because the ManagedCluster still exists.
 	g.Expect(c.Get(context.TODO(), client.ObjectKeyFromObject(goc), goc))
 	goc.Spec.ManagedServiceAccountRef = "dummy-msa"
 	g.Expect(c.Update(context.TODO(), goc)).NotTo(gomega.HaveOccurred())
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	oldClusterSecret := &corev1.Secret{}
-
-	g.Eventually(func(g2 gomega.Gomega) {
-		err = c.Get(context.TODO(), gitOpsMsaClusterSecretKey, oldClusterSecret)
-
-		g2.Expect(err).ToNot(gomega.BeNil())
-	}, 30*time.Second, 1*time.Second).Should(gomega.Succeed())
+	err = c.Get(context.TODO(), gitOpsMsaClusterSecretKey, oldClusterSecret)
+	g.Expect(err).To(gomega.BeNil(), "Old cluster secret should NOT be deleted because ManagedCluster still exists")
 
 	// Test6 *-cluster-secret and *-application-manager-cluster-secret are not found
 
@@ -1684,7 +1681,8 @@ func TestReconcileDeleteOrphanSecret(t *testing.T) {
 
 	defer c.Delete(context.TODO(), goc)
 
-	// Test that the orphan managed cluster's secret is deleted from the Argo namespace
+	// ManagedCluster cluster1 was cleaned up in a previous test, so the orphan secret
+	// should be deleted (ManagedCluster is fully gone).
 	g.Expect(checkOrphanSecretDeleted(c, gitOpsClusterSecret2Key)).To(gomega.BeTrue())
 
 	mySecret := &corev1.Secret{}
@@ -2435,4 +2433,278 @@ data:
 		cm)).NotTo(gomega.HaveOccurred())
 
 	g.Expect(cm.Data).To(gomega.Equal(map[string]string{"bar": "foo"}))
+}
+
+func TestCleanupOrphanSecretsOnlyWhenManagedClusterDeleted(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(clusterv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	tests := []struct {
+		name            string
+		existingObjects []client.Object
+		orphanSecrets   map[types.NamespacedName]string
+		expectedSuccess bool
+		secretShouldExist bool
+		description     string
+	}{
+		{
+			name: "should NOT delete secret when ManagedCluster still exists",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster1",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster1"),
+						"server": []byte("https://api.cluster1.com:6443"),
+					},
+				},
+				&clusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "cluster1-cluster-secret", Namespace: "argocd"}: "argocd/cluster1-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: true,
+			description:       "Secret must be preserved when ManagedCluster exists",
+		},
+		{
+			name: "should NOT delete secret when ManagedCluster has deletion timestamp",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster1",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster1"),
+						"server": []byte("https://api.cluster1.com:6443"),
+					},
+				},
+				&clusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "cluster1",
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+						Finalizers:        []string{"test-finalizer"},
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "cluster1-cluster-secret", Namespace: "argocd"}: "argocd/cluster1-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: true,
+			description:       "Secret must be preserved when ManagedCluster is being deleted but not yet gone",
+		},
+		{
+			name: "should DELETE secret when ManagedCluster is fully deleted",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster1",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster1"),
+						"server": []byte("https://api.cluster1.com:6443"),
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "cluster1-cluster-secret", Namespace: "argocd"}: "argocd/cluster1-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: false,
+			description:       "Secret must be deleted when ManagedCluster is fully gone",
+		},
+		{
+			name: "should NOT delete secret when cluster removed from PlacementDecision but ManagedCluster exists",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster2-application-manager-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster2",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster2"),
+						"server": []byte("https://api.cluster2.com:6443"),
+					},
+				},
+				&clusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster2",
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "cluster2-application-manager-cluster-secret", Namespace: "argocd"}: "argocd/cluster2-application-manager-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: true,
+			description:       "PlacementDecision removal must NOT cause secret deletion if ManagedCluster exists",
+		},
+		{
+			name:            "empty orphan list",
+			existingObjects: []client.Object{},
+			orphanSecrets:   map[types.NamespacedName]string{},
+			expectedSuccess: true,
+		},
+		{
+			name: "should NOT delete secret when cluster name cannot be determined",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "unknown-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+						},
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "unknown-cluster-secret", Namespace: "argocd"}: "argocd/unknown-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: true,
+			description:       "Secret must NOT be deleted when cluster name cannot be determined",
+		},
+		{
+			name: "should handle secret with cluster name from data field",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-style-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":              "cluster",
+							"apps.open-cluster-management.io/acm-cluster": "true",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster3"),
+						"server": []byte("https://api.cluster3.com:6443"),
+					},
+				},
+				&clusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster3",
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "old-style-cluster-secret", Namespace: "argocd"}: "argocd/old-style-cluster-secret",
+			},
+			expectedSuccess:   true,
+			secretShouldExist: true,
+			description:       "Should detect cluster name from secret data field and skip deletion",
+		},
+		{
+			name: "should handle multiple orphan secrets with mixed ManagedCluster states",
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster-a-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":               "cluster",
+							"apps.open-cluster-management.io/acm-cluster":  "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster-a",
+						},
+					},
+					Data: map[string][]byte{"name": []byte("cluster-a")},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster-b-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":               "cluster",
+							"apps.open-cluster-management.io/acm-cluster":  "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster-b",
+						},
+					},
+					Data: map[string][]byte{"name": []byte("cluster-b")},
+				},
+				&clusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster-a",
+					},
+				},
+			},
+			orphanSecrets: map[types.NamespacedName]string{
+				{Name: "cluster-a-cluster-secret", Namespace: "argocd"}: "argocd/cluster-a-cluster-secret",
+				{Name: "cluster-b-cluster-secret", Namespace: "argocd"}: "argocd/cluster-b-cluster-secret",
+			},
+			expectedSuccess: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			success := reconciler.cleanupOrphanSecrets(tt.orphanSecrets)
+			g.Expect(success).To(gomega.Equal(tt.expectedSuccess))
+
+			if tt.name == "should handle multiple orphan secrets with mixed ManagedCluster states" {
+				secretA := &corev1.Secret{}
+				errA := fakeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster-a-cluster-secret", Namespace: "argocd"}, secretA)
+				g.Expect(errA).NotTo(gomega.HaveOccurred(), "cluster-a secret should still exist because ManagedCluster exists")
+
+				secretB := &corev1.Secret{}
+				errB := fakeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster-b-cluster-secret", Namespace: "argocd"}, secretB)
+				g.Expect(errB).To(gomega.HaveOccurred(), "cluster-b secret should be deleted because ManagedCluster is gone")
+			}
+
+			if tt.orphanSecrets != nil && len(tt.orphanSecrets) == 1 {
+				for key := range tt.orphanSecrets {
+					secret := &corev1.Secret{}
+					err := fakeClient.Get(context.TODO(), key, secret)
+
+					if tt.secretShouldExist {
+						g.Expect(err).NotTo(gomega.HaveOccurred(), tt.description)
+					} else {
+						g.Expect(err).To(gomega.HaveOccurred(), tt.description)
+					}
+				}
+			}
+		})
+	}
 }

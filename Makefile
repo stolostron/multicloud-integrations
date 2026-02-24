@@ -139,3 +139,13 @@ deploy-ocm:
 .PHONY: test-e2e
 test-e2e: deploy-ocm
 	e2e/run_e2e.sh
+
+.PHONY: test-e2e-cluster-secret-deletion
+test-e2e-cluster-secret-deletion: deploy-ocm
+	e2e/run_e2e.sh
+	e2e/cluster_secret_deletion_test.sh
+
+.PHONY: test-e2e-full
+test-e2e-full: deploy-ocm
+	e2e/run_e2e.sh
+	e2e/cluster_secret_deletion_test.sh
