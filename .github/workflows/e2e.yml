@@ -63,6 +63,11 @@ jobs:
           make test-e2e
         env:
           KUBECONFIG: /home/runner/.kube/config
+      - name: Run cluster secret deletion e2e test
+        run: |
+          e2e/cluster_secret_deletion_test.sh
+        env:
+          KUBECONFIG: /home/runner/.kube/config
 
   e2e-gitopsaddon:
     name: e2e-gitopsaddon
