@@ -312,24 +312,47 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 func (r *ReconcileGitOpsCluster) cleanupOrphanSecrets(orphanGitOpsClusterSecretList map[types.NamespacedName]string) bool {
 	cleanupSuccessful := true
 
-	// 4. Delete all orphan GitOps managed cluster secrets
 	for key, secretName := range orphanGitOpsClusterSecretList {
 		secretToDelete := &v1.Secret{}
 
 		err := r.Get(context.TODO(), key, secretToDelete)
+		if err != nil {
+			continue
+		}
+
+		clusterName := secretToDelete.Labels[utils.ACMClusterNameLabel]
+		if clusterName == "" {
+			clusterName = string(secretToDelete.Data["name"])
+		}
+
+		if clusterName == "" {
+			klog.Warningf("Skipping deletion of orphan cluster secret %s: unable to determine cluster name", secretName)
+			continue
+		}
+
+		managedCluster := &spokeclusterv1.ManagedCluster{}
+		err = r.Get(context.TODO(), types.NamespacedName{Name: clusterName}, managedCluster)
 
 		if err == nil {
-			klog.Infof("Deleting orphan GitOps managed cluster secret %s", secretName)
+			klog.Infof("Skipping deletion of orphan cluster secret %s: ManagedCluster %s still exists", secretName, clusterName)
+			continue
+		}
 
-			err = r.Delete(context.TODO(), secretToDelete)
+		if !k8errors.IsNotFound(err) {
+			klog.Errorf("failed to check ManagedCluster %s existence, skipping secret deletion: %v", clusterName, err)
+			cleanupSuccessful = false
 
-			if err != nil {
-				klog.Errorf("failed to delete orphan managed cluster secret %s, err: %s", key, err.Error())
+			continue
+		}
 
-				cleanupSuccessful = false
+		klog.Infof("Deleting orphan GitOps managed cluster secret %s: ManagedCluster %s is fully deleted", secretName, clusterName)
 
-				continue
-			}
+		err = r.Delete(context.TODO(), secretToDelete)
+		if err != nil {
+			klog.Errorf("failed to delete orphan managed cluster secret %s, err: %s", key, err.Error())
+			cleanupSuccessful = false
+
+			continue
 		}
 	}
 
