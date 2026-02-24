@@ -173,6 +173,25 @@ test-e2e-full:
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-full.log'
 	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-full.log' && echo "✓ E2E Full Test Complete - Logs: /tmp/e2e-full.log"
 
+# test-e2e-cluster-secret-deletion: For CI - assumes clusters, images, and base e2e ran, tests cluster secret deletion protection
+.PHONY: test-e2e-cluster-secret-deletion
+test-e2e-cluster-secret-deletion:
+	@echo "===== E2E Cluster Secret Deletion Protection Test (CI mode) ====="
+	@bash -o pipefail -c 'e2e/cluster_secret_deletion_test.sh 2>&1 | tee /tmp/e2e-cluster-secret-deletion.log' && echo "✓ E2E Cluster Secret Deletion Test Complete - Logs: /tmp/e2e-cluster-secret-deletion.log"
+
+# test-e2e-cluster-secret-deletion-full: For local - creates clusters, builds images, runs base e2e then deletion test
+.PHONY: test-e2e-cluster-secret-deletion-full
+test-e2e-cluster-secret-deletion-full:
+	@echo "===== E2E Cluster Secret Deletion Full Test (Local mode) ====="
+	@$(KIND) delete clusters --all || true
+	@$(KIND) create cluster --name $(HUB_CLUSTER)
+	@$(KIND) create cluster --name $(SPOKE_CLUSTER)
+	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-cluster-secret-deletion-full.log'
+	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
+	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
+	@bash -o pipefail -c 'e2e/cluster_secret_deletion_test.sh 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log' && echo "✓ E2E Cluster Secret Deletion Full Test Complete - Logs: /tmp/e2e-cluster-secret-deletion-full.log"
+
 # test-e2e-gitopsaddon-full: For local - creates clusters, builds images, verifies GitOps addon with app sync
 .PHONY: test-e2e-gitopsaddon-full
 test-e2e-gitopsaddon-full:
