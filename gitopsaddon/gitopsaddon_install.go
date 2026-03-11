@@ -19,12 +19,14 @@ package gitopsaddon
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
@@ -32,77 +34,310 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process
-// Note: ArgoCD CR is now created by Policy (argocd_policy.go on the hub), not by this addon.
-// The addon's job is to install the operator and prepare the namespace.
+// installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process.
+// The addon agent detects the cluster type at runtime:
+//   - Hub cluster: skip operator installation (operator already exists from OLM)
+//   - OCP cluster: create OLM subscription for openshift-gitops-operator
+//   - Non-OCP cluster (Kind, EKS): deploy embedded operator manifests
+//
+// ArgoCD CR is created by Policy (argocd_policy.go on the hub), not by this addon.
 func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
-	klog.Info("Start templating and applying openshift gitops operator and its instance...")
+	ctx := context.Background()
 
-	// 1. Create operator namespace with proper labels for pull secret sync
-	gitopsOperatorNsKey := types.NamespacedName{
-		Name: GitOpsOperatorNamespace,
-	}
-
-	// Install the Route CRD if it doesn't already exist (e.g. on Kind/EKS clusters without OCP)
-	// The Route CRD is maintained separately from the operator chart to avoid overwriting OCP-provided Routes
-	err := r.applyCRDIfNotExists(RouteCRDFS, "routes", "route.openshift.io/v1", "routes-openshift-crd/routes.route.openshift.io.crd.yaml")
+	// Detect cluster type
+	isHub, err := r.isHubCluster(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to detect hub cluster: %w", err)
+	}
+	isOCP, err := r.isOCPCluster(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to detect OCP cluster: %w", err)
 	}
 
-	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err == nil {
-		// 2. Template and apply the openshift gitops operator manifest
-		err := r.templateAndApplyChart("charts/openshift-gitops-operator", GitOpsOperatorNamespace, "openshift-gitops-operator")
-		if err != nil {
-			klog.Errorf("Failed to template and apply openshift-gitops-operator: %v", err)
-			return err
+	if isHub {
+		klog.Info("Hub cluster detected - skipping operator installation (operator already present)")
+		// On the hub, the ArgoCD namespace is the managed cluster's own namespace (e.g. local-cluster).
+		// Ensure the namespace has the right labels for image pull secret sync.
+		argoCDNs := getArgoCDNamespace()
+		if argoCDNs != "" && argoCDNs != GitOpsNamespace {
+			nsKey := types.NamespacedName{Name: argoCDNs}
+			if err := r.CreateUpdateNamespace(nsKey); err != nil {
+				return fmt.Errorf("failed to ensure namespace %s on hub: %w", argoCDNs, err)
+			}
 		}
-		klog.Info("Successfully templated and applied openshift-gitops-operator")
+		return nil
 	}
 
-	// 3. Wait for the operator deployment to be ready before creating the ArgoCD CR
-	klog.Info("Waiting for ArgoCD operator deployment to be ready...")
-	timeout := 2 * time.Minute
-	err = r.waitForOperatorReady(timeout)
-	if err != nil {
+	if isOCP {
+		klog.Info("OCP cluster detected - creating OLM subscription for openshift-gitops-operator")
+		return r.installViaOLMSubscription(ctx)
+	}
+
+	klog.Info("Non-OCP cluster detected - deploying embedded openshift-gitops operator")
+	return r.installViaEmbeddedManifests()
+}
+
+// installViaOLMSubscription creates an OLM subscription on OCP clusters
+func (r *GitopsAddonReconciler) installViaOLMSubscription(ctx context.Context) error {
+	if err := r.createOrUpdateOLMSubscription(ctx); err != nil {
+		return fmt.Errorf("failed to create OLM subscription: %w", err)
+	}
+
+	// Also check the OLM subscription namespace for the deployment, since OLM
+	// creates the operator deployment in the same namespace as the CSV/Subscription.
+	subNamespace := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAMESPACE", "openshift-operators")
+	klog.Info("Waiting for ArgoCD operator deployment to be ready (OLM mode)...")
+	if err := r.waitForOperatorReady(5*time.Minute, subNamespace); err != nil {
 		klog.Errorf("Failed to wait for ArgoCD operator: %v", err)
 		return err
 	}
-	klog.Info("ArgoCD operator is ready")
+	klog.Info("ArgoCD operator is ready (OLM mode)")
 
-	// 4. Create the openshift-gitops namespace (ArgoCD CR is created by Policy from the hub)
-	gitopsNsKey := types.NamespacedName{
-		Name: GitOpsNamespace,
-	}
-	if err := r.CreateUpdateNamespace(gitopsNsKey); err == nil {
-		klog.Info("Successfully created/updated openshift-gitops namespace")
-	}
-
-	// 5. Patch ArgoCD ServiceAccounts with imagePullSecrets
-	// The ArgoCD operator creates ServiceAccounts without imagePullSecrets, so we need to patch them
-	// This is needed for non-OCP clusters (like Kind, EKS) where node-level pull secrets don't exist
-	if err := r.patchArgoCDServiceAccountsWithImagePullSecrets(); err != nil {
-		klog.Warningf("Failed to patch ArgoCD ServiceAccounts: %v (continuing anyway)", err)
-	}
-
-	// 6. Check and delete pods with image pull issues on every reconcile cycle
-	// This handles the case where pods were already in ImagePullBackOff from a previous cycle
-	if err := r.deletePodsWithImagePullIssues(); err != nil {
-		klog.Warningf("Failed to delete pods with image pull issues: %v", err)
-	}
-
-	// 7. Log ArgoCD Agent status (operator handles deployment via ArgoCD CR)
-	if r.AddonConfig.ArgoCDAgentEnabled {
-		klog.Info("ArgoCD Agent is enabled - deployment is handled by the argocd-operator via the ArgoCD CR spec.argoCDAgent.agent")
-	} else {
-		klog.Info("ArgoCD Agent not enabled")
+	gitopsNsKey := types.NamespacedName{Name: GitOpsNamespace}
+	if err := r.CreateUpdateNamespace(gitopsNsKey); err != nil {
+		return fmt.Errorf("failed to create/update %s namespace: %w", GitOpsNamespace, err)
 	}
 
 	return nil
 }
 
+// installViaEmbeddedManifests deploys the operator from embedded chart on non-OCP clusters
+func (r *GitopsAddonReconciler) installViaEmbeddedManifests() error {
+	err := r.applyCRDIfNotExists(RouteCRDFS, "routes", "route.openshift.io/v1", "routes-openshift-crd/routes.route.openshift.io.crd.yaml")
+	if err != nil {
+		return err
+	}
+
+	gitopsOperatorNsKey := types.NamespacedName{Name: GitOpsOperatorNamespace}
+	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err != nil {
+		return fmt.Errorf("failed to create/update %s namespace: %w", GitOpsOperatorNamespace, err)
+	}
+
+	if err := r.templateAndApplyChart("charts/openshift-gitops-operator", GitOpsOperatorNamespace, "openshift-gitops-operator"); err != nil {
+		klog.Errorf("Failed to template and apply openshift-gitops-operator: %v", err)
+		return err
+	}
+	klog.Info("Successfully templated and applied openshift-gitops-operator")
+
+	klog.Info("Waiting for ArgoCD operator deployment to be ready...")
+	if err := r.waitForOperatorReady(2 * time.Minute); err != nil {
+		klog.Errorf("Failed to wait for ArgoCD operator: %v", err)
+		return err
+	}
+	klog.Info("ArgoCD operator is ready")
+
+	gitopsNsKey := types.NamespacedName{Name: GitOpsNamespace}
+	if err := r.CreateUpdateNamespace(gitopsNsKey); err != nil {
+		return fmt.Errorf("failed to create/update %s namespace: %w", GitOpsNamespace, err)
+	}
+
+	if err := r.patchArgoCDServiceAccountsWithImagePullSecrets(); err != nil {
+		klog.Warningf("Failed to patch ArgoCD ServiceAccounts: %v (continuing anyway)", err)
+	}
+
+	if err := r.deletePodsWithImagePullIssues(); err != nil {
+		klog.Warningf("Failed to delete pods with image pull issues: %v", err)
+	}
+
+	return nil
+}
+
+// isOCPCluster detects if the cluster is an OpenShift Container Platform cluster.
+// Checks multiple signals: CRDs specific to OCP, and OCM ClusterClaims.
+func (r *GitopsAddonReconciler) isOCPCluster(ctx context.Context) (bool, error) {
+	crd := &unstructured.Unstructured{}
+	crd.SetAPIVersion("apiextensions.k8s.io/v1")
+	crd.SetKind("CustomResourceDefinition")
+
+	// Check 1: ClusterVersion CRD (core OCP CRD)
+	if err := r.Get(ctx, types.NamespacedName{Name: "clusterversions.config.openshift.io"}, crd); err == nil {
+		klog.Info("OCP detected: clusterversions.config.openshift.io CRD exists")
+		return true, nil
+	} else if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+		return false, fmt.Errorf("failed to check clusterversions CRD: %w", err)
+	}
+
+	// Check 2: Infrastructure CRD (core OCP CRD)
+	if err := r.Get(ctx, types.NamespacedName{Name: "infrastructures.config.openshift.io"}, crd); err == nil {
+		klog.Info("OCP detected: infrastructures.config.openshift.io CRD exists")
+		return true, nil
+	} else if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+		return false, fmt.Errorf("failed to check infrastructures CRD: %w", err)
+	}
+
+	claim := &unstructured.Unstructured{}
+	claim.SetAPIVersion("cluster.open-cluster-management.io/v1alpha1")
+	claim.SetKind("ClusterClaim")
+
+	// Check 3: ClusterClaim version.openshift.io
+	if err := r.Get(ctx, types.NamespacedName{Name: "version.openshift.io"}, claim); err == nil {
+		klog.Info("OCP detected: version.openshift.io ClusterClaim exists")
+		return true, nil
+	} else if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+		return false, fmt.Errorf("failed to check version.openshift.io ClusterClaim: %w", err)
+	}
+
+	// Check 4: ClusterClaim product.open-cluster-management.io == "OpenShift"
+	if err := r.Get(ctx, types.NamespacedName{Name: "product.open-cluster-management.io"}, claim); err == nil {
+		val, _, _ := unstructured.NestedString(claim.Object, "spec", "value")
+		if val == "OpenShift" {
+			klog.Info("OCP detected: product.open-cluster-management.io ClusterClaim is OpenShift")
+			return true, nil
+		}
+	} else if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+		return false, fmt.Errorf("failed to check product ClusterClaim: %w", err)
+	}
+
+	klog.Info("Cluster is not OCP (no OpenShift indicators found)")
+	return false, nil
+}
+
+// isHubCluster detects if this cluster is the ACM/OCM hub cluster.
+// Checks for ClusterManager resources (hub operator) and ManagedCluster with local-cluster identity.
+func (r *GitopsAddonReconciler) isHubCluster(ctx context.Context) (bool, error) {
+	// Check 1: ClusterManager resources exist (hub-only OCM resource)
+	cmList := &unstructured.UnstructuredList{}
+	cmList.SetAPIVersion("operator.open-cluster-management.io/v1")
+	cmList.SetKind("ClusterManagerList")
+	if err := r.List(ctx, cmList); err != nil {
+		if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+			return false, fmt.Errorf("failed to list ClusterManager resources: %w", err)
+		}
+	} else if len(cmList.Items) > 0 {
+		klog.Info("Hub cluster detected: ClusterManager resource found")
+		return true, nil
+	}
+
+	// Check 2: ManagedCluster with name "local-cluster" or label "local-cluster=true"
+	mcList := &unstructured.UnstructuredList{}
+	mcList.SetAPIVersion("cluster.open-cluster-management.io/v1")
+	mcList.SetKind("ManagedClusterList")
+	if err := r.List(ctx, mcList); err != nil {
+		if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+			return false, fmt.Errorf("failed to list ManagedCluster resources: %w", err)
+		}
+	} else {
+		for i := range mcList.Items {
+			mc := &mcList.Items[i]
+			if mc.GetName() == "local-cluster" {
+				klog.Info("Hub cluster detected: ManagedCluster 'local-cluster' found")
+				return true, nil
+			}
+			labels := mc.GetLabels()
+			if labels != nil {
+				if v, ok := labels["local-cluster"]; ok && v == "true" {
+					klog.Infof("Hub cluster detected: ManagedCluster '%s' has local-cluster=true label", mc.GetName())
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// getArgoCDNamespace returns the namespace where the ArgoCD CR lives for this cluster.
+func getArgoCDNamespace() string {
+	if ns := os.Getenv("ARGOCD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return GitOpsNamespace
+}
+
+// getOLMEnvOrDefault reads an OLM subscription value from env var, falling back to a default.
+// When olmSubscription.enabled is true on the GitOpsCluster, the hub controller passes custom
+// values through AddOnDeploymentConfig env vars. The addon agent reads them here.
+func getOLMEnvOrDefault(envKey, defaultValue string) string {
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
+// createOrUpdateOLMSubscription creates or updates the OLM subscription for openshift-gitops-operator.
+// Subscription values are read from env vars (set by hub when olmSubscription.enabled=true) with
+// hardcoded defaults as fallback.
+func (r *GitopsAddonReconciler) createOrUpdateOLMSubscription(ctx context.Context) error {
+	subName := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+	subNamespace := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAMESPACE", "openshift-operators")
+	channel := getOLMEnvOrDefault("OLM_SUBSCRIPTION_CHANNEL", "latest")
+	source := getOLMEnvOrDefault("OLM_SUBSCRIPTION_SOURCE", "redhat-operators")
+	sourceNamespace := getOLMEnvOrDefault("OLM_SUBSCRIPTION_SOURCE_NAMESPACE", "openshift-marketplace")
+	installPlanApproval := getOLMEnvOrDefault("OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL", "Automatic")
+
+	klog.Infof("OLM subscription config: name=%s, namespace=%s, channel=%s, source=%s, sourceNamespace=%s, approval=%s",
+		subName, subNamespace, channel, source, sourceNamespace, installPlanApproval)
+
+	sub := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name":      subName,
+				"namespace": subNamespace,
+				"labels": map[string]interface{}{
+					"apps.open-cluster-management.io/gitopsaddon": "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"channel":             channel,
+				"name":                subName,
+				"source":              source,
+				"sourceNamespace":     sourceNamespace,
+				"installPlanApproval": installPlanApproval,
+				"config": map[string]interface{}{
+					"env": []interface{}{
+						map[string]interface{}{
+							"name":  "DISABLE_DEFAULT_ARGOCD_INSTANCE",
+							"value": "true",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Ensure the subscription namespace exists (custom namespace may not be pre-created)
+	nsObj := &corev1.Namespace{}
+	if err := r.Get(ctx, types.NamespacedName{Name: subNamespace}, nsObj); err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("Creating namespace %s for OLM subscription", subNamespace)
+			nsObj = &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: subNamespace},
+			}
+			if createErr := r.Create(ctx, nsObj); createErr != nil && !errors.IsAlreadyExists(createErr) {
+				return fmt.Errorf("failed to create namespace %s for OLM subscription: %w", subNamespace, createErr)
+			}
+		} else {
+			return fmt.Errorf("failed to check namespace %s: %w", subNamespace, err)
+		}
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetAPIVersion("operators.coreos.com/v1alpha1")
+	existing.SetKind("Subscription")
+	err := r.Get(ctx, types.NamespacedName{Name: subName, Namespace: subNamespace}, existing)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("Creating OLM subscription %s in namespace %s", subName, subNamespace)
+			return r.Create(ctx, sub)
+		}
+		return fmt.Errorf("failed to check for existing OLM subscription: %w", err)
+	}
+
+	labels := existing.GetLabels()
+	if labels != nil && labels["apps.open-cluster-management.io/gitopsaddon"] == "true" {
+		klog.Infof("OLM subscription %s exists with gitopsaddon label, updating spec", subName)
+		sub.SetResourceVersion(existing.GetResourceVersion())
+		return r.Update(ctx, sub)
+	}
+
+	klog.Infof("OLM subscription %s already exists in namespace %s without gitopsaddon label (pre-existing), skipping", subName, subNamespace)
+	return nil
+}
+
 // waitForOperatorReady waits for the ArgoCD operator deployment to be ready
-func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) error {
+func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration, extraNamespaces ...string) error {
 	// Skip waiting in test environments with fake clients
 	if r.Config != nil && r.Config.Host == "fake://test" {
 		klog.Info("Using fake client, skipping operator ready wait")
@@ -110,37 +345,51 @@ func (r *GitopsAddonReconciler) waitForOperatorReady(timeout time.Duration) erro
 	}
 
 	deploymentName := "openshift-gitops-operator-controller-manager"
-	deploymentKey := types.NamespacedName{
-		Name:      deploymentName,
-		Namespace: GitOpsOperatorNamespace,
+	// Check the primary namespace plus any additional namespaces (e.g., the OLM subscription namespace)
+	namespacesToCheck := []string{GitOpsOperatorNamespace}
+	for _, ns := range extraNamespaces {
+		if ns != "" && ns != GitOpsOperatorNamespace {
+			namespacesToCheck = append(namespacesToCheck, ns)
+		}
 	}
 
-	klog.Infof("Waiting for ArgoCD operator deployment %s to be ready in namespace %s...", deploymentName, GitOpsOperatorNamespace)
+	klog.Infof("Waiting for ArgoCD operator deployment %s to be ready (checking namespaces: %v)...", deploymentName, namespacesToCheck)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		deployment := &appsv1.Deployment{}
-		err := r.Get(ctx, deploymentKey, deployment)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				klog.Infof("Operator deployment %s not found yet, continuing to wait...", deploymentName)
-				return false, nil // Continue waiting
+		foundAny := false
+		for _, ns := range namespacesToCheck {
+			deployment := &appsv1.Deployment{}
+			key := types.NamespacedName{Name: deploymentName, Namespace: ns}
+			err := r.Get(ctx, key, deployment)
+			if err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				klog.Errorf("Error checking for operator deployment %s/%s: %v", ns, deploymentName, err)
+				continue
 			}
-			klog.Errorf("Error checking for operator deployment %s: %v", deploymentName, err)
-			return false, nil // Continue waiting on transient errors
+
+			foundAny = true
+			for _, cond := range deployment.Status.Conditions {
+				if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+					klog.Infof("Operator deployment %s/%s is available", ns, deploymentName)
+					return true, nil
+				}
+			}
+
+			desiredReplicas := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desiredReplicas = *deployment.Spec.Replicas
+			}
+			klog.Infof("Operator deployment %s/%s not yet available (replicas: %d/%d)", ns, deploymentName, deployment.Status.ReadyReplicas, desiredReplicas)
 		}
 
-		// Check if deployment is available
-		for _, cond := range deployment.Status.Conditions {
-			if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
-				klog.Infof("Operator deployment %s is available", deploymentName)
-				return true, nil
-			}
+		if !foundAny {
+			klog.Infof("Operator deployment %s not found in any namespace yet, continuing to wait...", deploymentName)
 		}
-
-		klog.Infof("Operator deployment %s not yet available (replicas: %d/%d)", deploymentName, deployment.Status.ReadyReplicas, *deployment.Spec.Replicas)
 		return false, nil
 	})
 }

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # GitOps Addon Test Scenarios
-# Tests all 6 scenarios for gitops-addon functionality
+# Tests all 5 scenarios for gitops-addon functionality
 #
 # Key Design Principles:
 # - All operations are performed from the hub cluster only (simulates user experience)
@@ -10,13 +10,17 @@
 # - For agent mode: Apps created on hub in managed cluster namespace
 # - For non-agent mode: Apps can be added to the Policy or created directly on managed cluster
 #
+# IMPORTANT: Scenarios MUST run sequentially (not in parallel). Each scenario
+# depends on a clean state from the previous scenario's cleanup. Running
+# scenarios in parallel will cause resource conflicts and flaky failures.
+#
 # Prerequisites:
 # - Hub cluster kubeconfig (set HUB_KUBECONFIG env var)
 # - Managed cluster kubeconfigs (for verification only)
 # - Managed clusters registered to hub with proper labels
 # - Hub ArgoCD configured as principal for agent mode
 #
-# Usage: ./test-scenarios.sh [1|2|3|4|5|6|all|cleanup]
+# Usage: ./test-scenarios.sh [1|2|3|4|5|all|cleanup]
 #
 # Environment Variables (with defaults):
 #   HUB_KUBECONFIG      - Path to hub cluster kubeconfig (default: ~/.kube/config)
@@ -33,6 +37,13 @@ KIND_KUBECONFIG="${KIND_KUBECONFIG:-$HOME/.kube/kind-cluster}"
 OCP_KUBECONFIG="${OCP_KUBECONFIG:-$HOME/.kube/ocp-cluster}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind-cluster1}"
 OCP_CLUSTER_NAME="${OCP_CLUSTER_NAME:-ocp-cluster5}"
+LOCAL_CLUSTER_NAME="local-cluster"
+# Override addon agent image (set to custom registry for local testing)
+ADDON_IMAGE="${ADDON_IMAGE:-}"
+
+# Hub template that resolves to "local-cluster" on hub and "openshift-gitops" on remote clusters.
+# Used in Policy patches so RBAC/Application targets the correct ArgoCD namespace.
+HUB_NS_TEMPLATE='{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,39 +56,224 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_debug() { echo -e "${BLUE}[DEBUG]${NC} $1"; }
 
+# Ensure AddOnTemplate exists and has the correct image (if ADDON_IMAGE is set).
+# Patches the template in-place using kubectl get/set-last-applied pattern.
+ensure_addon_template() {
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    log_info "Ensuring AddOnTemplates exist..."
+    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+
+    if [ -n "$ADDON_IMAGE" ]; then
+        log_info "Patching AddOnTemplate image to $ADDON_IMAGE..."
+        kubectl get addontemplate gitops-addon -o json | python3 -c "
+import json,sys
+data = json.loads(sys.stdin.read())
+for m in data['spec']['agentSpec']['workload']['manifests']:
+    kind = m.get('kind','')
+    if kind in ('Deployment', 'Job'):
+        for c in m.get('spec',{}).get('template',{}).get('spec',{}).get('containers',[]):
+            if 'multicloud-integrations' in c.get('image',''):
+                c['image'] = '$ADDON_IMAGE'
+                c['imagePullPolicy'] = 'Always'
+json.dump(data, sys.stdout)
+" | kubectl apply -f - 2>/dev/null
+        log_info "AddOnTemplate image patched to $ADDON_IMAGE"
+    fi
+}
+
 # Verify only ACM-managed ArgoCD exists (no duplicates)
 # Returns 0 if OK, 1 if duplicate found
+# For local-cluster: the addon deploys ArgoCD to the "local-cluster" namespace (not openshift-gitops)
+#   so we verify: openshift-gitops has ONLY the original "openshift-gitops" CR,
+#   and local-cluster namespace has "acm-openshift-gitops" CR
 verify_no_duplicate_argocd() {
     local cluster_kubeconfig=$1
     local cluster_name=$2
     
     export KUBECONFIG=$cluster_kubeconfig
-    
-    local argocd_list=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null || true)
-    local argocd_count=$(echo "$argocd_list" | grep -v '^$' | wc -l)
-    
-    if [ "$argocd_count" -eq 0 ]; then
-        log_info "$cluster_name: No ArgoCD CRs (expected during setup)"
-        return 0
-    elif [ "$argocd_count" -eq 1 ]; then
-        local argocd_name=$(echo "$argocd_list" | awk '{print $1}')
-        if [ "$argocd_name" = "acm-openshift-gitops" ]; then
-            log_info "$cluster_name: Only acm-openshift-gitops exists (correct)"
+
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ]; then
+        # For local-cluster: ArgoCD CR should be in "local-cluster" namespace, NOT in openshift-gitops
+        local argocd_in_gitops=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null || true)
+        local gitops_count=$(echo "$argocd_in_gitops" | grep -v '^$' | wc -l)
+        
+        # openshift-gitops should have exactly 1 ArgoCD CR: the original "openshift-gitops"
+        if [ "$gitops_count" -eq 1 ]; then
+            local gitops_name=$(echo "$argocd_in_gitops" | awk '{print $1}')
+            if [ "$gitops_name" = "openshift-gitops" ]; then
+                log_info "$cluster_name: openshift-gitops namespace has only the original ArgoCD CR (correct, no duplicate)"
+            else
+                log_error "$cluster_name: openshift-gitops namespace has unexpected CR: $gitops_name"
+                return 1
+            fi
+        elif [ "$gitops_count" -gt 1 ]; then
+            log_error "$cluster_name: DUPLICATE ArgoCD CRs in openshift-gitops namespace ($gitops_count):"
+            echo "$argocd_in_gitops"
+            return 1
+        fi
+        
+        # local-cluster namespace should have acm-openshift-gitops
+        local argocd_in_local=$(kubectl get argocd -n local-cluster --no-headers 2>/dev/null || true)
+        local local_count=$(echo "$argocd_in_local" | grep -v '^$' | wc -l)
+        
+        if [ "$local_count" -eq 1 ]; then
+            local local_name=$(echo "$argocd_in_local" | awk '{print $1}')
+            if [ "$local_name" = "acm-openshift-gitops" ]; then
+                log_info "$cluster_name: acm-openshift-gitops exists in local-cluster namespace (correct)"
+                return 0
+            else
+                log_error "$cluster_name: Unexpected ArgoCD CR in local-cluster namespace: $local_name"
+                return 1
+            fi
+        elif [ "$local_count" -eq 0 ]; then
+            log_info "$cluster_name: No ArgoCD CR in local-cluster namespace yet (expected during setup)"
             return 0
         else
-            log_error "$cluster_name: Unexpected ArgoCD CR: $argocd_name (expected acm-openshift-gitops)"
+            log_error "$cluster_name: Multiple ArgoCD CRs in local-cluster namespace ($local_count):"
+            echo "$argocd_in_local"
             return 1
         fi
     else
-        log_error "$cluster_name: DUPLICATE ArgoCD CRs found ($argocd_count):"
-        echo "$argocd_list"
-        # Delete the default openshift-gitops if it exists
-        if echo "$argocd_list" | grep -q "openshift-gitops"; then
-            log_warn "Deleting duplicate openshift-gitops ArgoCD CR..."
-            kubectl delete argocd openshift-gitops -n openshift-gitops --ignore-not-found --wait=false 2>/dev/null || true
+        # For remote clusters: ArgoCD CR should be in openshift-gitops namespace
+        local argocd_list=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null || true)
+        local argocd_count=$(echo "$argocd_list" | grep -v '^$' | wc -l)
+        
+        if [ "$argocd_count" -eq 0 ]; then
+            log_info "$cluster_name: No ArgoCD CRs (expected during setup)"
+            return 0
+        elif [ "$argocd_count" -eq 1 ]; then
+            local argocd_name=$(echo "$argocd_list" | awk '{print $1}')
+            if [ "$argocd_name" = "acm-openshift-gitops" ]; then
+                log_info "$cluster_name: Only acm-openshift-gitops exists (correct)"
+                return 0
+            else
+                log_error "$cluster_name: Unexpected ArgoCD CR: $argocd_name (expected acm-openshift-gitops)"
+                return 1
+            fi
+        else
+            log_error "$cluster_name: DUPLICATE ArgoCD CRs found ($argocd_count):"
+            echo "$argocd_list"
+            return 1
         fi
+    fi
+}
+
+# Comprehensive post-scenario environment health check
+# Verifies no cross-namespace conflicts, no orphaned resources, no controller confusion
+# cluster_kubeconfig: kubeconfig for the cluster to check
+# cluster_name: name of the cluster
+# scenario_num: scenario number for logging
+# includes_local: "true" if this scenario includes local-cluster
+verify_environment_health() {
+    local cluster_kubeconfig=$1
+    local cluster_name=$2
+    local scenario_num=$3
+    local includes_local=${4:-false}
+    local issues=0
+
+    log_info "--- Environment health check: $cluster_name (scenario $scenario_num) ---"
+    
+    # Determine the ArgoCD namespace for this cluster
+    local argocd_ns="openshift-gitops"
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ]; then
+        argocd_ns="local-cluster"
+    fi
+
+    export KUBECONFIG=$cluster_kubeconfig
+
+    # CHECK 1: acm-openshift-gitops must NOT exist in openshift-gitops on the hub
+    # (it should be in local-cluster namespace instead, to avoid conflict with the original)
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ]; then
+        local stale_acm=$(kubectl get argocd acm-openshift-gitops -n openshift-gitops --no-headers 2>/dev/null || true)
+        if [ -n "$stale_acm" ]; then
+            log_error "ENV CHECK FAIL: acm-openshift-gitops exists in openshift-gitops on hub (CONFLICT!)"
+            issues=$((issues + 1))
+        else
+            log_info "  [OK] No acm-openshift-gitops in openshift-gitops ns on hub (no conflict)"
+        fi
+    fi
+
+    # CHECK 2: ArgoCD application controller should only manage apps in its own namespace
+    # Get the ArgoCD controller namespace from the ArgoCD CR
+    local controller_ns=$(kubectl get argocd acm-openshift-gitops -n $argocd_ns -o jsonpath='{.status.applicationController}' 2>/dev/null || true)
+    if [ -n "$controller_ns" ] || kubectl get argocd acm-openshift-gitops -n $argocd_ns -o name 2>/dev/null | grep -q .; then
+        # Check that the ArgoCD controller pod is running in the correct namespace
+        local controller_pods=$(kubectl get pods -n $argocd_ns -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --no-headers 2>/dev/null || true)
+        if echo "$controller_pods" | grep -q "Running"; then
+            log_info "  [OK] ArgoCD app controller running in $argocd_ns namespace"
+        else
+            local any_controller=$(kubectl get pods -n $argocd_ns --no-headers 2>/dev/null | grep "application-controller" || true)
+            if [ -n "$any_controller" ]; then
+                log_info "  [OK] ArgoCD app controller present in $argocd_ns namespace"
+            else
+                log_warn "  ArgoCD app controller not found in $argocd_ns (may still be starting)"
+            fi
+        fi
+
+        # Check that Applications in this namespace belong to the right ArgoCD
+        local apps=$(kubectl get applications -n $argocd_ns --no-headers 2>/dev/null || true)
+        if [ -n "$apps" ] && echo "$apps" | grep -qv '^$'; then
+            local app_count=$(echo "$apps" | grep -v '^$' | wc -l)
+            # Verify each app's controllerNamespace matches its ArgoCD namespace
+            local mismatched_apps=$(kubectl get applications -n $argocd_ns -o jsonpath='{range .items[*]}{.metadata.name}{" controllerNS="}{.status.controllerNamespace}{"\n"}{end}' 2>/dev/null | grep -v "controllerNS=$argocd_ns" | grep -v "controllerNS=$" || true)
+            if [ -n "$mismatched_apps" ]; then
+                log_error "ENV CHECK FAIL: Apps with mismatched controllerNamespace in $argocd_ns:"
+                echo "$mismatched_apps"
+                issues=$((issues + 1))
+            else
+                log_info "  [OK] All $app_count app(s) in $argocd_ns managed by correct controller"
+            fi
+        else
+            log_info "  [OK] No applications in $argocd_ns (expected for non-app scenarios)"
+        fi
+    fi
+
+    # CHECK 3: On hub, verify the original openshift-gitops ArgoCD is untouched
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ] || [ "$includes_local" = "true" ]; then
+        export KUBECONFIG=$HUB_KUBECONFIG
+        local original_argocd
+        original_argocd=$(kubectl get argocd openshift-gitops -n openshift-gitops --no-headers 2>/dev/null || true)
+        if [ -n "$original_argocd" ]; then
+            log_info "  [OK] Original hub ArgoCD (openshift-gitops) is present and untouched"
+        else
+            log_error "  Original hub ArgoCD (openshift-gitops) not found - hub ArgoCD is required"
+            return 1
+        fi
+        export KUBECONFIG=$cluster_kubeconfig
+    fi
+
+    # CHECK 4: No orphaned ArgoCD CRs in unexpected namespaces on the managed cluster
+    if [ "$cluster_name" != "$LOCAL_CLUSTER_NAME" ]; then
+        local all_argocd=$(kubectl get argocd --all-namespaces --no-headers 2>/dev/null || true)
+        local unexpected=$(echo "$all_argocd" | grep -v "^$argocd_ns " | grep -v '^$' || true)
+        if [ -n "$unexpected" ]; then
+            log_warn "  ArgoCD CRs found in unexpected namespaces on $cluster_name:"
+            echo "$unexpected"
+        else
+            log_info "  [OK] ArgoCD CRs only in expected namespace ($argocd_ns) on $cluster_name"
+        fi
+    fi
+
+    # CHECK 5: No conflicting ClusterRoleBindings between ArgoCD instances
+    local crb_count=$(kubectl get clusterrolebinding -o name 2>/dev/null | grep -c "acm-openshift-gitops" || true)
+    if [ "$crb_count" -gt 1 ]; then
+        log_warn "  Multiple ClusterRoleBindings for acm-openshift-gitops ($crb_count):"
+        kubectl get clusterrolebinding -o name 2>/dev/null | grep "acm-openshift-gitops"
+    elif [ "$crb_count" -eq 1 ]; then
+        log_info "  [OK] Single ClusterRoleBinding for acm-openshift-gitops"
+    else
+        log_info "  [OK] No ClusterRoleBinding for acm-openshift-gitops (expected if RBAC not added)"
+    fi
+
+    if [ "$issues" -gt 0 ]; then
+        log_error "Environment health check FAILED with $issues issue(s) on $cluster_name"
         return 1
     fi
+
+    log_info "  Environment health check PASSED for $cluster_name"
+    return 0
 }
 
 wait_for_condition() {
@@ -215,34 +411,91 @@ cleanup_scenario() {
         issues=$((issues + 1))
     fi
     
-    # 7. VERIFY managed cluster is clean (READ-ONLY - no writes to managed cluster)
-    log_info "Verifying managed cluster cleanup (read-only)..."
-    if [ "$cluster_name" = "$KIND_CLUSTER_NAME" ]; then
+    # 7. VERIFY managed cluster is clean (the addon's pre-delete Job should have removed resources)
+    # NOTE: Hub (local-cluster) cleanup is CONSERVATIVE by design:
+    #   - Only removes ArgoCD CRs with gitopsaddon label + ClusterRoleBinding
+    #   - Operator deployment and OLM resources are SHARED with original openshift-gitops
+    #   - Guestbook namespace is a test artifact (not managed by addon)
+    # Remote managed clusters get FULL cleanup (ArgoCD, OLM, operator, everything)
+    log_info "Verifying managed cluster cleanup..."
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ]; then
+        export KUBECONFIG=$HUB_KUBECONFIG
+    elif [ "$cluster_name" = "$KIND_CLUSTER_NAME" ]; then
         export KUBECONFIG=$KIND_KUBECONFIG
     else
         export KUBECONFIG=$OCP_KUBECONFIG
     fi
-    
-    # Check for any ArgoCD CRs - the pre-delete Job should have removed them
-    local argocd_list=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null || true)
-    local argocd_count=$(echo "$argocd_list" | grep -v '^$' | wc -l)
-    
-    if [ "$argocd_count" -gt 0 ]; then
-        log_warn "Managed cluster still has $argocd_count ArgoCD CR(s) after cleanup:"
-        echo "$argocd_list"
-        log_warn "This means the pre-delete cleanup Job did not fully clean up."
+
+    local argocd_ns="openshift-gitops"
+    if [ "$cluster_name" = "$LOCAL_CLUSTER_NAME" ]; then
+        argocd_ns="local-cluster"
+    fi
+
+    # Wait up to 90s for ArgoCD CR to be fully removed by pre-delete Job
+    # (operator needs time to reconcile finalizers and clean up associated resources)
+    local argocd_wait=0
+    while [ "$argocd_wait" -lt 90 ]; do
+        if ! kubectl get argocd acm-openshift-gitops -n $argocd_ns &>/dev/null 2>/dev/null; then
+            break
+        fi
+        sleep 5
+        argocd_wait=$((argocd_wait + 5))
+    done
+
+    if kubectl get argocd acm-openshift-gitops -n $argocd_ns &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP VERIFY FAIL: ArgoCD CR acm-openshift-gitops still in $argocd_ns on $cluster_name after 90s"
+        log_error "  Pre-delete cleanup Job did not remove ArgoCD CR properly!"
+        kubectl delete argocd acm-openshift-gitops -n $argocd_ns --ignore-not-found --wait=false 2>/dev/null || true
         issues=$((issues + 1))
     else
-        log_info "Managed cluster: No ArgoCD CRs (clean)"
+        log_info "  [OK] ArgoCD CR removed from $argocd_ns on $cluster_name"
     fi
+
+    # Checks below only apply to REMOTE managed clusters (not hub/local-cluster)
+    # Hub cleanup is conservative — operator and OLM are shared resources
+    if [ "$cluster_name" != "$LOCAL_CLUSTER_NAME" ]; then
+        # For OCP clusters, verify addon-managed OLM subscription was cleaned up
+        # Only check for subscriptions with the gitopsaddon label — pre-existing
+        # admin-installed subscriptions without the label are intentionally preserved.
+        if [ "$cluster_name" = "$OCP_CLUSTER_NAME" ]; then
+            local labeled_subs=$(kubectl get subscription.operators.coreos.com -n openshift-operators \
+                -l apps.open-cluster-management.io/gitopsaddon=true -o name 2>/dev/null || true)
+            if [ -n "$labeled_subs" ]; then
+                log_error "CLEANUP VERIFY FAIL: gitopsaddon-labeled OLM subscription still exists on $cluster_name after cleanup!"
+                issues=$((issues + 1))
+            else
+                log_info "  [OK] gitopsaddon-managed OLM subscription removed on $cluster_name"
+            fi
+            # Info-only: check if any non-labeled subscription still exists (pre-existing, expected)
+            local remaining_sub=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o name 2>/dev/null || true)
+            if [ -n "$remaining_sub" ]; then
+                log_info "  [INFO] Pre-existing OLM subscription still on $cluster_name (not managed by addon, correctly preserved)"
+            fi
+        fi
+
+        # Verify embedded operator deployment was cleaned up (remote clusters only)
+        if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
+            log_error "CLEANUP VERIFY FAIL: Embedded operator deployment still in openshift-gitops-operator on $cluster_name"
+            issues=$((issues + 1))
+        else
+            log_info "  [OK] Operator deployment removed from openshift-gitops-operator on $cluster_name"
+        fi
+    fi
+
+    # Clean up test artifacts (guestbook app resources, ClusterRoleBinding, guestbook ns)
+    # These are test artifacts, not managed by the addon — cleanup is test responsibility
+    kubectl delete applications.argoproj.io --all -n $argocd_ns --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl delete appproject --all -n $argocd_ns --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl delete clusterrolebinding acm-openshift-gitops-cluster-admin --ignore-not-found 2>/dev/null || true
 
     # Switch back to hub
     export KUBECONFIG=$HUB_KUBECONFIG
-    
+
     if [ $issues -eq 0 ]; then
         log_info "Cleanup of $gitopscluster_name complete - all verified clean"
     else
-        log_warn "Cleanup of $gitopscluster_name had $issues issue(s) - see warnings above"
+        log_error "Cleanup of $gitopscluster_name had $issues issue(s) - addon cleanup may have bugs!"
     fi
 }
 
@@ -260,6 +513,42 @@ cleanup_all() {
     # Delete all AddOnTemplates managed by us (dynamic ones)
     kubectl delete addontemplate -l app.kubernetes.io/managed-by=multicloud-integrations --ignore-not-found 2>/dev/null || true
 
+    # Delete ALL Placements in openshift-gitops FIRST — this stops the gitopscluster
+    # controller from finding managed clusters and recreating resources during cleanup
+    log_info "Deleting all Placements in openshift-gitops..."
+    kubectl delete placement --all -n openshift-gitops --ignore-not-found --timeout=30s 2>/dev/null || true
+
+    # Delete ALL GitOpsCluster resources to ensure clean state (catches unknown leftovers)
+    local remaining_goc=$(kubectl get gitopscluster -A --no-headers 2>/dev/null | wc -l)
+    if [ "$remaining_goc" -gt 0 ]; then
+        log_info "Deleting $remaining_goc remaining GitOpsCluster(s)..."
+        kubectl get gitopscluster -A --no-headers 2>/dev/null || true
+        kubectl delete gitopscluster --all -A --ignore-not-found --timeout=30s 2>/dev/null || true
+    fi
+
+    # Delete ALL Policies and PlacementBindings (stops enforcement before addon cleanup)
+    kubectl delete policy --all -n openshift-gitops --ignore-not-found --timeout=30s 2>/dev/null || true
+    kubectl delete placementbinding --all -n openshift-gitops --ignore-not-found --timeout=30s 2>/dev/null || true
+
+    # Wait for controller to stop reconciling deleted resources
+    sleep 10
+
+    # Delete ALL ManagedClusterAddOns for gitops-addon (catches stuck addons from unknown GitOpsClusters)
+    for ns in $(kubectl get managedclusteraddon gitops-addon -A --no-headers 2>/dev/null | awk '{print $1}'); do
+        log_info "Force-deleting ManagedClusterAddOn gitops-addon in namespace $ns..."
+        # Use merge patch with empty array — json-patch "remove" silently fails if the addon-manager
+        # re-adds the finalizer between patch and delete
+        kubectl patch managedclusteraddon gitops-addon -n $ns --type=merge \
+            -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+        kubectl delete managedclusteraddon gitops-addon -n $ns --force --grace-period=0 --ignore-not-found 2>/dev/null || true
+    done
+
+    # Delete ALL AddOnDeploymentConfigs for gitops-addon
+    for ns in $(kubectl get addondeploymentconfig gitops-addon-config -A --no-headers 2>/dev/null | awk '{print $1}'); do
+        log_info "Deleting AddOnDeploymentConfig in namespace $ns..."
+        kubectl delete addondeploymentconfig gitops-addon-config -n $ns --ignore-not-found 2>/dev/null || true
+    done
+
     # Delete stale Applications and AppProjects in managed cluster namespaces on hub
     log_info "Removing stale hub-side Applications and AppProjects..."
     kubectl delete applications.argoproj.io --all -n $OCP_CLUSTER_NAME --ignore-not-found --wait=false 2>/dev/null || true
@@ -273,13 +562,16 @@ cleanup_all() {
     # The addon's pre-delete Job handles managed cluster cleanup automatically
     # ============================================
 
+    cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
     cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
+    cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-gitops" "kind-placement"
     cleanup_scenario "$KIND_CLUSTER_NAME" "kind-gitops" "kind-placement"
+    cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
     cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
+    cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
     cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
+    cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
     cleanup_scenario "$KIND_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
-    cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-olm-gitops" "ocp-agent-olm-placement"
-
     # ============================================
     # STEP 3: Direct managed cluster cleanup
     # During initial cleanup ONLY, we can directly connect to managed clusters
@@ -290,6 +582,12 @@ cleanup_all() {
     # ============================================
 
     log_info "--- Direct managed cluster cleanup (initial only) ---"
+
+    # Cleanup local-cluster (hub) ArgoCD CR in local-cluster namespace
+    log_info "Cleaning up local-cluster ArgoCD CR directly..."
+    export KUBECONFIG=$HUB_KUBECONFIG
+    kubectl delete argocd acm-openshift-gitops -n local-cluster --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
 
     # Cleanup OCP managed cluster
     if [ -n "$OCP_KUBECONFIG" ] && [ -f "$OCP_KUBECONFIG" ]; then
@@ -312,63 +610,136 @@ cleanup_all() {
     log_info "Removing stale cluster secrets..."
     kubectl delete secret cluster-$KIND_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
     kubectl delete secret cluster-$OCP_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
+    kubectl delete secret cluster-$LOCAL_CLUSTER_NAME -n openshift-gitops --ignore-not-found 2>/dev/null || true
 
     # ============================================
-    # STEP 5: Verify cleanup
+    # STEP 5: Verify cleanup - STRICT (fail if not clean)
     # ============================================
-    
-    log_info "--- Verifying cleanup ---"
-    sleep 10
-    
-    # Check KIND cluster
+
+    log_info "--- Verifying cleanup (strict) ---"
+    sleep 15
+    local cleanup_issues=0
+
+    # ---------- KIND cluster checks ----------
     export KUBECONFIG=$KIND_KUBECONFIG
     local kind_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$kind_argocd_count" -gt 0 ]; then
-        log_warn "KIND cluster still has $kind_argocd_count ArgoCD CR(s) - stripping finalizers and deleting"
+        log_error "CLEANUP FAILED: KIND cluster still has $kind_argocd_count ArgoCD CR(s)"
+        kubectl get argocd -n openshift-gitops 2>/dev/null || true
         for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
-            kubectl patch $argocd_name -n openshift-gitops --type=json \
-                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+            kubectl patch $argocd_name -n openshift-gitops --type=merge \
+                -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
         done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
     else
-        log_info "KIND cluster: ArgoCD CRs cleaned up"
+        log_info "  [OK] KIND cluster: No ArgoCD CRs"
     fi
-    
-    # Check OCP cluster
+
+    if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP FAILED: KIND cluster has embedded operator deployment in openshift-gitops-operator"
+        kubectl delete deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator --ignore-not-found 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] KIND cluster: No operator deployment in openshift-gitops-operator"
+    fi
+
+    if kubectl get namespace guestbook &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP FAILED: KIND cluster still has guestbook namespace"
+        kubectl delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] KIND cluster: No guestbook namespace"
+    fi
+
+    # ---------- OCP cluster checks ----------
     export KUBECONFIG=$OCP_KUBECONFIG
     local ocp_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$ocp_argocd_count" -gt 0 ]; then
-        log_warn "OCP cluster still has $ocp_argocd_count ArgoCD CR(s) - stripping finalizers and deleting"
+        log_error "CLEANUP FAILED: OCP cluster still has $ocp_argocd_count ArgoCD CR(s)"
+        kubectl get argocd -n openshift-gitops 2>/dev/null || true
         for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
-            kubectl patch $argocd_name -n openshift-gitops --type=json \
-                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+            kubectl patch $argocd_name -n openshift-gitops --type=merge \
+                -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
         done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
     else
-        log_info "OCP cluster: ArgoCD CRs cleaned up"
+        log_info "  [OK] OCP cluster: No ArgoCD CRs"
     fi
 
-    # Check for stale operator deployments on OCP
+    # OLM subscription check on OCP
+    local olm_sub_count=$(kubectl get subscription.operators.coreos.com -n openshift-operators \
+        -l apps.open-cluster-management.io/gitopsaddon=true --no-headers 2>/dev/null | grep -v '^$' | wc -l)
+    if [ "$olm_sub_count" -gt 0 ]; then
+        log_error "CLEANUP FAILED: OCP cluster still has $olm_sub_count OLM subscription(s) with gitopsaddon label"
+        kubectl get subscription.operators.coreos.com -n openshift-operators -l apps.open-cluster-management.io/gitopsaddon=true 2>/dev/null || true
+        kubectl delete subscription.operators.coreos.com -l apps.open-cluster-management.io/gitopsaddon=true -n openshift-operators --ignore-not-found 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] OCP cluster: No gitopsaddon OLM subscriptions"
+    fi
+
+    # Operator deployment check on OCP
     for ns in openshift-operators openshift-gitops-operator; do
         if kubectl get deployment openshift-gitops-operator-controller-manager -n $ns &>/dev/null 2>/dev/null; then
-            log_warn "OCP cluster: Operator still running in $ns - deleting"
+            log_error "CLEANUP FAILED: OCP cluster has operator deployment in $ns"
             kubectl delete deployment openshift-gitops-operator-controller-manager -n $ns --ignore-not-found 2>/dev/null || true
+            cleanup_issues=$((cleanup_issues + 1))
+        else
+            log_info "  [OK] OCP cluster: No operator deployment in $ns"
         fi
     done
 
-    # Final wait and re-check ArgoCD CRs on OCP (operator deletion may trigger re-check)
-    sleep 5
-    ocp_argocd_count=$(kubectl get argocd -n openshift-gitops --no-headers 2>/dev/null | grep -v '^$' | wc -l)
-    if [ "$ocp_argocd_count" -gt 0 ]; then
-        log_warn "OCP cluster STILL has $ocp_argocd_count ArgoCD CR(s) after operator removal - stripping finalizers"
-        kubectl get argocd -n openshift-gitops 2>/dev/null || true
-        for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
-            kubectl patch $argocd_name -n openshift-gitops --type=json \
-                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
-        done
-        kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
+    if kubectl get namespace guestbook &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP FAILED: OCP cluster still has guestbook namespace"
+        kubectl delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
     else
-        log_info "OCP cluster: Confirmed clean (no ArgoCD CRs, no operator)"
+        log_info "  [OK] OCP cluster: No guestbook namespace"
+    fi
+
+    # ---------- Hub / local-cluster checks ----------
+    export KUBECONFIG=$HUB_KUBECONFIG
+    if kubectl get argocd acm-openshift-gitops -n local-cluster &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP FAILED: Hub still has acm-openshift-gitops ArgoCD CR in local-cluster ns"
+        kubectl delete argocd acm-openshift-gitops -n local-cluster --ignore-not-found --wait=false 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] Hub: No acm-openshift-gitops in local-cluster ns"
+    fi
+
+    if kubectl get namespace guestbook &>/dev/null 2>/dev/null; then
+        log_error "CLEANUP FAILED: Hub still has guestbook namespace"
+        kubectl delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] Hub: No guestbook namespace"
+    fi
+
+    local hub_addon_count=$(kubectl get managedclusteraddon gitops-addon --all-namespaces --no-headers 2>/dev/null | grep -v '^$' | wc -l)
+    if [ "$hub_addon_count" -gt 0 ]; then
+        log_error "CLEANUP FAILED: Hub still has $hub_addon_count ManagedClusterAddOn(s)"
+        kubectl get managedclusteraddon gitops-addon --all-namespaces 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] Hub: No ManagedClusterAddOns"
+    fi
+
+    local hub_gitops_count=$(kubectl get gitopscluster --all-namespaces --no-headers 2>/dev/null | grep -v '^$' | wc -l)
+    if [ "$hub_gitops_count" -gt 0 ]; then
+        log_error "CLEANUP FAILED: Hub still has $hub_gitops_count GitOpsCluster(s)"
+        kubectl get gitopscluster --all-namespaces 2>/dev/null || true
+        cleanup_issues=$((cleanup_issues + 1))
+    else
+        log_info "  [OK] Hub: No GitOpsClusters"
+    fi
+
+    if [ "$cleanup_issues" -gt 0 ]; then
+        log_error "=== Initial cleanup had $cleanup_issues issue(s) - forced cleanup applied, waiting for stabilization ==="
+        sleep 15
+    else
+        log_info "  === All cleanup verified clean ==="
     fi
 
     export KUBECONFIG=$HUB_KUBECONFIG
@@ -395,8 +766,8 @@ cleanup_managed_cluster_direct() {
     # Must strip finalizers first - if the operator is crashed it can't process them
     log_info "$cluster_name: Removing ALL ArgoCD CRs in openshift-gitops namespace..."
     for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
-        kubectl patch $argocd_name -n openshift-gitops --type=json \
-            -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+        kubectl patch $argocd_name -n openshift-gitops --type=merge \
+            -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
     done
     kubectl delete argocd --all -n openshift-gitops --wait=false 2>/dev/null || true
 
@@ -449,8 +820,8 @@ cleanup_managed_cluster_direct() {
     if [ "$remaining" -gt 0 ]; then
         log_warn "$cluster_name: ArgoCD CRs still exist after cleanup - stripping finalizers and deleting..."
         for argocd_name in $(kubectl get argocd -n openshift-gitops -o name 2>/dev/null); do
-            kubectl patch $argocd_name -n openshift-gitops --type=json \
-                -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+            kubectl patch $argocd_name -n openshift-gitops --type=merge \
+                -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
         done
         kubectl delete argocd --all -n openshift-gitops --force --grace-period=0 2>/dev/null || true
     fi
@@ -472,6 +843,29 @@ cleanup_managed_cluster_direct() {
     log_info "$cluster_name: Direct cleanup complete"
 }
 
+# Ensure the GitOps operator allows ArgoCD instances in local-cluster namespace
+# to have cluster-scoped permissions (required for deploying to other namespaces).
+# Uses the OLM Subscription config so changes persist through operator upgrades.
+ensure_local_cluster_in_cluster_config() {
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    local current=$(kubectl get deployment openshift-gitops-operator-controller-manager \
+        -n openshift-gitops-operator \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ARGOCD_CLUSTER_CONFIG_NAMESPACES")].value}' 2>/dev/null)
+
+    if echo "$current" | grep -q "local-cluster"; then
+        log_info "ARGOCD_CLUSTER_CONFIG_NAMESPACES already includes local-cluster: $current"
+    else
+        log_info "Adding local-cluster to ARGOCD_CLUSTER_CONFIG_NAMESPACES via Subscription..."
+        kubectl patch subscription.operators.coreos.com openshift-gitops-operator \
+            -n openshift-gitops-operator --type=merge \
+            -p '{"spec":{"config":{"env":[{"name":"ARGOCD_CLUSTER_CONFIG_NAMESPACES","value":"openshift-gitops,local-cluster"}]}}}' 2>/dev/null || true
+        log_info "Waiting for operator pod to restart with new config..."
+        kubectl rollout status deployment/openshift-gitops-operator-controller-manager \
+            -n openshift-gitops-operator --timeout=120s 2>/dev/null || true
+    fi
+}
+
 # Configure hub ArgoCD for non-agent mode (scenarios 1 & 2)
 # DELETES and RECREATES the ArgoCD CR with minimal config (no principal)
 configure_hub_argocd_non_agent() {
@@ -479,13 +873,15 @@ configure_hub_argocd_non_agent() {
 
     export KUBECONFIG=$HUB_KUBECONFIG
 
+    ensure_local_cluster_in_cluster_config
+
     # Delete existing ArgoCD CR
     log_info "Deleting existing hub ArgoCD CR..."
     kubectl delete argocd openshift-gitops -n openshift-gitops --wait=false 2>/dev/null || true
     sleep 5
 
-    # Recreate with minimal non-agent configuration
-    log_info "Creating hub ArgoCD CR with minimal non-agent config..."
+    # Recreate with non-agent configuration (controller disabled, server enabled)
+    log_info "Creating hub ArgoCD CR with non-agent config..."
     kubectl apply -f - <<'EOF'
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD
@@ -495,10 +891,16 @@ metadata:
 spec:
   controller:
     enabled: false
+  server:
+    route:
+      enabled: true
 EOF
 
-    # Wait for ArgoCD to be ready
-    sleep 10
+    # Wait for ArgoCD server to be ready (the gitopscluster controller needs services)
+    wait_for_condition 120 "ArgoCD server pod in openshift-gitops" \
+        "kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-server --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_warn "ArgoCD server pod not ready after 120s, continuing anyway..."
+        }
     log_info "Hub ArgoCD configured for non-agent mode"
 }
 
@@ -508,35 +910,47 @@ configure_hub_argocd_agent() {
     log_info "Configuring hub ArgoCD for agent mode (PATCH existing)..."
     
     export KUBECONFIG=$HUB_KUBECONFIG
+
+    ensure_local_cluster_in_cluster_config
     
-    # Patch existing ArgoCD CR for agent mode instead of delete/recreate.
-    # This preserves operator-managed defaults (resource limits, SSO config, etc.)
-    # while adding the principal configuration needed for agent mode.
-    # Key settings:
+    # Apply ArgoCD CR for agent mode (create or update).
+    # Uses apply instead of patch to handle the case where the CR was deleted
+    # between scenarios. Key settings:
     #   - controller.enabled: false  (principal handles app reconciliation)
     #   - sourceNamespaces: ["*"]    (watch Applications in managed cluster namespaces)
     #   - principal.enabled: true    (enable gRPC principal for agents)
     #   - principal.auth: mtls       (authenticate agents via OCM addon client certs)
     #   - principal.namespace.allowedNamespaces: ["*"]  (allow any namespace)
-    log_info "Patching hub ArgoCD CR for agent mode..."
-    kubectl patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{
-      "spec": {
-        "controller": {
-          "enabled": false
-        },
-        "sourceNamespaces": ["*"],
-        "argoCDAgent": {
-          "principal": {
-            "enabled": true,
-            "auth": "mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent",
-            "namespace": {
-              "allowedNamespaces": ["*"]
-            }
-          }
-        }
-      }
-    }'
+    log_info "Applying hub ArgoCD CR for agent mode..."
+    kubectl apply -f - <<'EOF'
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+spec:
+  controller:
+    enabled: false
+  sourceNamespaces:
+    - "*"
+  server:
+    route:
+      enabled: true
+  argoCDAgent:
+    principal:
+      enabled: true
+      auth: "mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent"
+      namespace:
+        allowedNamespaces:
+          - "*"
+EOF
     
+    # Wait for ArgoCD server to be ready first
+    wait_for_condition 120 "ArgoCD server pod in openshift-gitops" \
+        "kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-server --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_warn "ArgoCD server pod not ready after 120s, continuing anyway..."
+        }
+
     # Wait for principal route to be ready
     wait_for_condition 300 "Principal Route to be ready" \
         "kubectl get route -n openshift-gitops -l app.kubernetes.io/component=principal -o name | grep -q route" || {
@@ -561,6 +975,8 @@ add_rbac_and_app_to_policy() {
         "kubectl get policy $policy_name -n $namespace -o name" || return 1
 
     # Get the current Policy and add RBAC + Application to its object-templates
+    # NOTE: SA namespace and Application namespace use hub templates so they resolve to
+    # "local-cluster" on the hub and "openshift-gitops" on remote managed clusters.
     kubectl patch policy $policy_name -n $namespace --type=json -p='[
       {
         "op": "add",
@@ -593,7 +1009,7 @@ add_rbac_and_app_to_policy() {
                       {
                         "kind": "ServiceAccount",
                         "name": "acm-openshift-gitops-argocd-application-controller",
-                        "namespace": "openshift-gitops"
+                        "namespace": "{{hub or (and (eq .ManagedClusterName \"local-cluster\") \"local-cluster\") \"openshift-gitops\" hub}}"
                       }
                     ]
                   }
@@ -615,7 +1031,7 @@ add_rbac_and_app_to_policy() {
                     "kind": "Application",
                     "metadata": {
                       "name": "guestbook",
-                      "namespace": "openshift-gitops"
+                      "namespace": "{{hub or (and (eq .ManagedClusterName \"local-cluster\") \"local-cluster\") \"openshift-gitops\" hub}}"
                     },
                     "spec": {
                       "project": "default",
@@ -673,6 +1089,7 @@ add_rbac_to_policy() {
     # Add RBAC and guestbook namespace to the Policy.
     # NOTE: AppProject is NOT included here - the argocd-agent principal handles
     # AppProject propagation from the hub to managed clusters automatically.
+    # SA namespace uses hub template so it resolves to the correct ArgoCD namespace.
     kubectl patch policy $policy_name -n $namespace --type=json -p='[
       {
         "op": "add",
@@ -705,7 +1122,7 @@ add_rbac_to_policy() {
                       {
                         "kind": "ServiceAccount",
                         "name": "acm-openshift-gitops-argocd-application-controller",
-                        "namespace": "openshift-gitops"
+                        "namespace": "{{hub or (and (eq .ManagedClusterName \"local-cluster\") \"local-cluster\") \"openshift-gitops\" hub}}"
                       }
                     ]
                   }
@@ -838,6 +1255,151 @@ spec:
 EOF
 }
 
+# Create guestbook Application directly on local-cluster (for agent scenarios).
+# Create the guestbook Application in the local-cluster namespace for agent scenarios,
+# because in agent mode ArgoCD only picks up Applications from its own namespace.
+create_local_cluster_guestbook_app() {
+    log_info "Creating guestbook Application directly in local-cluster namespace..."
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    # AppProject must exist for the Application to be reconciled.
+    log_info "Ensuring default AppProject in local-cluster namespace..."
+    kubectl apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: local-cluster
+spec:
+  clusterResourceWhitelist:
+  - group: '*'
+    kind: '*'
+  destinations:
+  - namespace: '*'
+    server: '*'
+  sourceRepos:
+  - '*'
+EOF
+
+    kubectl apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook
+  namespace: local-cluster
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: guestbook
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+EOF
+}
+
+# Verify local-cluster ArgoCD is working: ArgoCD running, guestbook app synced
+verify_local_cluster_working() {
+    local scenario_num=$1
+    local is_agent_mode=${2:-false}
+
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    # Wait for ArgoCD to be running in local-cluster namespace
+    wait_for_condition 120 "ArgoCD to be running in local-cluster namespace on hub" \
+        "kubectl get argocd acm-openshift-gitops -n local-cluster -o name" || return 1
+
+    # Verify no duplicate ArgoCD instances on hub
+    verify_no_duplicate_argocd "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" || {
+        log_error "SCENARIO $scenario_num: Duplicate ArgoCD instances on hub!"
+        return 1
+    }
+
+    # Ensure the default AppProject exists in local-cluster namespace.
+    # The ArgoCD operator does not always auto-create this in secondary namespaces.
+    # Without it, Applications referencing project "default" won't reconcile.
+    log_info "Ensuring default AppProject exists in local-cluster namespace..."
+    kubectl get appproject default -n local-cluster &>/dev/null 2>/dev/null || \
+        kubectl apply -f - <<'APPPROJ'
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: local-cluster
+spec:
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  destinations:
+    - namespace: '*'
+      server: '*'
+  sourceRepos:
+    - '*'
+APPPROJ
+    wait_for_condition 30 "default AppProject in local-cluster" \
+        "kubectl get appproject default -n local-cluster -o name" || {
+            log_error "Failed to create default AppProject in local-cluster namespace"
+            return 1
+        }
+
+    # For agent scenarios, wait for the addon agent to provision the client cert
+    if [ "$is_agent_mode" = "true" ]; then
+        log_info "Agent mode: waiting for client cert to be provisioned on local-cluster..."
+        wait_for_condition 180 "ArgoCD agent client cert in local-cluster namespace" \
+            "kubectl get secret argocd-agent-client-tls -n local-cluster -o name" || {
+                log_warn "Client cert not yet provisioned for local-cluster (continuing)"
+            }
+
+        create_local_cluster_guestbook_app || return 1
+    fi
+
+    # Wait for guestbook to be deployed on local-cluster (which IS the hub).
+    # Use 600s timeout because the repo-server may need to cold-start and clone the git repo,
+    # and in agent mode the ArgoCD instance is freshly created requiring full initialization.
+    wait_for_condition 600 "Guestbook deployment to exist on local-cluster" \
+        "kubectl get deployment guestbook-ui -n guestbook -o name" || {
+            log_error "SCENARIO $scenario_num: Guestbook not deployed on local-cluster"
+            return 1
+        }
+
+    # Verify the Application exists in local-cluster namespace and is being managed
+    wait_for_condition 120 "Guestbook Application to exist in local-cluster namespace" \
+        "kubectl get applications.argoproj.io guestbook -n local-cluster -o name" || {
+            log_error "SCENARIO $scenario_num: Guestbook Application not found in local-cluster namespace"
+            return 1
+        }
+
+    # Check sync status
+    wait_for_condition 180 "Guestbook Application to be Synced on local-cluster" \
+        "kubectl get applications.argoproj.io guestbook -n local-cluster -o jsonpath='{.status.sync.status}' 2>/dev/null | grep -q 'Synced'" || {
+            log_warn "Guestbook Application not yet Synced on local-cluster"
+        }
+
+    local sync_status=$(kubectl get applications.argoproj.io guestbook -n local-cluster -o jsonpath='{.status.sync.status}' 2>/dev/null)
+    local health_status=$(kubectl get applications.argoproj.io guestbook -n local-cluster -o jsonpath='{.status.health.status}' 2>/dev/null)
+    log_info "local-cluster Application Status - Sync: $sync_status, Health: $health_status"
+
+    # Verify the app controller namespace matches (app managed by local-cluster ArgoCD)
+    local controller_ns=$(kubectl get applications.argoproj.io guestbook -n local-cluster -o jsonpath='{.status.controllerNamespace}' 2>/dev/null)
+    if [ -n "$controller_ns" ] && [ "$controller_ns" != "local-cluster" ]; then
+        log_error "SCENARIO $scenario_num: Guestbook on local-cluster managed by wrong controller: $controller_ns (expected local-cluster)"
+        return 1
+    fi
+    log_info "local-cluster guestbook managed by correct controller namespace: ${controller_ns:-pending}"
+
+    # Environment health check for local-cluster
+    verify_environment_health "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" "$scenario_num" "true" || return 1
+
+    return 0
+}
+
 # Verify guestbook is deployed on managed cluster (verification only)
 verify_guestbook_deployed() {
     local kubeconfig=$1
@@ -875,24 +1437,78 @@ verify_agent_connected() {
     return 0
 }
 
+# Verify that the addon agent auto-detected OCP and created an OLM subscription
+# instead of deploying embedded operator manifests.
+# Checks:
+#   1. OLM subscription exists in openshift-operators namespace
+#   2. No embedded operator deployment in openshift-gitops-operator namespace
+verify_olm_auto_detected() {
+    local cluster_kubeconfig=$1
+    local cluster_name=$2
+
+    log_info "Verifying OLM auto-detection on $cluster_name..."
+
+    export KUBECONFIG=$cluster_kubeconfig
+
+    # Check 1: OLM subscription should exist
+    wait_for_condition 300 "OLM subscription to be created on $cluster_name" \
+        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o name" || {
+            log_error "OLM auto-detection FAILED: No OLM subscription found on $cluster_name"
+            log_debug "Addon agent logs:"
+            kubectl logs -n openshift-operators -l app=gitops-addon --tail=30 2>/dev/null || true
+            return 1
+        }
+
+    # Verify the subscription has the DISABLE_DEFAULT_ARGOCD_INSTANCE env var
+    local disable_default=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
+        -n openshift-operators -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
+    if [ "$disable_default" = "true" ]; then
+        log_info "  [OK] OLM subscription has DISABLE_DEFAULT_ARGOCD_INSTANCE=true"
+    else
+        log_error "OLM subscription DISABLE_DEFAULT_ARGOCD_INSTANCE='$disable_default' (expected: 'true')"
+        kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o yaml 2>/dev/null || true
+        export KUBECONFIG=$HUB_KUBECONFIG
+        return 1
+    fi
+
+    # Check 2: No embedded operator deployment in openshift-gitops-operator namespace
+    if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
+        log_error "Embedded operator deployment found in openshift-gitops-operator namespace (expected OLM mode only on $cluster_name)"
+        export KUBECONFIG=$HUB_KUBECONFIG
+        return 1
+    else
+        log_info "  [OK] No embedded operator deployment in openshift-gitops-operator (correct for OLM mode)"
+    fi
+
+    log_info "OLM auto-detection verified successfully on $cluster_name"
+
+    export KUBECONFIG=$HUB_KUBECONFIG
+    return 0
+}
+
 #######################################
-# SCENARIO 1: gitops-addon on OCP (no agent, no OLM)
+# SCENARIO 1: gitops-addon on OCP (no agent, OLM auto-detected)
 #######################################
 test_scenario_1() {
     log_info "=============================================="
-    log_info "SCENARIO 1: gitops-addon on $OCP_CLUSTER_NAME (no agent, no OLM)"
+    log_info "SCENARIO 1: gitops-addon on $OCP_CLUSTER_NAME + $LOCAL_CLUSTER_NAME (no agent, OLM auto-detected)"
     log_info "=============================================="
     log_info "What this tests:"
-    log_info "  - GitOpsCluster creates ManagedClusterAddOn"
-    log_info "  - GitOpsCluster creates ArgoCD Policy"
+    log_info "  - GitOpsCluster creates ManagedClusterAddOn for BOTH OCP and local-cluster"
+    log_info "  - GitOpsCluster creates ArgoCD Policy targeting BOTH clusters"
+    log_info "  - Addon agent on OCP auto-detects OCP and creates OLM subscription"
+    log_info "  - Policy deploys ArgoCD CR to openshift-gitops ns on OCP, local-cluster ns on hub"
     log_info "  - User modifies Policy to add RBAC + Application"
-    log_info "  - Policy deploys ArgoCD + RBAC + App to OCP managed cluster"
-    log_info "  - Application syncs and deploys guestbook"
+    log_info "  - No duplicate ArgoCD on hub (original openshift-gitops untouched)"
+    log_info "  - Application syncs and deploys guestbook on OCP and local-cluster"
     log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created"
-    log_info "  - Policy compliant"
-    log_info "  - ArgoCD CR acm-openshift-gitops running"
-    log_info "  - guestbook-ui deployment in guestbook namespace"
+    log_info "  - ManagedClusterAddOn created for OCP"
+    log_info "  - OLM subscription auto-detected and created on OCP"
+    log_info "  - Policy compliant on both clusters"
+    log_info "  - ArgoCD CR acm-openshift-gitops in openshift-gitops ns on OCP"
+    log_info "  - ArgoCD CR acm-openshift-gitops in local-cluster ns on hub (NOT in openshift-gitops)"
+    log_info "  - No duplicate ArgoCD CRs on hub"
+    log_info "  - guestbook-ui deployment in guestbook namespace on OCP"
     log_info "=============================================="
 
     export KUBECONFIG=$HUB_KUBECONFIG
@@ -900,13 +1516,10 @@ test_scenario_1() {
     # Configure hub ArgoCD for non-agent mode (controller disabled)
     configure_hub_argocd_non_agent
 
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+    ensure_addon_template
 
-    # Create Placement
-    log_info "Creating Placement..."
+    # Create Placement selecting BOTH OCP and local-cluster
+    log_info "Creating Placement (selecting $OCP_CLUSTER_NAME AND $LOCAL_CLUSTER_NAME)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -917,8 +1530,12 @@ spec:
   predicates:
     - requiredClusterSelector:
         labelSelector:
-          matchLabels:
-            name: $OCP_CLUSTER_NAME
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+                - $OCP_CLUSTER_NAME
+                - $LOCAL_CLUSTER_NAME
 EOF
 
     # Create GitOpsCluster (no OLM, no agent - plain Helm chart install)
@@ -941,29 +1558,33 @@ spec:
     enabled: true
 EOF
 
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
+    # Wait for ManagedClusterAddOn to be created for both clusters
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $OCP_CLUSTER_NAME" \
         "kubectl get managedclusteraddon gitops-addon -n $OCP_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
 
     # Add RBAC + Application to the Policy (simulating user modification)
     add_rbac_and_app_to_policy "ocp-gitops-argocd-policy" "openshift-gitops" || return 1
 
-    # Wait for Policy to be compliant
-    wait_for_policy_compliant "ocp-gitops-argocd-policy" "openshift-gitops" 300 || return 1
+    # Wait for Policy to be compliant (OLM auto-detect takes longer)
+    wait_for_policy_compliant "ocp-gitops-argocd-policy" "openshift-gitops" 420 || return 1
 
-    # Wait for ArgoCD to be running on managed cluster
+    # CRITICAL: Verify OLM subscription was auto-detected on OCP
+    # The addon agent should detect OCP via CRDs/ClusterClaims and create an OLM subscription
+    verify_olm_auto_detected "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+
+    # Wait for ArgoCD to be running on OCP managed cluster
     wait_for_condition 300 "ArgoCD to be running on $OCP_CLUSTER_NAME" \
         "KUBECONFIG=$OCP_KUBECONFIG kubectl get argocd acm-openshift-gitops -n openshift-gitops -o name" || return 1
 
-    # CRITICAL: Verify no duplicate ArgoCD instances
+    # CRITICAL: Verify no duplicate ArgoCD instances on OCP
     verify_no_duplicate_argocd "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || {
-        log_error "SCENARIO 1: FAILED - Duplicate ArgoCD instances detected!"
+        log_error "SCENARIO 1: FAILED - Duplicate ArgoCD instances detected on $OCP_CLUSTER_NAME!"
         return 1
     }
 
-    # Wait for guestbook to be deployed (application was added via Policy)
-    # On OCP, the Deployment resource is created by ArgoCD but pods crash due to
-    # restricted-v2 SCC (Apache tries to bind port 80). We only check resource existence.
+    # Wait for guestbook to be deployed on OCP (application was added via Policy)
     wait_for_condition 300 "Guestbook deployment resource to exist on $OCP_CLUSTER_NAME" \
         "KUBECONFIG=$OCP_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
             log_error "SCENARIO 1: FAILED - Guestbook deployment not created by ArgoCD"
@@ -971,12 +1592,22 @@ EOF
         }
     log_info "NOTE: On OCP, guestbook-ui pods will crash (port 80 + restricted SCC) - this is expected"
 
+    # Post-scenario environment health checks for OCP
+    verify_environment_health "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" "1" "false" || return 1
+
+    # Verify local-cluster ArgoCD + guestbook working
+    verify_local_cluster_working "1" "false" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 1: PASSED"
-    log_info "  - GitOpsCluster created ManagedClusterAddOn: OK"
+    log_info "  - GitOpsCluster created ManagedClusterAddOn for OCP: OK"
+    log_info "  - OLM subscription auto-detected on OCP: OK"
     log_info "  - ArgoCD Policy created and modified: OK"
-    log_info "  - ArgoCD running on OCP managed cluster: OK"
-    log_info "  - Guestbook synced by ArgoCD (deployment exists): OK"
+    log_info "  - ArgoCD running on OCP (openshift-gitops ns): OK"
+    log_info "  - ArgoCD running on hub (local-cluster ns, no duplicate): OK"
+    log_info "  - Guestbook synced by ArgoCD on OCP: OK"
+    log_info "  - Guestbook synced by ArgoCD on local-cluster: OK"
+    log_info "  - Environment health checks: OK"
     log_info "=============================================="
     return 0
 }
@@ -986,19 +1617,20 @@ EOF
 #######################################
 test_scenario_2() {
     log_info "=============================================="
-    log_info "SCENARIO 2: gitops-addon on $KIND_CLUSTER_NAME (no agent, no OLM)"
+    log_info "SCENARIO 2: gitops-addon on $KIND_CLUSTER_NAME + $LOCAL_CLUSTER_NAME (no agent, no OLM)"
     log_info "=============================================="
     log_info "What this tests:"
-    log_info "  - GitOpsCluster creates ManagedClusterAddOn"
-    log_info "  - GitOpsCluster creates ArgoCD Policy"
+    log_info "  - GitOpsCluster creates ManagedClusterAddOn (for Kind only, skipped for local-cluster)"
+    log_info "  - GitOpsCluster creates ArgoCD Policy targeting BOTH clusters"
     log_info "  - User modifies Policy to add RBAC + Application"
-    log_info "  - Policy deploys ArgoCD + RBAC + App to Kind managed cluster"
-    log_info "  - Application syncs and deploys guestbook"
+    log_info "  - Policy deploys ArgoCD + RBAC + App to Kind and local-cluster"
+    log_info "  - ArgoCD in local-cluster namespace on hub (no duplicate)"
+    log_info "  - Application syncs and deploys guestbook on both clusters"
     log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created"
-    log_info "  - Policy compliant"
-    log_info "  - ArgoCD CR acm-openshift-gitops running"
-    log_info "  - guestbook-ui deployment in guestbook namespace"
+    log_info "  - ManagedClusterAddOn created for Kind"
+    log_info "  - Policy compliant on both clusters"
+    log_info "  - ArgoCD CR acm-openshift-gitops running on Kind and local-cluster"
+    log_info "  - guestbook-ui deployment in guestbook namespace on both clusters"
     log_info "=============================================="
 
     export KUBECONFIG=$HUB_KUBECONFIG
@@ -1006,13 +1638,10 @@ test_scenario_2() {
     # Configure hub ArgoCD for non-agent mode (controller disabled)
     configure_hub_argocd_non_agent
 
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+    ensure_addon_template
 
-    # Create Placement
-    log_info "Creating Placement..."
+    # Create Placement selecting BOTH Kind and local-cluster
+    log_info "Creating Placement (selecting $KIND_CLUSTER_NAME AND $LOCAL_CLUSTER_NAME)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -1023,8 +1652,12 @@ spec:
   predicates:
     - requiredClusterSelector:
         labelSelector:
-          matchLabels:
-            name: $KIND_CLUSTER_NAME
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+                - $KIND_CLUSTER_NAME
+                - $LOCAL_CLUSTER_NAME
 EOF
 
     # Create GitOpsCluster
@@ -1047,9 +1680,11 @@ spec:
     enabled: true
 EOF
 
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
+    # Wait for ManagedClusterAddOn to be created for both clusters
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $KIND_CLUSTER_NAME" \
         "kubectl get managedclusteraddon gitops-addon -n $KIND_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
 
     # Add RBAC + Application to the Policy (simulating user modification)
     add_rbac_and_app_to_policy "kind-gitops-argocd-policy" "openshift-gitops" || return 1
@@ -1062,45 +1697,57 @@ EOF
         "KUBECONFIG=$KIND_KUBECONFIG kubectl get argocd acm-openshift-gitops -n openshift-gitops -o name" || return 1
 
     # Wait for guestbook to be deployed and healthy (application was added via Policy)
-    # On Kind, the guestbook-ui pods should be fully running (no SCC restrictions)
     wait_for_condition 300 "Guestbook to be deployed on $KIND_CLUSTER_NAME" \
         "KUBECONFIG=$KIND_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
             log_error "SCENARIO 2: FAILED - Guestbook not deployed"
             return 1
         }
-    # Also verify pods are actually running on Kind (no SCC restrictions unlike OCP)
     wait_for_condition 120 "Guestbook pods to be ready on $KIND_CLUSTER_NAME" \
         "KUBECONFIG=$KIND_KUBECONFIG kubectl rollout status deployment/guestbook-ui -n guestbook --timeout=5s" || {
             log_warn "Guestbook pods not fully ready yet, but deployment exists"
         }
 
+    # Post-scenario environment health checks for Kind
+    verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "2" "false" || return 1
+
+    # Verify local-cluster ArgoCD + guestbook working
+    verify_local_cluster_working "2" "false" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 2: PASSED"
-    log_info "  - GitOpsCluster created ManagedClusterAddOn: OK"
+    log_info "  - GitOpsCluster created ManagedClusterAddOn for Kind: OK"
     log_info "  - ArgoCD Policy created and modified: OK"
     log_info "  - ArgoCD running on Kind managed cluster: OK"
-    log_info "  - Guestbook deployed and running via Policy: OK"
+    log_info "  - ArgoCD running on hub (local-cluster ns, no duplicate): OK"
+    log_info "  - Guestbook deployed on Kind: OK"
+    log_info "  - Guestbook deployed on local-cluster: OK"
+    log_info "  - Environment health checks: OK"
     log_info "=============================================="
     return 0
 }
 
 #######################################
-# SCENARIO 3: gitops-addon + OLM on OCP
+# SCENARIO 3: gitops-addon + custom OLM on OCP
 #######################################
 test_scenario_3() {
     log_info "=============================================="
-    log_info "SCENARIO 3: gitops-addon + OLM on $OCP_CLUSTER_NAME"
+    log_info "SCENARIO 3: gitops-addon + custom OLM on $OCP_CLUSTER_NAME + $LOCAL_CLUSTER_NAME"
     log_info "=============================================="
     log_info "What this tests:"
-    log_info "  - GitOpsCluster with OLM subscription enabled"
-    log_info "  - ArgoCD deployed via OLM Subscription"
+    log_info "  - GitOpsCluster with olmSubscription.enabled=true + installPlanApproval=Manual"
+    log_info "  - Custom OLM values passed from hub to addon agent via AddOnDeploymentConfig env vars"
+    log_info "  - Addon agent on OCP auto-detects OCP and uses custom values for subscription"
+    log_info "  - OLM Subscription on OCP has installPlanApproval=Manual (proving custom values work)"
+    log_info "  - InstallPlan manually approved, operator installs successfully"
     log_info "  - User modifies Policy to add RBAC + Application"
-    log_info "  - Application syncs and deploys guestbook"
+    log_info "  - Application syncs and deploys guestbook on both clusters"
     log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created"
-    log_info "  - OLM Subscription created, Policy compliant"
-    log_info "  - ArgoCD CR acm-openshift-gitops running"
-    log_info "  - guestbook-ui deployment in guestbook namespace"
+    log_info "  - AddOnDeploymentConfig contains OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL=Manual"
+    log_info "  - OLM Subscription on OCP has installPlanApproval=Manual"
+    log_info "  - InstallPlan approved manually, operator running"
+    log_info "  - Policy compliant on both clusters"
+    log_info "  - ArgoCD CR acm-openshift-gitops running on both clusters"
+    log_info "  - guestbook-ui deployment in guestbook namespace on both clusters"
     log_info "=============================================="
 
     export KUBECONFIG=$HUB_KUBECONFIG
@@ -1108,13 +1755,10 @@ test_scenario_3() {
     # Configure hub ArgoCD for non-agent mode (controller disabled)
     configure_hub_argocd_non_agent
 
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+    ensure_addon_template
 
-    # Create Placement
-    log_info "Creating Placement..."
+    # Create Placement selecting BOTH OCP and local-cluster
+    log_info "Creating Placement (selecting $OCP_CLUSTER_NAME AND $LOCAL_CLUSTER_NAME)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -1125,12 +1769,16 @@ spec:
   predicates:
     - requiredClusterSelector:
         labelSelector:
-          matchLabels:
-            name: $OCP_CLUSTER_NAME
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+                - $OCP_CLUSTER_NAME
+                - $LOCAL_CLUSTER_NAME
 EOF
 
-    # Create GitOpsCluster with OLM
-    log_info "Creating GitOpsCluster with OLM..."
+    # Create GitOpsCluster with custom OLM config (installPlanApproval=Manual to prove values work)
+    log_info "Creating GitOpsCluster with custom OLM config (installPlanApproval=Manual)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
@@ -1149,17 +1797,110 @@ spec:
     enabled: true
     olmSubscription:
       enabled: true
+      installPlanApproval: "Manual"
 EOF
 
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
+    # Wait for ManagedClusterAddOn to be created for both clusters
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $OCP_CLUSTER_NAME" \
         "kubectl get managedclusteraddon gitops-addon -n $OCP_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
+
+    # CRITICAL: Verify OLM subscription env vars were propagated to AddOnDeploymentConfig
+    # The controller needs a reconcile cycle to update the AddOnDeploymentConfig, so wait for it.
+    log_info "Verifying OLM subscription config passthrough to AddOnDeploymentConfig..."
+
+    wait_for_condition 60 "OLM_SUBSCRIPTION_ENABLED to be 'true' in AddOnDeploymentConfig" \
+        "kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name==\"OLM_SUBSCRIPTION_ENABLED\")].value}' 2>/dev/null | grep -qx 'true'" || {
+            local olm_enabled_var=$(kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name=="OLM_SUBSCRIPTION_ENABLED")].value}' 2>/dev/null)
+            log_error "SCENARIO 3: FAILED - OLM_SUBSCRIPTION_ENABLED not set to 'true' in AddOnDeploymentConfig (got: '$olm_enabled_var')"
+            kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o yaml 2>/dev/null || true
+            return 1
+        }
+    log_info "  OLM_SUBSCRIPTION_ENABLED=true - OK"
+
+    wait_for_condition 60 "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL to be 'Manual' in AddOnDeploymentConfig" \
+        "kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name==\"OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL\")].value}' 2>/dev/null | grep -qx 'Manual'" || {
+            local olm_approval_var=$(kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name=="OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")].value}' 2>/dev/null)
+            log_error "SCENARIO 3: FAILED - OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL not set to 'Manual' (got: '$olm_approval_var')"
+            kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o yaml 2>/dev/null || true
+            return 1
+        }
+    log_info "  OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL=Manual - OK"
+    log_info "OLM subscription config passthrough verified successfully!"
 
     # Add RBAC + Application to the Policy
     add_rbac_and_app_to_policy "ocp-olm-gitops-argocd-policy" "openshift-gitops" || return 1
 
-    # Wait for Policy to be compliant (OLM takes longer)
-    wait_for_policy_compliant "ocp-olm-gitops-argocd-policy" "openshift-gitops" 420 || return 1
+    # Wait for OLM subscription to be created on OCP with custom installPlanApproval
+    log_info "Waiting for OLM subscription with installPlanApproval=Manual on OCP..."
+    export KUBECONFIG=$OCP_KUBECONFIG
+    wait_for_condition 300 "OLM subscription to be created on $OCP_CLUSTER_NAME" \
+        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o name" || {
+            log_error "SCENARIO 3: FAILED - OLM subscription not created on OCP"
+            return 1
+        }
+
+    # CRITICAL: Verify the subscription has installPlanApproval=Manual (proves custom values work)
+    local actual_approval=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
+        -n openshift-operators -o jsonpath='{.spec.installPlanApproval}' 2>/dev/null)
+    if [ "$actual_approval" != "Manual" ]; then
+        log_error "SCENARIO 3: FAILED - OLM subscription installPlanApproval is '$actual_approval' (expected: Manual)"
+        log_error "Custom OLM values were NOT propagated to the actual subscription!"
+        kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o yaml 2>/dev/null || true
+        return 1
+    fi
+    log_info "  [OK] OLM subscription has installPlanApproval=Manual (custom value verified on managed cluster)"
+
+    # Verify DISABLE_DEFAULT_ARGOCD_INSTANCE=true is set
+    local disable_default=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
+        -n openshift-operators -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
+    if [ "$disable_default" != "true" ]; then
+        log_error "SCENARIO 3: FAILED - DISABLE_DEFAULT_ARGOCD_INSTANCE not 'true' (got: '$disable_default')"
+        return 1
+    fi
+    log_info "  [OK] OLM subscription has DISABLE_DEFAULT_ARGOCD_INSTANCE=true"
+
+    # No embedded operator deployment should exist (OLM mode)
+    if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
+        log_error "SCENARIO 3: FAILED - Embedded operator deployment found (should be OLM-only mode)"
+        return 1
+    fi
+    log_info "  [OK] No embedded operator deployment (correct for OLM mode)"
+
+    # Wait for InstallPlan to appear and manually approve it
+    log_info "Waiting for InstallPlan to be created by OLM..."
+    wait_for_condition 120 "InstallPlan to be created for openshift-gitops-operator" \
+        "kubectl get installplan -n openshift-operators -o jsonpath='{.items[?(@.spec.approved==false)].metadata.name}' 2>/dev/null | grep -v '^$'" || {
+            # Check if there's already an approved plan (operator may already be installed from previous scenario)
+            local existing_plan=$(kubectl get installplan -n openshift-operators -o name 2>/dev/null | head -1)
+            if [ -n "$existing_plan" ]; then
+                log_info "Found existing InstallPlan (may already be approved): $existing_plan"
+            else
+                log_error "SCENARIO 3: FAILED - No InstallPlan created by OLM"
+                return 1
+            fi
+        }
+
+    # Approve any unapproved InstallPlans
+    local unapproved_plans=$(kubectl get installplan -n openshift-operators -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+    if [ -n "$unapproved_plans" ]; then
+        for plan in $unapproved_plans; do
+            log_info "Manually approving InstallPlan: $plan"
+            kubectl patch installplan $plan -n openshift-operators --type=merge -p '{"spec":{"approved":true}}' || {
+                log_error "SCENARIO 3: FAILED - Could not approve InstallPlan $plan"
+                return 1
+            }
+            log_info "  [OK] InstallPlan $plan approved"
+        done
+    else
+        log_info "No unapproved InstallPlans found (operator may already be installed)"
+    fi
+
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    # Wait for Policy to be compliant (operator installs after approval)
+    wait_for_policy_compliant "ocp-olm-gitops-argocd-policy" "openshift-gitops" 480 || return 1
 
     # Wait for ArgoCD to be running on managed cluster
     wait_for_condition 300 "ArgoCD to be running on $OCP_CLUSTER_NAME" \
@@ -1179,34 +1920,49 @@ EOF
         }
     log_info "NOTE: On OCP, guestbook-ui pods will crash (port 80 + restricted SCC) - this is expected"
 
+    # Post-scenario environment health checks for OCP
+    verify_environment_health "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" "3" "false" || return 1
+
+    # Verify local-cluster ArgoCD + guestbook working
+    verify_local_cluster_working "3" "false" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 3: PASSED"
-    log_info "  - GitOpsCluster with OLM created: OK"
-    log_info "  - ArgoCD deployed via OLM: OK"
-    log_info "  - Guestbook synced by ArgoCD (deployment exists): OK"
+    log_info "  - GitOpsCluster with installPlanApproval=Manual created: OK"
+    log_info "  - OLM env vars propagated to AddOnDeploymentConfig: OK"
+    log_info "  - OLM subscription on OCP has installPlanApproval=Manual: OK"
+    log_info "  - InstallPlan manually approved, operator installed: OK"
+    log_info "  - DISABLE_DEFAULT_ARGOCD_INSTANCE=true on subscription: OK"
+    log_info "  - ArgoCD deployed via OLM on OCP: OK"
+    log_info "  - ArgoCD running on hub (local-cluster ns, no duplicate): OK"
+    log_info "  - Guestbook synced on OCP: OK"
+    log_info "  - Guestbook synced on local-cluster: OK"
+    log_info "  - Environment health checks: OK"
     log_info "=============================================="
     return 0
 }
 
 #######################################
-# SCENARIO 4: gitops-addon + Agent on OCP (no OLM)
+# SCENARIO 4: gitops-addon + Agent on OCP (OLM auto-detected)
 #######################################
 test_scenario_4() {
     log_info "=============================================="
-    log_info "SCENARIO 4: gitops-addon + Agent on $OCP_CLUSTER_NAME (no OLM)"
+    log_info "SCENARIO 4: gitops-addon + Agent on $OCP_CLUSTER_NAME + $LOCAL_CLUSTER_NAME (OLM auto-detected)"
     log_info "=============================================="
     log_info "What this tests:"
-    log_info "  - GitOpsCluster with Agent mode enabled on OCP"
+    log_info "  - GitOpsCluster with Agent mode enabled"
+    log_info "  - Addon agent on OCP auto-detects OCP and creates OLM subscription"
     log_info "  - Principal server address auto-discovered"
     log_info "  - Cluster secret created with agentName in server URL"
     log_info "  - User modifies Policy to add RBAC"
     log_info "  - User creates Application on hub in managed cluster namespace"
-    log_info "  - Agent propagates Application and syncs guestbook"
+    log_info "  - Agent propagates Application and syncs guestbook on OCP"
+    log_info "  - local-cluster gets ArgoCD + guestbook app directly (no agent needed)"
     log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created, Policy compliant"
-    log_info "  - Principal server address discovered"
-    log_info "  - Cluster secret with agentName"
-    log_info "  - Agent pod running, guestbook deployed via agent"
+    log_info "  - ManagedClusterAddOn created for OCP, Policy compliant on both clusters"
+    log_info "  - OLM subscription auto-detected and created on OCP"
+    log_info "  - Agent pod running on OCP, guestbook deployed via agent"
+    log_info "  - local-cluster ArgoCD app controller reconciles guestbook"
     log_info "  - App status synced to hub"
     log_info "=============================================="
 
@@ -1215,13 +1971,10 @@ test_scenario_4() {
     # Configure hub ArgoCD for agent mode (controller disabled, principal enabled)
     configure_hub_argocd_agent
 
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+    ensure_addon_template
 
-    # Create Placement
-    log_info "Creating Placement..."
+    # Create Placement selecting BOTH OCP and local-cluster
+    log_info "Creating Placement (selecting $OCP_CLUSTER_NAME AND $LOCAL_CLUSTER_NAME)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -1232,8 +1985,12 @@ spec:
   predicates:
     - requiredClusterSelector:
         labelSelector:
-          matchLabels:
-            name: $OCP_CLUSTER_NAME
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+                - $OCP_CLUSTER_NAME
+                - $LOCAL_CLUSTER_NAME
 EOF
 
     # Create GitOpsCluster with Agent (no OLM) - serverAddress is auto-discovered from Route
@@ -1259,15 +2016,20 @@ spec:
       mode: managed
 EOF
 
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
+    # Wait for ManagedClusterAddOn to be created for both clusters
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $OCP_CLUSTER_NAME" \
         "kubectl get managedclusteraddon gitops-addon -n $OCP_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
 
     # Add RBAC to the Policy (apps are created separately for agent mode)
     add_rbac_to_policy "ocp-agent-gitops-argocd-policy" "openshift-gitops" || return 1
 
-    # Wait for Policy to be compliant
-    wait_for_policy_compliant "ocp-agent-gitops-argocd-policy" "openshift-gitops" 300 || return 1
+    # Wait for Policy to be compliant (OLM auto-detect takes longer)
+    wait_for_policy_compliant "ocp-agent-gitops-argocd-policy" "openshift-gitops" 420 || return 1
+
+    # CRITICAL: Verify OLM subscription was auto-detected on OCP
+    verify_olm_auto_detected "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
 
     # Get the server URL for the agent (discovered by controller)
     local server_url=$(get_agent_server_address "ocp-agent-gitops" "openshift-gitops" "$OCP_CLUSTER_NAME")
@@ -1317,15 +2079,24 @@ EOF
     local health_status=$(kubectl get applications.argoproj.io guestbook -n $OCP_CLUSTER_NAME -o jsonpath='{.status.health.status}' 2>/dev/null)
     log_info "Application Status - Sync: $sync_status, Health: $health_status"
 
+    # Post-scenario environment health checks for OCP
+    verify_environment_health "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" "4" "false" || return 1
+
+    # Verify local-cluster ArgoCD + guestbook working (agent mode: create app directly)
+    verify_local_cluster_working "4" "true" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 4: PASSED"
     log_info "  - GitOpsCluster with Agent created: OK"
+    log_info "  - OLM subscription auto-detected on OCP: OK"
     log_info "  - Principal server address auto-discovered: OK"
     log_info "  - Cluster secret created with agentName: OK"
     log_info "  - Agent running on OCP managed cluster: OK"
     log_info "  - Application created on hub: OK"
-    log_info "  - Guestbook synced by ArgoCD agent (deployment exists): OK"
+    log_info "  - Guestbook synced by ArgoCD agent on OCP: OK"
+    log_info "  - Guestbook synced by ArgoCD on local-cluster: OK"
     log_info "  - Application sync status reflected on hub: Sync=$sync_status, Health=$health_status"
+    log_info "  - Environment health checks: OK"
     log_info "=============================================="
     return 0
 }
@@ -1335,20 +2106,20 @@ EOF
 #######################################
 test_scenario_5() {
     log_info "=============================================="
-    log_info "SCENARIO 5: gitops-addon + Agent on $KIND_CLUSTER_NAME"
+    log_info "SCENARIO 5: gitops-addon + Agent on $KIND_CLUSTER_NAME + $LOCAL_CLUSTER_NAME"
     log_info "=============================================="
     log_info "What this tests:"
-    log_info "  - GitOpsCluster with Agent mode enabled on Kind"
+    log_info "  - GitOpsCluster with Agent mode enabled"
     log_info "  - Principal server address auto-discovered"
     log_info "  - Cluster secret created with agentName in server URL"
     log_info "  - User modifies Policy to add RBAC"
     log_info "  - User creates Application on hub in managed cluster namespace"
-    log_info "  - Agent propagates Application and syncs guestbook"
+    log_info "  - Agent propagates Application and syncs guestbook on Kind"
+    log_info "  - local-cluster gets ArgoCD + guestbook app directly (no agent needed)"
     log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created, Policy compliant"
-    log_info "  - Principal server address discovered"
-    log_info "  - Cluster secret with agentName"
-    log_info "  - Agent pod running, guestbook deployed via agent"
+    log_info "  - ManagedClusterAddOn created for Kind, Policy compliant on both clusters"
+    log_info "  - Agent pod running on Kind, guestbook deployed via agent"
+    log_info "  - local-cluster ArgoCD app controller reconciles guestbook"
     log_info "  - App status synced to hub"
     log_info "=============================================="
 
@@ -1357,13 +2128,10 @@ test_scenario_5() {
     # Configure hub ArgoCD for agent mode (controller disabled, principal enabled)
     configure_hub_argocd_agent
 
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
+    ensure_addon_template
 
-    # Create Placement
-    log_info "Creating Placement..."
+    # Create Placement selecting BOTH Kind and local-cluster
+    log_info "Creating Placement (selecting $KIND_CLUSTER_NAME AND $LOCAL_CLUSTER_NAME)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -1374,8 +2142,12 @@ spec:
   predicates:
     - requiredClusterSelector:
         labelSelector:
-          matchLabels:
-            name: $KIND_CLUSTER_NAME
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+                - $KIND_CLUSTER_NAME
+                - $LOCAL_CLUSTER_NAME
 EOF
 
     # Create GitOpsCluster with Agent - serverAddress is auto-discovered from Route
@@ -1401,9 +2173,11 @@ spec:
       mode: managed
 EOF
 
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
+    # Wait for ManagedClusterAddOn to be created for both clusters
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $KIND_CLUSTER_NAME" \
         "kubectl get managedclusteraddon gitops-addon -n $KIND_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 180 "ManagedClusterAddOn to be created for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
 
     # Add RBAC to the Policy (apps are created separately for agent mode)
     add_rbac_to_policy "kind-agent-gitops-argocd-policy" "openshift-gitops" || return 1
@@ -1443,7 +2217,7 @@ EOF
 
     # Verify Application sync status is synced back to hub
     log_info "Verifying Application sync status reflected on hub..."
-    wait_for_condition 180 "Application sync status to show Synced on hub" \
+    wait_for_condition 300 "Application sync status to show Synced on hub" \
         "kubectl get applications.argoproj.io guestbook -n $KIND_CLUSTER_NAME -o jsonpath='{.status.sync.status}' 2>/dev/null | grep -q 'Synced'" || {
             log_error "SCENARIO 5: FAILED - Application sync status not reflected on hub"
             log_debug "Application YAML on hub:"
@@ -1464,6 +2238,12 @@ EOF
     local health_status=$(kubectl get applications.argoproj.io guestbook -n $KIND_CLUSTER_NAME -o jsonpath='{.status.health.status}' 2>/dev/null)
     log_info "Application Status - Sync: $sync_status, Health: $health_status"
 
+    # Post-scenario environment health checks for Kind
+    verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "5" "false" || return 1
+
+    # Verify local-cluster ArgoCD + guestbook working (agent mode: create app directly)
+    verify_local_cluster_working "5" "true" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 5: PASSED"
     log_info "  - GitOpsCluster with Agent created: OK"
@@ -1471,148 +2251,10 @@ EOF
     log_info "  - Cluster secret created with agentName: OK"
     log_info "  - Agent running on Kind managed cluster: OK"
     log_info "  - Application created on hub: OK"
-    log_info "  - Guestbook deployed via agent: OK"
+    log_info "  - Guestbook deployed via agent on Kind: OK"
+    log_info "  - Guestbook synced by ArgoCD on local-cluster: OK"
     log_info "  - Application sync status reflected on hub: Sync=$sync_status, Health=$health_status"
-    log_info "=============================================="
-    return 0
-}
-
-#######################################
-# SCENARIO 6: gitops-addon + Agent + OLM on OCP
-#######################################
-test_scenario_6() {
-    log_info "=============================================="
-    log_info "SCENARIO 6: gitops-addon + Agent + OLM on $OCP_CLUSTER_NAME"
-    log_info "=============================================="
-    log_info "What this tests:"
-    log_info "  - GitOpsCluster with Agent + OLM mode"
-    log_info "  - ArgoCD deployed via OLM with agent configuration"
-    log_info "  - User modifies Policy to add RBAC"
-    log_info "  - User creates Application on hub"
-    log_info "  - Agent propagates Application and syncs guestbook"
-    log_info "Success criteria:"
-    log_info "  - ManagedClusterAddOn created"
-    log_info "  - OLM Subscription created, Policy compliant"
-    log_info "  - Agent connected, cluster secret with agentName"
-    log_info "  - Guestbook deployed via agent, app status synced to hub"
-    log_info "=============================================="
-
-    export KUBECONFIG=$HUB_KUBECONFIG
-
-    # Configure hub ArgoCD for agent mode (controller disabled, principal enabled)
-    configure_hub_argocd_agent
-
-    # Ensure static AddOnTemplates exist (don't overwrite if already patched on hub)
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    log_info "Ensuring AddOnTemplates exist..."
-    kubectl get addontemplate gitops-addon -o name 2>/dev/null || kubectl apply -f "$SCRIPT_DIR/addonTemplates/addonTemplates.yaml"
-
-    # Create Placement
-    log_info "Creating Placement..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: cluster.open-cluster-management.io/v1beta1
-kind: Placement
-metadata:
-  name: ocp-agent-olm-placement
-  namespace: openshift-gitops
-spec:
-  predicates:
-    - requiredClusterSelector:
-        labelSelector:
-          matchLabels:
-            name: $OCP_CLUSTER_NAME
-EOF
-
-    # Create GitOpsCluster with Agent + OLM - serverAddress is auto-discovered from Route
-    log_info "Creating GitOpsCluster with Agent + OLM (serverAddress auto-discovered)..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: apps.open-cluster-management.io/v1beta1
-kind: GitOpsCluster
-metadata:
-  name: ocp-agent-olm-gitops
-  namespace: openshift-gitops
-spec:
-  argoServer:
-    cluster: local-cluster
-    argoNamespace: openshift-gitops
-  placementRef:
-    kind: Placement
-    apiVersion: cluster.open-cluster-management.io/v1beta1
-    name: ocp-agent-olm-placement
-  gitopsAddon:
-    enabled: true
-    olmSubscription:
-      enabled: true
-    argoCDAgent:
-      enabled: true
-      mode: managed
-EOF
-
-    # Wait for ManagedClusterAddOn to be created
-    wait_for_condition 180 "ManagedClusterAddOn to be created" \
-        "kubectl get managedclusteraddon gitops-addon -n $OCP_CLUSTER_NAME -o name" || return 1
-
-    # Add RBAC to the Policy
-    add_rbac_to_policy "ocp-agent-olm-gitops-argocd-policy" "openshift-gitops" || return 1
-
-    # Wait for Policy to be compliant (OLM takes longer)
-    wait_for_policy_compliant "ocp-agent-olm-gitops-argocd-policy" "openshift-gitops" 420 || return 1
-
-    # Get the server URL for the agent
-    local server_url=$(get_agent_server_address "ocp-agent-olm-gitops" "openshift-gitops" "$OCP_CLUSTER_NAME")
-    log_info "Agent server URL: $server_url"
-
-    # Verify cluster secret was created
-    verify_agent_connected "$OCP_CLUSTER_NAME" || return 1
-
-    # Wait for ArgoCD agent to be running on managed cluster
-    wait_for_condition 300 "ArgoCD agent to be running on $OCP_CLUSTER_NAME" \
-        "KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent -o name | grep -q pod" || return 1
-
-    # CRITICAL: Verify no duplicate ArgoCD instances
-    verify_no_duplicate_argocd "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || {
-        log_error "SCENARIO 6: FAILED - Duplicate ArgoCD instances detected!"
-        return 1
-    }
-
-    # Create Application on hub in managed cluster namespace
-    create_guestbook_app_agent_mode "$OCP_CLUSTER_NAME" "$server_url" || return 1
-
-    # Wait for guestbook deployment resource to exist on managed cluster
-    # On OCP, the Deployment resource is created by ArgoCD but pods crash due to
-    # restricted-v2 SCC (Apache tries to bind port 80). We only check resource existence.
-    wait_for_condition 240 "Guestbook deployment resource to exist on $OCP_CLUSTER_NAME via agent" \
-        "KUBECONFIG=$OCP_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
-            log_error "SCENARIO 6: FAILED - Guestbook deployment not created by ArgoCD agent"
-            return 1
-        }
-    log_info "NOTE: On OCP, guestbook-ui pods will crash (port 80 + restricted SCC) - this is expected"
-
-    # Verify Application sync status is synced back to hub
-    log_info "Verifying Application sync status reflected on hub..."
-    wait_for_condition 180 "Application sync status to show Synced on hub" \
-        "kubectl get applications.argoproj.io guestbook -n $OCP_CLUSTER_NAME -o jsonpath='{.status.sync.status}' 2>/dev/null | grep -q 'Synced'" || {
-            log_error "SCENARIO 6: FAILED - Application sync status not reflected on hub"
-            log_debug "Application YAML on hub:"
-            kubectl get applications.argoproj.io guestbook -n $OCP_CLUSTER_NAME -o yaml 2>/dev/null || true
-            log_debug "Principal logs:"
-            kubectl logs -n openshift-gitops -l app.kubernetes.io/component=principal --tail=20 2>/dev/null || true
-            return 1
-        }
-
-    # Get final Application status
-    local sync_status=$(kubectl get applications.argoproj.io guestbook -n $OCP_CLUSTER_NAME -o jsonpath='{.status.sync.status}' 2>/dev/null)
-    local health_status=$(kubectl get applications.argoproj.io guestbook -n $OCP_CLUSTER_NAME -o jsonpath='{.status.health.status}' 2>/dev/null)
-    log_info "Application Status - Sync: $sync_status, Health: $health_status"
-
-    log_info "=============================================="
-    log_info "SCENARIO 6: PASSED"
-    log_info "  - GitOpsCluster with Agent + OLM created: OK"
-    log_info "  - Principal server address auto-discovered: OK"
-    log_info "  - ArgoCD with agent via OLM: OK"
-    log_info "  - Agent running on managed cluster: OK"
-    log_info "  - Guestbook synced by ArgoCD agent (deployment exists): OK"
-    log_info "  - Application sync status reflected on hub: Sync=$sync_status, Health=$health_status"
+    log_info "  - Environment health checks: OK"
     log_info "=============================================="
     return 0
 }
@@ -1633,33 +2275,38 @@ echo ""
 case "${1:-all}" in
     1)
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
         test_scenario_1
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
         ;;
     2)
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-gitops" "kind-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-gitops" "kind-placement"
         test_scenario_2
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-gitops" "kind-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-gitops" "kind-placement"
         ;;
     3)
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
         test_scenario_3
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
         ;;
     4)
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
         test_scenario_4
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
         ;;
     5)
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
         test_scenario_5
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
-        ;;
-    6)
-        cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-olm-gitops" "ocp-agent-olm-placement"
-        test_scenario_6
-        cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-olm-gitops" "ocp-agent-olm-placement"
         ;;
     all)
         # Initial cleanup
@@ -1671,7 +2318,6 @@ case "${1:-all}" in
         scenario3_result="SKIPPED"
         scenario4_result="SKIPPED"
         scenario5_result="SKIPPED"
-        scenario6_result="SKIPPED"
 
         # Run all scenarios with cleanup after each (always cleanup, regardless of pass/fail)
         if test_scenario_1; then
@@ -1679,71 +2325,66 @@ case "${1:-all}" in
         else
             scenario1_result="FAILED"
         fi
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-gitops" "ocp-placement"
-        sleep 15  # Give controller time to process cleanup before next scenario
+        sleep 15
 
         if test_scenario_2; then
             scenario2_result="PASSED"
         else
             scenario2_result="FAILED"
         fi
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-gitops" "kind-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-gitops" "kind-placement"
-        sleep 15  # Give controller time to process cleanup before next scenario
+        sleep 15
 
         if test_scenario_3; then
             scenario3_result="PASSED"
         else
             scenario3_result="FAILED"
         fi
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-olm-gitops" "ocp-olm-placement"
-        sleep 15  # Give controller time to process cleanup before next scenario
+        sleep 15
 
         if test_scenario_4; then
             scenario4_result="PASSED"
         else
             scenario4_result="FAILED"
         fi
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
         cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-gitops" "ocp-agent-placement"
-        sleep 15  # Give controller time to process cleanup before next scenario
+        sleep 15
 
         if test_scenario_5; then
             scenario5_result="PASSED"
         else
             scenario5_result="FAILED"
         fi
+        cleanup_scenario "$LOCAL_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
         cleanup_scenario "$KIND_CLUSTER_NAME" "kind-agent-gitops" "kind-agent-placement"
-        sleep 15  # Give controller time to process cleanup before next scenario
-
-        if test_scenario_6; then
-            scenario6_result="PASSED"
-        else
-            scenario6_result="FAILED"
-        fi
-        cleanup_scenario "$OCP_CLUSTER_NAME" "ocp-agent-olm-gitops" "ocp-agent-olm-placement"
 
         log_info "=============================================="
         log_info "=== ALL SCENARIOS COMPLETE ==="
         log_info "=============================================="
-        log_info "  Scenario 1 (OCP, no agent, no OLM):  $scenario1_result"
-        log_info "  Scenario 2 (Kind, no agent, no OLM): $scenario2_result"
-        log_info "  Scenario 3 (OCP, OLM):               $scenario3_result"
-        log_info "  Scenario 4 (OCP, Agent):             $scenario4_result"
-        log_info "  Scenario 5 (Kind, Agent):            $scenario5_result"
-        log_info "  Scenario 6 (OCP, Agent + OLM):       $scenario6_result"
+        log_info "  Scenario 1 (OCP, no agent, OLM auto):      $scenario1_result"
+        log_info "  Scenario 2 (Kind, no agent, embedded):      $scenario2_result"
+        log_info "  Scenario 3 (OCP, custom OLM Manual):        $scenario3_result"
+        log_info "  Scenario 4 (OCP, Agent, OLM auto):          $scenario4_result"
+        log_info "  Scenario 5 (Kind, Agent, embedded):         $scenario5_result"
         log_info "=============================================="
         ;;
     cleanup)
         cleanup_all
         ;;
     *)
-        echo "Usage: $0 [1|2|3|4|5|6|all|cleanup]"
+        echo "Usage: $0 [1|2|3|4|5|all|cleanup]"
         echo ""
-        echo "  1       - Scenario 1: gitops-addon on OCP"
-        echo "  2       - Scenario 2: gitops-addon on Kind"
-        echo "  3       - Scenario 3: gitops-addon + OLM on OCP"
-        echo "  4       - Scenario 4: gitops-addon + Agent on OCP"
-        echo "  5       - Scenario 5: gitops-addon + Agent on Kind"
-        echo "  6       - Scenario 6: gitops-addon + Agent + OLM on OCP"
+        echo "  1       - Scenario 1: gitops-addon on OCP (OLM auto-detected)"
+        echo "  2       - Scenario 2: gitops-addon on Kind (embedded manifests)"
+        echo "  3       - Scenario 3: gitops-addon + custom OLM on OCP (Manual approval)"
+        echo "  4       - Scenario 4: gitops-addon + Agent on OCP (OLM auto-detected)"
+        echo "  5       - Scenario 5: gitops-addon + Agent on Kind (embedded manifests)"
         echo "  all     - Run all scenarios sequentially with cleanup"
         echo "  cleanup - Clean up all scenarios"
         echo ""

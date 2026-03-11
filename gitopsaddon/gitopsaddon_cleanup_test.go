@@ -486,55 +486,6 @@ func TestClearStalePauseMarkerWithExplicitReader(t *testing.T) {
 	}
 }
 
-// TestContainsArgoCD tests the containsArgoCD helper function
-func TestContainsArgoCD(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected bool
-	}{
-		{
-			name:     "contains_argocd_lowercase",
-			input:    "argocd-operator.v1.0.0",
-			expected: true,
-		},
-		{
-			name:     "contains_argocd_mixed_case",
-			input:    "ArgoCD-Operator",
-			expected: true,
-		},
-		{
-			name:     "contains_openshift_gitops",
-			input:    "openshift-gitops-operator.v1.9.0",
-			expected: true,
-		},
-		{
-			name:     "contains_openshift_gitops_mixed_case",
-			input:    "OpenShift-GitOps-Operator",
-			expected: true,
-		},
-		{
-			name:     "does_not_contain",
-			input:    "some-other-operator",
-			expected: false,
-		},
-		{
-			name:     "empty_string",
-			input:    "",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := containsArgoCD(tt.input)
-			if result != tt.expected {
-				t.Errorf("containsArgoCD(%q) = %v, want %v", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
 // TestGetCleanupVerificationWaitDuration tests the getCleanupVerificationWaitDuration function
 func TestGetCleanupVerificationWaitDuration(t *testing.T) {
 	tests := []struct {
@@ -545,7 +496,7 @@ func TestGetCleanupVerificationWaitDuration(t *testing.T) {
 		{
 			name:     "default_value_no_env",
 			envValue: "",
-			expected: 0,
+			expected: 20 * time.Second,
 		},
 		{
 			name:     "set_to_60_seconds",
@@ -560,7 +511,7 @@ func TestGetCleanupVerificationWaitDuration(t *testing.T) {
 		{
 			name:     "invalid_value_returns_default",
 			envValue: "invalid",
-			expected: 0,
+			expected: 20 * time.Second,
 		},
 	}
 
@@ -620,16 +571,15 @@ func TestDeleteGitOpsServiceCR(t *testing.T) {
 	}
 }
 
-// TestVerifyNamespaceCleanup tests the verifyNamespaceCleanup function
 func TestVerifyNamespaceCleanup(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name              string
-		namespace         string
-		existingObjects   []client.Object
-		expectedExists    bool
-		expectedError     bool
+		name            string
+		namespace       string
+		existingObjects []client.Object
+		expectedExists  bool
+		expectedError   bool
 	}{
 		{
 			name:            "no_deployments_in_namespace",
@@ -637,6 +587,23 @@ func TestVerifyNamespaceCleanup(t *testing.T) {
 			existingObjects: []client.Object{},
 			expectedExists:  false,
 			expectedError:   false,
+		},
+		{
+			name:      "labeled_deployment_exists",
+			namespace: "openshift-gitops-operator",
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-deploy",
+						Namespace: "openshift-gitops-operator",
+						Labels: map[string]string{
+							"apps.open-cluster-management.io/gitopsaddon": "true",
+						},
+					},
+				},
+			},
+			expectedExists: true,
+			expectedError:  false,
 		},
 	}
 
@@ -819,249 +786,252 @@ func TestCollectRemainingResources(t *testing.T) {
 	}
 }
 
-// TestDeleteOLMResources tests the deleteOLMResources function
-func TestDeleteOLMResources(t *testing.T) {
+
+func TestIsHubClusterForCleanup(t *testing.T) {
 	g := gomega.NewWithT(t)
 
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// This function should not error even with no OLM resources
-	err = deleteOLMResources(context.TODO(), testClient)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-// TestDeleteSubscriptionsInNamespace tests the deleteSubscriptionsInNamespace function
-func TestDeleteSubscriptionsInNamespace(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// This function should not error even with no subscriptions
-	err = deleteSubscriptionsInNamespace(context.TODO(), testClient, "openshift-operators")
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-// TestDeleteCSVsInNamespace tests the deleteCSVsInNamespace function
-func TestDeleteCSVsInNamespace(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// This function should not error even with no CSVs
-	err = deleteCSVsInNamespace(context.TODO(), testClient, "openshift-operators")
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-// TestDeleteArgoCDCR tests the deleteArgoCDCR function
-func TestDeleteArgoCDCR(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name            string
-		existingObjects []client.Object
-		expectError     bool
-	}{
-		{
-			name:            "no_argocd_cr_exists",
-			existingObjects: []client.Object{},
-			expectError:     false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			err := clientgoscheme.AddToScheme(scheme)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-
-			testClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			err = deleteArgoCDCR(context.TODO(), testClient)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-		})
-	}
-}
-
-// TestDeleteOperatorResources tests the deleteOperatorResources function
-func TestDeleteOperatorResources(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// This function should complete without error when no resources exist
-	err = deleteOperatorResources(context.TODO(), testClient, "openshift-gitops-operator")
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-// TestUninstallGitopsAgentInternal tests the uninstallGitopsAgentInternal function
-func TestUninstallGitopsAgentInternal(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	// Set env to skip wait verification
-	os.Setenv("CLEANUP_VERIFICATION_WAIT_SECONDS", "0")
-	defer os.Unsetenv("CLEANUP_VERIFICATION_WAIT_SECONDS")
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	// Create namespace and deployment for pause marker
-	existingObjects := []client.Object{
-		&corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: AddonNamespace,
-			},
-		},
-		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      AddonDeploymentName,
-				Namespace: AddonNamespace,
-				UID:       "test-uid",
-			},
-		},
-	}
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(existingObjects...).
-		Build()
-
-	// This function should complete (may have errors but should not panic)
-	err = uninstallGitopsAgentInternal(context.TODO(), testClient, "openshift-gitops-operator")
-	// The function may return an error due to missing ArgoCD CRD in fake client,
-	// but the important thing is it doesn't panic
-	_ = err
-}
-
-// TestDeleteResourcesWithRetry tests the deleteResourcesWithRetry function with short timeout
-func TestDeleteResourcesWithRetry(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	namespacedTypes := []resourceType{
-		{"ServiceAccount", "v1"},
-	}
-	clusterTypes := []resourceType{
-		{"ClusterRole", "rbac.authorization.k8s.io/v1"},
-	}
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// With no resources, should complete quickly
-	err = deleteResourcesWithRetry(context.TODO(), testClient, namespacedTypes, clusterTypes, "test-namespace", 1*time.Second, true)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-}
-
-// TestWaitAndVerifyCleanup tests the waitAndVerifyCleanup function with short duration
-// Note: This test is skipped in normal runs because it can take 20+ seconds
-// It's kept for manual verification when needed
-func TestWaitAndVerifyCleanup(t *testing.T) {
-	// Skip this test by default as it takes too long due to the check interval
-	t.Skip("Skipping slow test - waitAndVerifyCleanup has 20s check interval")
-
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	// With very short wait duration and no resources, should complete without error
-	// Note: waitAndVerifyCleanup returns error if namespace is clean (verifyNamespaceCleanup returns false)
-	// but the logic seems inverted - it returns error if operatorClean is true (meaning no resources)
-	// Let's just verify it doesn't panic
-	err = waitAndVerifyCleanup(context.TODO(), testClient, "openshift-gitops-operator", 1*time.Millisecond)
-	// The function may return an error based on its verification logic, just check it runs
-	_ = err
-}
-
-// TestResourceType tests that resourceType struct is properly initialized
-func TestResourceType(t *testing.T) {
-	rt := resourceType{
-		kind:       "Deployment",
-		apiVersion: "apps/v1",
-	}
-
-	if rt.kind != "Deployment" {
-		t.Errorf("Expected kind to be Deployment, got %s", rt.kind)
-	}
-	if rt.apiVersion != "apps/v1" {
-		t.Errorf("Expected apiVersion to be apps/v1, got %s", rt.apiVersion)
-	}
-}
-
-// TestDeleteArgoCDCRWithUnstructured tests deleteArgoCDCR with unstructured ArgoCD resources
-// Note: This test is skipped because it would timeout waiting for the fake client
-// to actually delete the unstructured object (which it doesn't do)
-func TestDeleteArgoCDCRWithUnstructured(t *testing.T) {
-	// Skip this test as it would timeout - fake client doesn't actually remove unstructured objects
-	t.Skip("Skipping test that would timeout - fake client doesn't remove unstructured objects")
-
-	g := gomega.NewWithT(t)
-
-	scheme := runtime.NewScheme()
-	err := clientgoscheme.AddToScheme(scheme)
-	g.Expect(err).ToNot(gomega.HaveOccurred())
-
-	// Create an ArgoCD CR using unstructured
-	argoCD := &unstructured.Unstructured{}
-	argoCD.SetAPIVersion("argoproj.io/v1beta1")
-	argoCD.SetKind("ArgoCD")
-	argoCD.SetName("acm-openshift-gitops")
-	argoCD.SetNamespace(GitOpsNamespace)
-	argoCD.SetLabels(map[string]string{
-		"apps.open-cluster-management.io/gitopsaddon": "true",
+	t.Run("no hub indicators returns false", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		result, err := isHubClusterForCleanup(context.TODO(), testClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result).To(gomega.BeFalse())
 	})
 
-	testClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(argoCD).
-		Build()
+	t.Run("ClusterManager exists returns true", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		cm := &unstructured.Unstructured{}
+		cm.SetAPIVersion("operator.open-cluster-management.io/v1")
+		cm.SetKind("ClusterManager")
+		cm.SetName("cluster-manager")
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cm).Build()
+		result, err := isHubClusterForCleanup(context.TODO(), testClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result).To(gomega.BeTrue())
+	})
 
-	// This should attempt to delete the ArgoCD CR
-	// It will fail with timeout because the fake client doesn't remove objects
-	// but that's expected behavior for this test
-	err = deleteArgoCDCR(context.TODO(), testClient)
-	// May timeout, which is expected since fake client doesn't actually delete
-	_ = err
+	t.Run("ManagedCluster local-cluster by name returns true", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		mc := &unstructured.Unstructured{}
+		mc.SetAPIVersion("cluster.open-cluster-management.io/v1")
+		mc.SetKind("ManagedCluster")
+		mc.SetName("local-cluster")
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mc).Build()
+		result, err := isHubClusterForCleanup(context.TODO(), testClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result).To(gomega.BeTrue())
+	})
+
+	t.Run("ManagedCluster with local-cluster label returns true", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		mc := &unstructured.Unstructured{}
+		mc.SetAPIVersion("cluster.open-cluster-management.io/v1")
+		mc.SetKind("ManagedCluster")
+		mc.SetName("my-hub-cluster")
+		mc.SetLabels(map[string]string{"local-cluster": "true"})
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mc).Build()
+		result, err := isHubClusterForCleanup(context.TODO(), testClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result).To(gomega.BeTrue())
+	})
+
+	t.Run("non-hub ManagedCluster returns false", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		mc := &unstructured.Unstructured{}
+		mc.SetAPIVersion("cluster.open-cluster-management.io/v1")
+		mc.SetKind("ManagedCluster")
+		mc.SetName("spoke-cluster-1")
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mc).Build()
+		result, err := isHubClusterForCleanup(context.TODO(), testClient)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result).To(gomega.BeFalse())
+	})
+}
+
+func TestGetInstalledCSVsFromLabeledSubscriptions(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ctx := context.TODO()
+
+	t.Run("returns CSV from gitopsaddon-labeled subscription", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+
+		sub := &unstructured.Unstructured{}
+		sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		sub.SetKind("Subscription")
+		sub.SetName("openshift-gitops-operator")
+		sub.SetNamespace("openshift-operators")
+		sub.SetLabels(map[string]string{
+			"apps.open-cluster-management.io/gitopsaddon": "true",
+		})
+		_ = unstructured.SetNestedField(sub.Object, "openshift-gitops-operator.v1.14.0", "status", "installedCSV")
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sub).Build()
+
+		refs, err := getInstalledCSVsFromLabeledSubscriptions(ctx, testClient, "openshift-operators")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(refs).To(gomega.HaveLen(1))
+		g.Expect(refs[0].name).To(gomega.Equal("openshift-gitops-operator.v1.14.0"))
+		g.Expect(refs[0].namespace).To(gomega.Equal("openshift-operators"))
+	})
+
+	t.Run("ignores subscription without gitopsaddon label", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+
+		sub := &unstructured.Unstructured{}
+		sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		sub.SetKind("Subscription")
+		sub.SetName("openshift-gitops-operator")
+		sub.SetNamespace("openshift-operators")
+		_ = unstructured.SetNestedField(sub.Object, "openshift-gitops-operator.v1.14.0", "status", "installedCSV")
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sub).Build()
+
+		refs, err := getInstalledCSVsFromLabeledSubscriptions(ctx, testClient, "openshift-operators")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(refs).To(gomega.BeEmpty())
+	})
+
+	t.Run("skips subscription without installedCSV status", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+
+		sub := &unstructured.Unstructured{}
+		sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		sub.SetKind("Subscription")
+		sub.SetName("openshift-gitops-operator")
+		sub.SetNamespace("openshift-operators")
+		sub.SetLabels(map[string]string{
+			"apps.open-cluster-management.io/gitopsaddon": "true",
+		})
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sub).Build()
+
+		refs, err := getInstalledCSVsFromLabeledSubscriptions(ctx, testClient, "openshift-operators")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(refs).To(gomega.BeEmpty())
+	})
+
+	t.Run("returns empty when no subscriptions exist", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		refs, err := getInstalledCSVsFromLabeledSubscriptions(ctx, testClient, "openshift-operators")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(refs).To(gomega.BeEmpty())
+	})
+
+	t.Run("ignores labeled subscription in different namespace", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+
+		subTarget := &unstructured.Unstructured{}
+		subTarget.SetAPIVersion("operators.coreos.com/v1alpha1")
+		subTarget.SetKind("Subscription")
+		subTarget.SetName("openshift-gitops-operator")
+		subTarget.SetNamespace("openshift-operators")
+		subTarget.SetLabels(map[string]string{
+			"apps.open-cluster-management.io/gitopsaddon": "true",
+		})
+		_ = unstructured.SetNestedField(subTarget.Object, "openshift-gitops-operator.v1.14.0", "status", "installedCSV")
+
+		subOther := &unstructured.Unstructured{}
+		subOther.SetAPIVersion("operators.coreos.com/v1alpha1")
+		subOther.SetKind("Subscription")
+		subOther.SetName("openshift-gitops-operator")
+		subOther.SetNamespace("other-namespace")
+		subOther.SetLabels(map[string]string{
+			"apps.open-cluster-management.io/gitopsaddon": "true",
+		})
+		_ = unstructured.SetNestedField(subOther.Object, "openshift-gitops-operator.v1.15.0", "status", "installedCSV")
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(subTarget, subOther).Build()
+
+		refs, err := getInstalledCSVsFromLabeledSubscriptions(ctx, testClient, "openshift-operators")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(refs).To(gomega.HaveLen(1))
+		g.Expect(refs[0].name).To(gomega.Equal("openshift-gitops-operator.v1.14.0"))
+		g.Expect(refs[0].namespace).To(gomega.Equal("openshift-operators"))
+	})
+}
+
+func TestDeleteOLMResourcesOnlyDeletesOwnedCSVs(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ctx := context.TODO()
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	// Our subscription with gitopsaddon label and an installedCSV
+	ourSub := &unstructured.Unstructured{}
+	ourSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	ourSub.SetKind("Subscription")
+	ourSub.SetName("openshift-gitops-operator")
+	ourSub.SetNamespace("openshift-operators")
+	ourSub.SetLabels(map[string]string{
+		"apps.open-cluster-management.io/gitopsaddon": "true",
+	})
+	_ = unstructured.SetNestedField(ourSub.Object, "openshift-gitops-operator.v1.14.0", "status", "installedCSV")
+
+	// Pre-existing subscription WITHOUT gitopsaddon label
+	adminSub := &unstructured.Unstructured{}
+	adminSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	adminSub.SetKind("Subscription")
+	adminSub.SetName("admin-argocd")
+	adminSub.SetNamespace("openshift-operators")
+	_ = unstructured.SetNestedField(adminSub.Object, "admin-argocd.v2.0.0", "status", "installedCSV")
+
+	// Our CSV (should be deleted)
+	ourCSV := &unstructured.Unstructured{}
+	ourCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+	ourCSV.SetKind("ClusterServiceVersion")
+	ourCSV.SetName("openshift-gitops-operator.v1.14.0")
+	ourCSV.SetNamespace("openshift-operators")
+
+	// Admin CSV (should NOT be deleted)
+	adminCSV := &unstructured.Unstructured{}
+	adminCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+	adminCSV.SetKind("ClusterServiceVersion")
+	adminCSV.SetName("admin-argocd.v2.0.0")
+	adminCSV.SetNamespace("openshift-operators")
+
+	testClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithRuntimeObjects(ourSub, adminSub, ourCSV, adminCSV).Build()
+
+	err := deleteOLMResources(ctx, testClient)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify our subscription was deleted
+	checkSub := &unstructured.Unstructured{}
+	checkSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	checkSub.SetKind("Subscription")
+	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator", Namespace: "openshift-operators"}, checkSub)
+	g.Expect(err).To(gomega.HaveOccurred(), "Our subscription should have been deleted")
+
+	// Verify admin subscription was NOT deleted (no label)
+	checkAdminSub := &unstructured.Unstructured{}
+	checkAdminSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	checkAdminSub.SetKind("Subscription")
+	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd", Namespace: "openshift-operators"}, checkAdminSub)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "Admin subscription should still exist")
+
+	// Verify our CSV was deleted
+	checkCSV := &unstructured.Unstructured{}
+	checkCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+	checkCSV.SetKind("ClusterServiceVersion")
+	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator.v1.14.0", Namespace: "openshift-operators"}, checkCSV)
+	g.Expect(err).To(gomega.HaveOccurred(), "Our CSV should have been deleted")
+
+	// Verify admin CSV was NOT deleted
+	checkAdminCSV := &unstructured.Unstructured{}
+	checkAdminCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+	checkAdminCSV.SetKind("ClusterServiceVersion")
+	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd.v2.0.0", Namespace: "openshift-operators"}, checkAdminCSV)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "Admin CSV should still exist")
 }

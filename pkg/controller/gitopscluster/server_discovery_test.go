@@ -1208,6 +1208,231 @@ func TestDiscoverFromLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestDiscoverFromNodePort(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name            string
+		argoNamespace   string
+		existingObjects []client.Object
+		expectedAddress string
+		expectedPort    string
+		expectedError   bool
+	}{
+		{
+			name:          "discover from NodePort service",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Type: v1.ServiceTypeNodePort,
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443, NodePort: 31474},
+						},
+					},
+				},
+				&v1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "kind-control-plane"},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{Type: v1.NodeReady, Status: v1.ConditionTrue},
+						},
+						Addresses: []v1.NodeAddress{
+							{Type: v1.NodeInternalIP, Address: "172.18.0.3"},
+						},
+					},
+				},
+			},
+			expectedAddress: "172.18.0.3",
+			expectedPort:    "31474",
+		},
+		{
+			name:          "non-NodePort service type - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Type: v1.ServiceTypeClusterIP,
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "NodePort service with no assigned port - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Type:  v1.ServiceTypeNodePort,
+						Ports: []v1.ServicePort{},
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "NodePort service with no nodes - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Type: v1.ServiceTypeNodePort,
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443, NodePort: 31474},
+						},
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:          "NodePort with node missing InternalIP - should error",
+			argoNamespace: utils.GitOpsNamespace,
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "openshift-gitops-agent-principal",
+						Namespace: utils.GitOpsNamespace,
+					},
+					Spec: v1.ServiceSpec{
+						Type: v1.ServiceTypeNodePort,
+						Ports: []v1.ServicePort{
+							{Name: "https", Port: 443, NodePort: 31474},
+						},
+					},
+				},
+				&v1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: v1.NodeStatus{
+						Conditions: []v1.NodeCondition{
+							{Type: v1.NodeReady, Status: v1.ConditionTrue},
+						},
+						Addresses: []v1.NodeAddress{
+							{Type: v1.NodeExternalDNS, Address: "node1.example.com"},
+						},
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:            "service not found - should error",
+			argoNamespace:   utils.GitOpsNamespace,
+			existingObjects: []client.Object{},
+			expectedError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			address, port, err := reconciler.discoverFromNodePort(context.TODO(), tt.argoNamespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedAddress, address)
+				assert.Equal(t, tt.expectedPort, port)
+			}
+		})
+	}
+}
+
+func TestDiscoverServerAddressAndPort_NodePortFallback(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = routev1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = gitopsclusterV1beta1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "test-namespace",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: utils.GitOpsNamespace,
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+			},
+		},
+	}
+
+	objects := []client.Object{
+		gitOpsCluster,
+		&v1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "openshift-gitops-agent-principal",
+				Namespace: utils.GitOpsNamespace,
+			},
+			Spec: v1.ServiceSpec{
+				Type: v1.ServiceTypeNodePort,
+				Ports: []v1.ServicePort{
+					{Name: "https", Port: 443, NodePort: 30443},
+				},
+			},
+		},
+		&v1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+			Status: v1.NodeStatus{
+				Conditions: []v1.NodeCondition{
+					{Type: v1.NodeReady, Status: v1.ConditionTrue},
+				},
+				Addresses: []v1.NodeAddress{
+					{Type: v1.NodeInternalIP, Address: "10.0.0.5"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		Build()
+
+	reconciler := &ReconcileGitOpsCluster{
+		Client:    fakeClient,
+		apiReader: fakeClient,
+	}
+
+	err = reconciler.DiscoverServerAddressAndPort(context.TODO(), gitOpsCluster)
+	assert.NoError(t, err)
+	assert.Equal(t, "10.0.0.5", gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerAddress)
+	assert.Equal(t, "30443", gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
+}
+
 func TestDiscoverServerAddressAndPort_RoutePreference(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := v1.AddToScheme(scheme)

@@ -18,6 +18,7 @@ package gitopsaddon
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -26,9 +27,22 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// unsetEnvForTest ensures the given env var is unset for the duration of the
+// test, restoring any pre-existing value via t.Cleanup.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	if orig, ok := os.LookupEnv(key); ok {
+		os.Unsetenv(key)
+		t.Cleanup(func() { os.Setenv(key, orig) })
+	}
+}
 
 func TestWaitForOperatorReady(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -170,22 +184,6 @@ func TestCreateUpdateNamespace(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestInstallOrUpdateOpenshiftGitops(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	reconciler := &GitopsAddonReconciler{
-		Client:      getTestEnv().Client,
-		Config:      getTestEnv().Config,
-		AddonConfig: createTestConfig("test-operator:latest", "test-argocd:latest", "test-redis:latest", false),
-	}
-
-	// This test mainly verifies that the function doesn't panic
-	// The actual functionality depends on many external dependencies
-	g.Expect(func() {
-		reconciler.installOrUpdateOpenshiftGitops()
-	}).ToNot(gomega.Panic())
 }
 
 func TestPatchArgoCDServiceAccountsWithImagePullSecrets(t *testing.T) {
@@ -655,6 +653,425 @@ func TestDeletePodsWithImagePullIssues(t *testing.T) {
 					_ = reconciler.Delete(context.TODO(), pod)
 				}
 			}
+		})
+	}
+}
+
+func TestIsOCPCluster(t *testing.T) {
+	tests := []struct {
+		name     string
+		objects  []runtime.Object
+		expected bool
+	}{
+		{
+			name:     "no OCP indicators",
+			objects:  []runtime.Object{},
+			expected: false,
+		},
+		{
+			name: "ClusterVersion CRD present",
+			objects: []runtime.Object{
+				func() runtime.Object {
+					crd := &unstructured.Unstructured{}
+					crd.SetAPIVersion("apiextensions.k8s.io/v1")
+					crd.SetKind("CustomResourceDefinition")
+					crd.SetName("clusterversions.config.openshift.io")
+					return crd
+				}(),
+			},
+			expected: true,
+		},
+		{
+			name: "Infrastructure CRD present",
+			objects: []runtime.Object{
+				func() runtime.Object {
+					crd := &unstructured.Unstructured{}
+					crd.SetAPIVersion("apiextensions.k8s.io/v1")
+					crd.SetKind("CustomResourceDefinition")
+					crd.SetName("infrastructures.config.openshift.io")
+					return crd
+				}(),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			scheme := runtime.NewScheme()
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, obj := range tt.objects {
+				builder = builder.WithRuntimeObjects(obj)
+			}
+			r := &GitopsAddonReconciler{Client: builder.Build()}
+			result, err := r.isOCPCluster(context.Background())
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(result).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+func TestIsHubCluster(t *testing.T) {
+	tests := []struct {
+		name     string
+		objects  []runtime.Object
+		expected bool
+	}{
+		{
+			name:     "no hub indicators",
+			objects:  []runtime.Object{},
+			expected: false,
+		},
+		{
+			name: "ClusterManager resource exists",
+			objects: []runtime.Object{
+				func() runtime.Object {
+					cm := &unstructured.Unstructured{}
+					cm.SetAPIVersion("operator.open-cluster-management.io/v1")
+					cm.SetKind("ClusterManager")
+					cm.SetName("cluster-manager")
+					return cm
+				}(),
+			},
+			expected: true,
+		},
+		{
+			name: "ManagedCluster local-cluster by name",
+			objects: []runtime.Object{
+				func() runtime.Object {
+					mc := &unstructured.Unstructured{}
+					mc.SetAPIVersion("cluster.open-cluster-management.io/v1")
+					mc.SetKind("ManagedCluster")
+					mc.SetName("local-cluster")
+					return mc
+				}(),
+			},
+			expected: true,
+		},
+		{
+			name: "ManagedCluster with local-cluster label",
+			objects: []runtime.Object{
+				func() runtime.Object {
+					mc := &unstructured.Unstructured{}
+					mc.SetAPIVersion("cluster.open-cluster-management.io/v1")
+					mc.SetKind("ManagedCluster")
+					mc.SetName("my-hub")
+					mc.SetLabels(map[string]string{"local-cluster": "true"})
+					return mc
+				}(),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			scheme := runtime.NewScheme()
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, obj := range tt.objects {
+				builder = builder.WithRuntimeObjects(obj)
+			}
+			r := &GitopsAddonReconciler{Client: builder.Build()}
+			result, err := r.isHubCluster(context.Background())
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(result).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+func TestGetOLMEnvOrDefault(t *testing.T) {
+	tests := []struct {
+		name         string
+		envKey       string
+		envValue     string
+		defaultValue string
+		expected     string
+	}{
+		{
+			name:         "env var not set returns default",
+			envKey:       "OLM_TEST_VAR",
+			envValue:     "",
+			defaultValue: "default-value",
+			expected:     "default-value",
+		},
+		{
+			name:         "env var set returns env value",
+			envKey:       "OLM_TEST_VAR",
+			envValue:     "custom-value",
+			defaultValue: "default-value",
+			expected:     "custom-value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			if tt.envValue != "" {
+				t.Setenv(tt.envKey, tt.envValue)
+			} else {
+				unsetEnvForTest(t, tt.envKey)
+			}
+			g.Expect(getOLMEnvOrDefault(tt.envKey, tt.defaultValue)).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+func TestCreateOrUpdateOLMSubscriptionWithEnvVars(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	// Set custom env vars (t.Setenv restores original values on test cleanup)
+	t.Setenv("OLM_SUBSCRIPTION_NAME", "custom-gitops-operator")
+	t.Setenv("OLM_SUBSCRIPTION_NAMESPACE", "custom-operators")
+	t.Setenv("OLM_SUBSCRIPTION_CHANNEL", "stable")
+	t.Setenv("OLM_SUBSCRIPTION_SOURCE", "custom-catalog")
+	t.Setenv("OLM_SUBSCRIPTION_SOURCE_NAMESPACE", "custom-marketplace")
+	t.Setenv("OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL", "Manual")
+
+	// Create namespace first
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-operators"},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Verify the subscription was created with custom values
+	sub := &unstructured.Unstructured{}
+	sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	sub.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "custom-gitops-operator",
+		Namespace: "custom-operators",
+	}, sub)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	t.Cleanup(func() { _ = reconciler.Delete(context.TODO(), sub) })
+
+	spec, _, _ := unstructured.NestedMap(sub.Object, "spec")
+	g.Expect(spec["channel"]).To(gomega.Equal("stable"))
+	g.Expect(spec["name"]).To(gomega.Equal("custom-gitops-operator"))
+	g.Expect(spec["source"]).To(gomega.Equal("custom-catalog"))
+	g.Expect(spec["sourceNamespace"]).To(gomega.Equal("custom-marketplace"))
+	g.Expect(spec["installPlanApproval"]).To(gomega.Equal("Manual"))
+}
+
+func TestCreateOrUpdateOLMSubscriptionWithDefaults(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	// Ensure no OLM env vars are set (restore originals on cleanup)
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_CHANNEL")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
+
+	// Create namespace
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Verify the subscription was created with default values
+	sub := &unstructured.Unstructured{}
+	sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	sub.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "openshift-gitops-operator",
+		Namespace: "openshift-operators",
+	}, sub)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	spec, _, _ := unstructured.NestedMap(sub.Object, "spec")
+	t.Cleanup(func() { _ = reconciler.Delete(context.TODO(), sub) })
+
+	g.Expect(spec["channel"]).To(gomega.Equal("latest"))
+	g.Expect(spec["source"]).To(gomega.Equal("redhat-operators"))
+	g.Expect(spec["sourceNamespace"]).To(gomega.Equal("openshift-marketplace"))
+}
+
+func TestCreateOrUpdateOLMSubscriptionUpdatesOwnedExisting(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_CHANNEL")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
+
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	// Create subscription with defaults first (has gitopsaddon label)
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	sub := &unstructured.Unstructured{}
+	sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	sub.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "openshift-gitops-operator",
+		Namespace: "openshift-operators",
+	}, sub)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	spec, _, _ := unstructured.NestedMap(sub.Object, "spec")
+	g.Expect(spec["installPlanApproval"]).To(gomega.Equal("Automatic"))
+	g.Expect(sub.GetLabels()["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
+
+	// Now update to Manual — should succeed because subscription has gitopsaddon label
+	t.Setenv("OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL", "Manual")
+
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	sub2 := &unstructured.Unstructured{}
+	sub2.SetAPIVersion("operators.coreos.com/v1alpha1")
+	sub2.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "openshift-gitops-operator",
+		Namespace: "openshift-operators",
+	}, sub2)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	t.Cleanup(func() { _ = reconciler.Delete(context.TODO(), sub2) })
+
+	spec2, _, _ := unstructured.NestedMap(sub2.Object, "spec")
+	g.Expect(spec2["installPlanApproval"]).To(gomega.Equal("Manual"))
+}
+
+func TestCreateOrUpdateOLMSubscriptionSkipsPreExisting(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_CHANNEL")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
+
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	// Simulate a pre-existing subscription (NO gitopsaddon label, different channel)
+	preExisting := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name":      "openshift-gitops-operator",
+				"namespace": "openshift-operators",
+			},
+			"spec": map[string]interface{}{
+				"channel":         "stable",
+				"name":            "openshift-gitops-operator",
+				"source":          "redhat-operators",
+				"sourceNamespace": "openshift-marketplace",
+			},
+		},
+	}
+	err = reconciler.Create(context.TODO(), preExisting)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Call createOrUpdateOLMSubscription — should NOT overwrite the pre-existing subscription
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Verify the subscription was NOT modified
+	sub := &unstructured.Unstructured{}
+	sub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	sub.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "openshift-gitops-operator",
+		Namespace: "openshift-operators",
+	}, sub)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	spec, _, _ := unstructured.NestedMap(sub.Object, "spec")
+	g.Expect(spec["channel"]).To(gomega.Equal("stable"))
+
+	t.Cleanup(func() { _ = reconciler.Delete(context.TODO(), sub) })
+
+	labels := sub.GetLabels()
+	_, hasLabel := labels["apps.open-cluster-management.io/gitopsaddon"]
+	g.Expect(hasLabel).To(gomega.BeFalse())
+}
+
+func TestGetArgoCDNamespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		expected string
+	}{
+		{
+			name:     "no env var set returns default",
+			envValue: "",
+			expected: GitOpsNamespace,
+		},
+		{
+			name:     "env var set to local-cluster",
+			envValue: "local-cluster",
+			expected: "local-cluster",
+		},
+		{
+			name:     "env var set to custom namespace",
+			envValue: "custom-ns",
+			expected: "custom-ns",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			if tt.envValue != "" {
+				t.Setenv("ARGOCD_NAMESPACE", tt.envValue)
+			} else {
+				unsetEnvForTest(t, "ARGOCD_NAMESPACE")
+			}
+			g.Expect(getArgoCDNamespace()).To(gomega.Equal(tt.expected))
 		})
 	}
 }

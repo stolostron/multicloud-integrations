@@ -246,7 +246,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			expectedSecretsCount: 0,
 		},
 		{
-			name: "skip local-cluster by name",
+			name: "local-cluster by name gets cluster secret",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -281,14 +281,14 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
 			},
 			expectedError:        false,
-			expectedSecretsCount: 1,
+			expectedSecretsCount: 2,
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
-				// local-cluster should not have cluster secret
 				localSecret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-local-cluster", Namespace: "argocd"}, localSecret)
-				assert.Error(t, err, "Cluster secret should not be created for local-cluster")
+				assert.NoError(t, err, "Cluster secret should be created for local-cluster")
+				assert.Equal(t, "cluster", localSecret.Labels[argoCDTypeLabel])
+				assert.Equal(t, "local-cluster", localSecret.Labels[labelKeyClusterAgentMapping])
 
-				// remote-cluster should have cluster secret
 				remoteSecret := &v1.Secret{}
 				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-remote-cluster", Namespace: "argocd"}, remoteSecret)
 				assert.NoError(t, err, "Cluster secret should be created for remote-cluster")
@@ -297,7 +297,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
-			name: "skip cluster with local-cluster label",
+			name: "cluster with local-cluster label gets cluster secret",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -335,14 +335,14 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
 			},
 			expectedError:        false,
-			expectedSecretsCount: 1,
+			expectedSecretsCount: 2,
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
-				// hub-cluster (with local-cluster label) should not have cluster secret
 				hubSecret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-hub-cluster", Namespace: "argocd"}, hubSecret)
-				assert.Error(t, err, "Cluster secret should not be created for cluster with local-cluster=true label")
+				assert.NoError(t, err, "Cluster secret should be created for cluster with local-cluster=true label")
+				assert.Equal(t, "cluster", hubSecret.Labels[argoCDTypeLabel])
+				assert.Equal(t, "hub-cluster", hubSecret.Labels[labelKeyClusterAgentMapping])
 
-				// managed-cluster should have cluster secret
 				managedSecret := &v1.Secret{}
 				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-managed-cluster", Namespace: "argocd"}, managedSecret)
 				assert.NoError(t, err, "Cluster secret should be created for managed-cluster")
@@ -369,6 +369,17 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
+
+				secretList := &v1.SecretList{}
+				err := fakeClient.List(context.TODO(), secretList, client.InNamespace(tt.gitOpsCluster.Spec.ArgoServer.ArgoNamespace))
+				assert.NoError(t, err)
+				clusterSecrets := 0
+				for _, s := range secretList.Items {
+					if s.Labels[argoCDTypeLabel] == argoCDSecretTypeClusterValue {
+						clusterSecrets++
+					}
+				}
+				assert.Equal(t, tt.expectedSecretsCount, clusterSecrets, "unexpected number of cluster secrets")
 
 				if tt.validateFunc != nil {
 					tt.validateFunc(t, fakeClient, tt.orphanSecretsList)

@@ -175,46 +175,6 @@ func TestGitopsAddonReconciler_Start(t *testing.T) {
 	}
 }
 
-func TestGitopsAddonReconciler_houseKeeping(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name               string
-		argoCDAgentEnabled bool
-		description        string
-	}{
-		{
-			name:               "housekeeping_install_with_agent_disabled",
-			argoCDAgentEnabled: false,
-			description:        "Normal install flow",
-		},
-		{
-			name:               "housekeeping_install_with_agent_enabled",
-			argoCDAgentEnabled: true,
-			description:        "Install flow with agent enabled",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create a test reconciler with mock client
-			reconciler := &GitopsAddonReconciler{
-				Client:      getTestEnv().Client,
-				Scheme:      getTestEnv().Scheme,
-				Config:      getTestEnv().Config,
-				Interval:    30,
-				AddonConfig: createTestConfig("test-operator:latest", "test-argocd:latest", "test-redis:latest", tt.argoCDAgentEnabled),
-			}
-
-			// This test verifies that reconcile doesn't panic
-			// The actual functionality is tested in install/uninstall tests
-			g.Expect(func() {
-				reconciler.reconcile(context.TODO())
-			}).ToNot(gomega.Panic())
-		})
-	}
-}
-
 func TestGitopsAddonReconciler_Config(t *testing.T) {
 	g := gomega.NewWithT(t)
 

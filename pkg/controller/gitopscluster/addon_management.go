@@ -16,9 +16,7 @@ package gitopscluster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,7 +26,6 @@ import (
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace
@@ -40,14 +37,19 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		return errors.New("no namespace provided")
 	}
 
-	// Check if OLM subscription mode is enabled
-	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(gitOpsCluster)
-
 	// Define variables managed by GitOpsCluster controller
 	// Start with ARGOCD_AGENT_ENABLED default, then ExtractVariablesFromGitOpsCluster
 	// will populate all other variables from hub environment and GitOpsCluster spec
 	managedVariables := map[string]string{
 		utils.EnvArgoCDAgentEnabled: "false", // Default value
+	}
+
+	// Set ARGOCD_NAMESPACE per-cluster: for local-cluster the ArgoCD CR lives in the
+	// cluster's own namespace; for remote clusters it lives in openshift-gitops
+	if namespace == "local-cluster" {
+		managedVariables["ARGOCD_NAMESPACE"] = namespace
+	} else {
+		managedVariables["ARGOCD_NAMESPACE"] = utils.GitOpsNamespace
 	}
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
@@ -87,21 +89,6 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 			klog.Errorf("Failed to create AddOnDeploymentConfig: %v", err)
 			return err
 		}
-
-		// For OLM subscription mode (template-type addon), set AgentInstallNamespace to the OLM subscription namespace.
-		// This is needed so the OCM addon framework knows where to create the client certificate secret.
-		// We must use JSON merge patch after creation because the kubebuilder default
-		// would override it during creation.
-		// See: https://github.com/open-cluster-management-io/api/blob/main/addon/v1alpha1/types_addondeploymentconfig.go#L56-L63
-		if olmSubscriptionEnabled {
-			_, olmSubNamespace, _, _, _, _ := GetOLMSubscriptionValues(gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
-			klog.Infof("Patching AgentInstallNamespace to %s for OLM subscription mode in namespace %s", olmSubNamespace, namespace)
-			err = r.patchAgentInstallNamespaceForOLM(namespace, olmSubNamespace)
-			if err != nil {
-				klog.Errorf("Failed to patch AgentInstallNamespace: %v", err)
-				return err
-			}
-		}
 	} else if err != nil {
 		klog.Errorf("Failed to get AddOnDeploymentConfig: %v", err)
 		return err
@@ -140,27 +127,22 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 				})
 			}
 		} else {
-			// Preserve mode (default): preserve ALL existing variables and only add new ones
-			// EXCEPT for ARGOCD_AGENT_ENABLED which should always reflect the current state
+			// Preserve mode (default): update managed variables to match
+			// current spec, preserve user-added variables unchanged.
 			for _, variable := range existing.Spec.CustomizedVariables {
-				if variable.Name == utils.EnvArgoCDAgentEnabled {
-					// Always update ARGOCD_AGENT_ENABLED to match current argoCDAgent.enabled state
-					if newValue, exists := managedVariables[utils.EnvArgoCDAgentEnabled]; exists {
-						updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
-							Name:  utils.EnvArgoCDAgentEnabled,
-							Value: newValue,
-						})
-					}
+				if newValue, ok := managedVariables[variable.Name]; ok {
+					updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
+						Name:  variable.Name,
+						Value: newValue,
+					})
 				} else {
-					// Preserve other existing variables
 					updatedVariables = append(updatedVariables, variable)
 				}
 			}
 
-			// Add only NEW managed variables that don't already exist
+			// Add NEW managed variables that don't already exist
 			for name, value := range managedVariables {
 				if _, exists := existingVars[name]; !exists {
-					// Only add if the variable doesn't already exist
 					updatedVariables = append(updatedVariables, addonv1alpha1.CustomizedVariable{
 						Name:  name,
 						Value: value,
@@ -175,20 +157,6 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		if err != nil {
 			klog.Errorf("Failed to update AddOnDeploymentConfig: %v", err)
 			return err
-		}
-
-		// For OLM subscription mode (template-type addon), always patch AgentInstallNamespace to the OLM subscription namespace.
-		// This is needed so the OCM addon framework knows where to create the client certificate secret.
-		// The Update() call above re-applies the kubebuilder default, so we must always patch.
-		// See: https://github.com/open-cluster-management-io/api/blob/main/addon/v1alpha1/types_addondeploymentconfig.go#L56-L63
-		if olmSubscriptionEnabled {
-			_, olmSubNamespace, _, _, _, _ := GetOLMSubscriptionValues(gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
-			klog.Infof("Patching AgentInstallNamespace to %s for OLM subscription mode in namespace %s", olmSubNamespace, namespace)
-			err = r.patchAgentInstallNamespaceForOLM(namespace, olmSubNamespace)
-			if err != nil {
-				klog.Errorf("Failed to patch AgentInstallNamespace: %v", err)
-				return err
-			}
 		}
 	}
 
@@ -268,18 +236,14 @@ func (r *ReconcileGitOpsCluster) UpdateManagedClusterAddonConfig(namespace strin
 }
 
 // EnsureManagedClusterAddon creates the ManagedClusterAddon if it doesn't exist, or updates its config if it does
-// This handles all 4 addon template modes:
-// 1. gitops-addon (static) - gitopsAddon.enabled=true, argoCDAgent.enabled=false, olmSubscription.enabled=false
-// 2. gitops-addon-olm (static) - gitopsAddon.enabled=true, argoCDAgent.enabled=false, olmSubscription.enabled=true
-// 3. gitops-addon-{ns}-{name} (dynamic) - gitopsAddon.enabled=true, argoCDAgent.enabled=true, olmSubscription.enabled=false
-// 4. gitops-addon-olm-{ns}-{name} (dynamic) - gitopsAddon.enabled=true, argoCDAgent.enabled=true, olmSubscription.enabled=true
+// This handles 2 addon template modes:
+// 1. gitops-addon (static) - gitopsAddon.enabled=true, argoCDAgent.enabled=false
+// 2. gitops-addon-{ns}-{name} (dynamic) - gitopsAddon.enabled=true, argoCDAgent.enabled=true (adds RegistrationSpec for client cert)
+// OLM vs embedded operator installation is handled at runtime by the addon agent based on cluster detection.
 func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	if namespace == "" {
 		return errors.New("no namespace provided")
 	}
-
-	// Check if OLM subscription mode is enabled
-	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(gitOpsCluster)
 
 	// Check if ArgoCD agent is enabled
 	_, argoCDAgentEnabled := r.GetGitOpsAddonStatus(gitOpsCluster)
@@ -291,33 +255,16 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 		Namespace: namespace,
 	}, existing)
 
-	// Build expected configs based on mode:
-	// Determine which AddOnTemplate to use based on the combination of flags
+	// Determine which AddOnTemplate to use
 	expectedConfigs := []addonv1alpha1.AddOnConfig{}
 	var templateName string
 
-	// Check if custom OLM subscription values are specified
-	hasCustomOLMValues := olmSubscriptionEnabled && HasCustomOLMSubscriptionValues(gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
-
-	if argoCDAgentEnabled && olmSubscriptionEnabled {
-		// Mode 4: ArgoCD agent + OLM subscription (dynamic template)
-		templateName = getAddOnTemplateOLMName(gitOpsCluster)
-		klog.Infof("Using dynamic ArgoCD agent + OLM AddOnTemplate %s for namespace %s", templateName, namespace)
-	} else if argoCDAgentEnabled {
-		// Mode 3: ArgoCD agent without OLM (dynamic template)
+	if argoCDAgentEnabled {
+		// Mode 2: ArgoCD agent enabled (dynamic template with RegistrationSpec for client cert)
 		templateName = getAddOnTemplateName(gitOpsCluster)
 		klog.Infof("Using dynamic ArgoCD agent AddOnTemplate %s for namespace %s", templateName, namespace)
-	} else if olmSubscriptionEnabled && hasCustomOLMValues {
-		// Mode 2b: OLM subscription with custom values (dynamic template to use spec values)
-		templateName = getOLMAddOnTemplateName(gitOpsCluster)
-		klog.Infof("Using dynamic OLM AddOnTemplate %s with custom values for namespace %s", templateName, namespace)
-	} else if olmSubscriptionEnabled {
-		// Mode 2: OLM subscription without ArgoCD agent (static template)
-		templateName = "gitops-addon-olm"
-		klog.Infof("Using static OLM AddOnTemplate %s for namespace %s", templateName, namespace)
 	} else {
-		// Mode 1: Default - no ArgoCD agent, no OLM (static template from ClusterManagementAddOn default)
-		// The default template "gitops-addon" is configured in ClusterManagementAddOn
+		// Mode 1: Default - no ArgoCD agent (static template from ClusterManagementAddOn default)
 		templateName = ""
 		klog.Infof("Using default static AddOnTemplate from ClusterManagementAddOn for namespace %s", namespace)
 	}
@@ -505,6 +452,31 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 		if gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 			r.extractArgoCDAgentVariables(gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent, managedVariables)
 		}
+
+		// Always populate OLM subscription variables so AddOnTemplate {{…}}
+		// placeholders can be resolved. Use spec overrides only when
+		// olmSubscription.enabled is true; otherwise use canonical defaults
+		// so the agent reverts to default behavior.
+		if IsOLMSubscriptionEnabled(gitOpsCluster) {
+			managedVariables["OLM_SUBSCRIPTION_ENABLED"] = "true"
+			name, ns, channel, source, sourceNs, approval := GetOLMSubscriptionValues(
+				gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
+			managedVariables["OLM_SUBSCRIPTION_NAME"] = name
+			managedVariables["OLM_SUBSCRIPTION_NAMESPACE"] = ns
+			managedVariables["OLM_SUBSCRIPTION_CHANNEL"] = channel
+			managedVariables["OLM_SUBSCRIPTION_SOURCE"] = source
+			managedVariables["OLM_SUBSCRIPTION_SOURCE_NAMESPACE"] = sourceNs
+			managedVariables["OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL"] = approval
+		} else {
+			managedVariables["OLM_SUBSCRIPTION_ENABLED"] = "false"
+			name, ns, channel, source, sourceNs, approval := GetOLMSubscriptionValues(nil)
+			managedVariables["OLM_SUBSCRIPTION_NAME"] = name
+			managedVariables["OLM_SUBSCRIPTION_NAMESPACE"] = ns
+			managedVariables["OLM_SUBSCRIPTION_CHANNEL"] = channel
+			managedVariables["OLM_SUBSCRIPTION_SOURCE"] = source
+			managedVariables["OLM_SUBSCRIPTION_SOURCE_NAMESPACE"] = sourceNs
+			managedVariables["OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL"] = approval
+		}
 	}
 }
 
@@ -531,37 +503,3 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 	}
 }
 
-// patchAgentInstallNamespaceForOLM sets the AgentInstallNamespace to the OLM subscription namespace.
-// For OLM mode, the addon resources are installed in the OLM subscription namespace (typically openshift-operators),
-// and the OCM addon framework needs this value to know where to create the client certificate secret.
-// This is required because the kubebuilder default on the field prevents us from setting it via normal
-// Create/Update operations.
-func (r *ReconcileGitOpsCluster) patchAgentInstallNamespaceForOLM(namespace, olmSubNamespace string) error {
-	patch := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"agentInstallNamespace": olmSubNamespace,
-		},
-	}
-
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		return fmt.Errorf("failed to marshal patch: %w", err)
-	}
-
-	existing := &addonv1alpha1.AddOnDeploymentConfig{}
-	err = r.Get(context.Background(), types.NamespacedName{
-		Name:      "gitops-addon-config",
-		Namespace: namespace,
-	}, existing)
-	if err != nil {
-		return fmt.Errorf("failed to get AddOnDeploymentConfig: %w", err)
-	}
-
-	err = r.Patch(context.Background(), existing, client.RawPatch(types.MergePatchType, patchBytes))
-	if err != nil {
-		return fmt.Errorf("failed to patch AddOnDeploymentConfig: %w", err)
-	}
-
-	klog.Infof("Successfully patched AgentInstallNamespace to %s for OLM mode in namespace %s", olmSubNamespace, namespace)
-	return nil
-}

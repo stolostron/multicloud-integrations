@@ -15,8 +15,6 @@ limitations under the License.
 package gitopscluster
 
 import (
-	"fmt"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,6 +82,8 @@ func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	assert.Contains(t, yamlString, "remediationAction: enforce")
 	// ArgoCD CR should be orphaned when policy is deleted (cleanup job handles deletion)
 	assert.Contains(t, yamlString, "pruneObjectBehavior: None")
+	// ArgoCD namespace should use a hub template to deploy to local-cluster ns on hub
+	assert.Contains(t, yamlString, `{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}`)
 }
 
 func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
@@ -110,7 +110,9 @@ func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
 	// Policy should include the default AppProject
 	assert.Contains(t, yamlString, "kind: AppProject")
 	assert.Contains(t, yamlString, "name: default")
-	assert.Contains(t, yamlString, "namespace: openshift-gitops")
+
+	// AppProject namespace should also use the hub template (same as ArgoCD CR namespace)
+	assert.Contains(t, yamlString, `{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}`)
 
 	// AppProject should have permissive spec for default project
 	assert.Contains(t, yamlString, "clusterResourceWhitelist:")
@@ -149,8 +151,8 @@ func TestGenerateArgoCDPolicyYaml_ExcludesAppProjectWhenAgentEnabled(t *testing.
 
 	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
 
-	// Policy should NOT include AppProject when argocd-agent is enabled
-	// because the agent propagates AppProject from the hub
+	// AppProject should NOT be included when agent is enabled
+	// (argocd-agent propagates it from the hub)
 	assert.NotContains(t, yamlString, "kind: AppProject")
 
 	// Should still contain the ArgoCD CR
@@ -193,6 +195,7 @@ func TestGenerateArgoCDSpec_BasicConfig(t *testing.T) {
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
+	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
 	enabled := true
 	agentEnabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -231,6 +234,7 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgentDefaultImage(t *testing.T) {
+	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
 	enabled := true
 	agentEnabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -284,11 +288,8 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
 	assert.Contains(t, spec, "mode: \"managed\"")
 }
 
-func TestGenerateArgoCDSpec_WithImageOverrideEnv(t *testing.T) {
-	// Set the environment variable to override the agent image
-	customImage := "custom.registry.io/argocd-agent:test"
-	os.Setenv("ARGOCD_AGENT_IMAGE_OVERRIDE", customImage)
-	defer os.Unsetenv("ARGOCD_AGENT_IMAGE_OVERRIDE")
+func TestGenerateArgoCDSpec_CommunityOperatorSkipsAgentImage(t *testing.T) {
+	t.Setenv("GITOPS_OPERATOR_IMAGE", "quay.io/argoprojlabs/argocd-operator:v0.17.0")
 
 	enabled := true
 	agentEnabled := true
@@ -311,9 +312,40 @@ func TestGenerateArgoCDSpec_WithImageOverrideEnv(t *testing.T) {
 
 	spec := generateArgoCDSpec(gitOpsCluster)
 
-	// Should use the overridden image from environment variable
 	assert.Contains(t, spec, "argoCDAgent:")
-	assert.Contains(t, spec, fmt.Sprintf("image: \"%s\"", customImage))
+	assert.Contains(t, spec, "enabled: true")
+	// Community operator manages its own agent image, so no explicit image override
+	assert.NotContains(t, spec, "image:")
+	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
+}
+
+func TestGenerateArgoCDSpec_RedHatOperatorSetsAgentImage(t *testing.T) {
+	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
+
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "192.168.1.100",
+					ServerPort:    "443",
+				},
+			},
+		},
+	}
+
+	spec := generateArgoCDSpec(gitOpsCluster)
+
+	assert.Contains(t, spec, "argoCDAgent:")
+	assert.Contains(t, spec, "enabled: true")
+	assert.Contains(t, spec, "image: \"registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8")
 }
 
 func TestIndentYaml(t *testing.T) {

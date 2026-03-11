@@ -198,28 +198,6 @@ func TestCreatePolicyTemplate(t *testing.T) {
 			shouldCreate:  false,
 			description:   "When ManagedServiceAccountRef is empty, no policy template should be created",
 		},
-		// Note: Commenting out this test case due to nil pointer in dynamic client
-		// {
-		//	name: "createPolicyTemplate is true with all required fields - should attempt to create policy template",
-		//	gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
-		//		ObjectMeta: metav1.ObjectMeta{
-		//			Name:      "test-gitops",
-		//			Namespace: "test-ns",
-		//			UID:       "test-uid",
-		//		},
-		//		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-		//			CreatePolicyTemplate: &[]bool{true}[0],
-		//			PlacementRef: &v1.ObjectReference{
-		//				Kind: "Placement",
-		//				Name: "test-placement",
-		//			},
-		//			ManagedServiceAccountRef: "test-msa",
-		//		},
-		//	},
-		//	expectedError: true,  // Expect error due to fake client limitations with dynamic resources
-		//	shouldCreate:  false, // Due to error, should not create
-		//	description:   "When all conditions are met, policy template creation should be attempted (will fail with fake client)",
-		// },
 	}
 
 	for _, tt := range tests {
@@ -274,55 +252,18 @@ func TestCreateNamespaceScopedResourceFromYAML(t *testing.T) {
 			expectedError: true,
 			description:   "Invalid YAML should result in an error",
 		},
-		// Note: Commenting out these test cases due to nil pointer in dynamic client
-		// {
-		//	name: "valid ConfigMap YAML - should attempt creation",
-		//	yamlString: `apiVersion: v1
-		//kind: ConfigMap
-		//metadata:
-		//  name: test-configmap
-		//  namespace: test-ns
-		//data:
-		//  key: value`,
-		//	expectedError: true, // Fake client may not handle dynamic resources well
-		//	description:   "Valid ConfigMap YAML should be parsed and creation attempted",
-		// },
-		// {
-		//	name: "valid Namespace YAML - should attempt creation",
-		//	yamlString: `apiVersion: v1
-		//kind: Namespace
-		//metadata:
-		//  name: test-namespace`,
-		//	expectedError: true, // Fake client may not handle dynamic resources well
-		//	description:   "Valid Namespace YAML should be parsed and creation attempted",
-		// },
-		// {
-		//	name: "YAML with complex structure - should attempt creation",
-		//	yamlString: `apiVersion: v1
-		//kind: Secret
-		//metadata:
-		//  name: test-secret
-		//  namespace: test-ns
-		//  labels:
-		//    app: test
-		//type: Opaque
-		//data:
-		//  username: dGVzdA==
-		//  password: cGFzc3dvcmQ=`,
-		//	expectedError: true, // Fake client may not handle dynamic resources well
-		//	description:   "Complex YAML structure should be parsed and creation attempted",
-		// },
-		// {
-		//	name: "YAML without namespace - should attempt creation",
-		//	yamlString: `apiVersion: v1
-		//kind: ConfigMap
-		//metadata:
-		//  name: cluster-wide-config
-		//data:
-		//  global: setting`,
-		//	expectedError: true, // Fake client may not handle dynamic resources well
-		//	description:   "YAML without namespace should be parsed and creation attempted",
-		// },
+		{
+			name: "valid ConfigMap YAML - should create resource",
+			yamlString: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  namespace: default
+data:
+  key: value`,
+			expectedError: false,
+			description:   "Valid ConfigMap YAML should be created successfully",
+		},
 	}
 
 	for _, tt := range tests {
@@ -339,14 +280,6 @@ func TestCreateNamespaceScopedResourceFromYAML(t *testing.T) {
 				assert.Error(t, err, tt.description)
 			} else {
 				assert.NoError(t, err, tt.description)
-
-				// For successful cases, verify the resource exists
-				if !tt.expectedError && tt.yamlString != "" {
-					// Parse the YAML to extract resource details for verification
-					// This is a simplified check - in a real scenario we'd parse the YAML
-					// and then verify the resource exists in the cluster
-					assert.NoError(t, err, "Resource should be created successfully")
-				}
 			}
 		})
 	}

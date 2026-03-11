@@ -33,16 +33,13 @@ import (
 
 // PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters via ManifestWork
 // This function reads the argocd-agent-ca secret from the hub and creates/updates ManifestWorks
-// to deploy this secret to all managed clusters (except local-cluster).
+// to deploy this secret to all managed clusters including local-cluster.
+// For local-cluster, the CA secret is placed in the cluster's own namespace (where the ArgoCD CR lives).
 // The ManifestWorks are never deleted - they persist even if the secret changes or is removed.
 func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
 	// Hub namespace - where we read the CA cert from (use GitOpsCluster's namespace)
 	hubNamespace := gitOpsCluster.Namespace
-
-	// Managed cluster namespace - where the secret will be created on managed clusters
-	// This is always openshift-gitops as the GitOpsNamespace is no longer configurable
-	managedNamespace := utils.GitOpsNamespace
 
 	// Get the CA certificate from the argocd-agent-ca secret on the hub
 	caCert, err := r.getArgoCDAgentCACert(hubNamespace)
@@ -51,10 +48,12 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	}
 
 	for _, managedCluster := range managedClusters {
-		// Skip local-cluster - don't create ManifestWork for local cluster
+		// Determine the target namespace for the CA secret on managed cluster
+		// For local-cluster (hub), the ArgoCD CR is in the cluster's own namespace
+		// For remote clusters, the ArgoCD CR is in openshift-gitops
+		managedNamespace := utils.GitOpsNamespace
 		if IsLocalCluster(managedCluster) {
-			klog.Infof("skipping ManifestWork creation for local-cluster: %s", managedCluster.Name)
-			continue
+			managedNamespace = managedCluster.Name
 		}
 
 		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, managedNamespace, caCert)
@@ -80,11 +79,9 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 				return fmt.Errorf("failed to get ManifestWork %s/%s: %w", manifestWork.Namespace, manifestWork.Name, err)
 			}
 		} else {
-			// ManifestWork exists - check if certificate data has changed
-			certificateChanged := false
+			needsUpdate := false
 
 			if len(existingMW.Spec.Workload.Manifests) > 0 {
-				// Extract the existing certificate data from the ManifestWork
 				existingManifest := existingMW.Spec.Workload.Manifests[0]
 
 				if existingManifest.RawExtension.Raw != nil {
@@ -92,18 +89,21 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 					err := json.Unmarshal(existingManifest.RawExtension.Raw, existingSecret)
 
 					if err == nil {
-						existingCert := string(existingSecret.Data["ca.crt"])
-
-						if existingCert != caCert {
-							certificateChanged = true
+						if string(existingSecret.Data["ca.crt"]) != caCert {
+							needsUpdate = true
 							klog.Infof("Certificate data changed for ManifestWork %s/%s", existingMW.Namespace, existingMW.Name)
+						}
+
+						if existingSecret.Namespace != managedNamespace {
+							needsUpdate = true
+							klog.Infof("Secret namespace changed from %s to %s in ManifestWork %s/%s",
+								existingSecret.Namespace, managedNamespace, existingMW.Namespace, existingMW.Name)
 						}
 					}
 				}
 			}
 
-			// Update ManifestWork if certificate changed
-			if certificateChanged {
+			if needsUpdate {
 				existingMW.Spec = manifestWork.Spec
 
 				err = r.Update(context.TODO(), existingMW)

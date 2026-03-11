@@ -113,7 +113,7 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 		},
 		{
-			name: "skip local-cluster by name",
+			name: "local-cluster by name gets ManifestWork with own namespace as target",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -139,15 +139,15 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 			existingObjects: []client.Object{caSecret},
 			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// local-cluster should not have ManifestWork
+				// local-cluster should have ManifestWork with target namespace = "local-cluster"
 				mw := &workv1.ManifestWork{}
 				err := c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "local-cluster",
 				}, mw)
-				assert.Error(t, err, "ManifestWork should not be created for local-cluster")
+				assert.NoError(t, err, "ManifestWork should be created for local-cluster")
 
-				// remote-cluster should have ManifestWork
+				// remote-cluster should also have ManifestWork
 				err = c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "remote-cluster",
@@ -156,7 +156,7 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 		},
 		{
-			name: "skip cluster with local-cluster label",
+			name: "cluster with local-cluster label gets ManifestWork with own namespace as target",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -185,15 +185,15 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 			existingObjects: []client.Object{caSecret},
 			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// cluster with local-cluster=true label should not have ManifestWork
+				// cluster with local-cluster=true label should have ManifestWork
 				mw := &workv1.ManifestWork{}
 				err := c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "cluster-with-label",
 				}, mw)
-				assert.Error(t, err, "ManifestWork should not be created for cluster with local-cluster=true label")
+				assert.NoError(t, err, "ManifestWork should be created for cluster with local-cluster=true label")
 
-				// normal cluster should have ManifestWork
+				// normal cluster should also have ManifestWork
 				err = c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "normal-cluster",
