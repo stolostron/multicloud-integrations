@@ -950,7 +950,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		for _, managedCluster := range managedClusters {
 			clusterFailed := false
 
-			err = r.CreateAddOnDeploymentConfig(instance, managedCluster.Name)
+			err = r.CreateAddOnDeploymentConfig(instance, managedCluster)
 			if err != nil {
 				klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
 				configFailures = append(configFailures, managedCluster.Name)

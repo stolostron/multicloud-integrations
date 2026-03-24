@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
+	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,15 +47,15 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 	tests := []struct {
 		name               string
 		gitOpsCluster      *gitopsclusterV1beta1.GitOpsCluster
-		namespace          string
+		managedCluster     *spokeclusterv1.ManagedCluster
 		existingObjects    []client.Object
 		expectedError      bool
 		expectedConfigName string
 		validateFunc       func(t *testing.T, c client.Client, namespace string)
 	}{
 		{
-			name:      "empty namespace should return error",
-			namespace: "",
+			name:           "nil managed cluster should return error",
+			managedCluster: nil,
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -64,8 +65,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			name:      "create new AddOnDeploymentConfig successfully",
-			namespace: "test-cluster",
+			name: "create new AddOnDeploymentConfig successfully",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -91,9 +94,6 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				}, config)
 				require.NoError(t, err)
 
-				// Verify expected variables are set
-				// Note: Only GitOpsOperatorImage is configurable via GitOpsCluster spec
-				// Other images are handled by the operator via environment variables
 				expectedVars := map[string]string{
 					"ARGOCD_AGENT_ENABLED":        "false",
 					"GITOPS_OPERATOR_IMAGE":       "test-operator-image:latest",
@@ -114,8 +114,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "local-cluster namespace gets ARGOCD_NAMESPACE set to local-cluster",
-			namespace: "local-cluster",
+			name: "local-cluster by name gets ARGOCD_NAMESPACE set to local-cluster",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "local-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -140,12 +142,49 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					varMap[variable.Name] = variable.Value
 				}
 
-				assert.Equal(t, "local-cluster", varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should be set to local-cluster for local-cluster namespace")
+				assert.Equal(t, "local-cluster", varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should be set to local-cluster")
 			},
 		},
 		{
-			name:      "update existing AddOnDeploymentConfig: managed vars updated, user vars preserved",
-			namespace: "test-cluster",
+			name: "local-cluster by label gets ARGOCD_NAMESPACE set to cluster name",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "hub-alt-ns",
+					Labels: map[string]string{"local-cluster": "true"},
+				},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "test-operator-image:latest",
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				assert.Equal(t, "hub-alt-ns", varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should be the cluster name for label-identified hub")
+			},
+		},
+		{
+			name: "update existing AddOnDeploymentConfig: managed vars updated, user vars preserved",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -198,8 +237,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "override existing configs when overrideExistingConfigs is true",
-			namespace: "test-cluster",
+			name: "override existing configs when overrideExistingConfigs is true",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -252,8 +293,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "preserve mode (overrideExistingConfigs=false): managed vars updated, user vars preserved",
-			namespace: "test-cluster",
+			name: "preserve mode (overrideExistingConfigs=false): managed vars updated, user vars preserved",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -308,8 +351,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "OLM subscription env vars passed when olmSubscription.enabled=true",
-			namespace: "test-cluster-olm",
+			name: "OLM subscription env vars passed when olmSubscription.enabled=true",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-olm"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops-olm",
@@ -351,8 +396,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "OLM vars present with defaults when olmSubscription.enabled=false",
-			namespace: "test-cluster-no-olm",
+			name: "OLM vars present with defaults when olmSubscription.enabled=false",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-no-olm"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops-no-olm",
@@ -387,8 +434,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "OLM vars present with defaults when olmSubscription is absent",
-			namespace: "test-cluster-no-olm-spec",
+			name: "OLM vars present with defaults when olmSubscription is absent",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-no-olm-spec"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops-no-olm-spec",
@@ -419,8 +468,10 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name:      "all managed vars update in preserve mode, user vars preserved",
-			namespace: "test-cluster",
+			name: "all managed vars update in preserve mode, user vars preserved",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -482,14 +533,18 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				Client: fakeClient,
 			}
 
-			err := reconciler.CreateAddOnDeploymentConfig(tt.gitOpsCluster, tt.namespace)
+			err := reconciler.CreateAddOnDeploymentConfig(tt.gitOpsCluster, tt.managedCluster)
 
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				if tt.validateFunc != nil {
-					tt.validateFunc(t, fakeClient, tt.namespace)
+					namespace := ""
+					if tt.managedCluster != nil {
+						namespace = tt.managedCluster.Name
+					}
+					tt.validateFunc(t, fakeClient, namespace)
 				}
 			}
 		})

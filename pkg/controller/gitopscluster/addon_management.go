@@ -24,18 +24,21 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
+	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
-// CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace
+// CreateAddOnDeploymentConfig creates or updates an AddOnDeploymentConfig for the managed cluster namespace.
 // Behavior depends on the overrideExistingConfigs flag:
 // - When false (default): preserves all existing variables and only adds new ones from GitOpsCluster spec
 // - When true: preserves user variables but overrides managed variables with values from GitOpsCluster spec
-func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, namespace string) error {
-	if namespace == "" {
-		return errors.New("no namespace provided")
+func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedCluster *spokeclusterv1.ManagedCluster) error {
+	if managedCluster == nil {
+		return errors.New("no managed cluster provided")
 	}
+
+	namespace := managedCluster.Name
 
 	// Define variables managed by GitOpsCluster controller
 	// Start with ARGOCD_AGENT_ENABLED default, then ExtractVariablesFromGitOpsCluster
@@ -44,9 +47,9 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		utils.EnvArgoCDAgentEnabled: "false", // Default value
 	}
 
-	// Set ARGOCD_NAMESPACE per-cluster: for local-cluster the ArgoCD CR lives in the
-	// cluster's own namespace; for remote clusters it lives in openshift-gitops
-	if namespace == "local-cluster" {
+	// For local-cluster (by name or label), ArgoCD lives in the cluster's own
+	// namespace; for remote clusters it lives in openshift-gitops.
+	if IsLocalCluster(managedCluster) {
 		managedVariables["ARGOCD_NAMESPACE"] = namespace
 	} else {
 		managedVariables["ARGOCD_NAMESPACE"] = utils.GitOpsNamespace
