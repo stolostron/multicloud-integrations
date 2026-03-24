@@ -171,7 +171,12 @@ func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) 
 		argoCDAgentEnabled = *gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
-	// Base policy with ArgoCD CR
+	// Use a ConfigurationPolicy template to deploy the ArgoCD CR to the correct namespace:
+	// - local-cluster (hub): deploy to "local-cluster" namespace to avoid conflict with
+	//   the existing "openshift-gitops" ArgoCD CR managed by the hub's GitOps operator
+	// - all other clusters: deploy to "openshift-gitops" namespace (standard location)
+	namespaceTemplate := `'{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}'`
+
 	yamlString := fmt.Sprintf(`
 apiVersion: policy.open-cluster-management.io/v1
 kind: Policy
@@ -202,26 +207,27 @@ spec:
                 kind: ArgoCD
                 metadata:
                   name: acm-openshift-gitops
-                  namespace: openshift-gitops
+                  namespace: %s
                   labels:
                     apps.open-cluster-management.io/gitopsaddon: "true"
                 spec:
 %s`,
 		gitOpsCluster.Name+"-argocd-policy", gitOpsCluster.Namespace,
 		gitOpsCluster.Name+"-argocd-config-policy",
+		namespaceTemplate,
 		indentYaml(argoCDSpec, 18))
 
-	// Only include AppProject when ArgoCD agent is NOT enabled
-	// When argocd-agent is enabled, AppProject is propagated from the hub by the agent
+	// Only include AppProject when ArgoCD agent is NOT enabled.
+	// When argocd-agent is enabled, AppProject is propagated from the hub by the agent.
 	if !argoCDAgentEnabled {
-		yamlString += `
+		yamlString += fmt.Sprintf(`
             - complianceType: musthave
               objectDefinition:
                 apiVersion: argoproj.io/v1alpha1
                 kind: AppProject
                 metadata:
                   name: default
-                  namespace: openshift-gitops
+                  namespace: %s
                 spec:
                   clusterResourceWhitelist:
                     - group: '*'
@@ -231,7 +237,7 @@ spec:
                       server: '*'
                   sourceRepos:
                     - '*'
-`
+`, namespaceTemplate)
 	} else {
 		klog.Infof("ArgoCD agent is enabled, excluding AppProject from policy (will be propagated by agent)")
 		yamlString += "\n"
@@ -274,18 +280,32 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 			mode = "managed"
 		}
 
-		// Use the default Red Hat agent image from utils, or allow override via environment variable
-		// for e2e testing (registry.redhat.io requires authentication which may not be available in test environments)
-		agentImage := os.Getenv("ARGOCD_AGENT_IMAGE_OVERRIDE")
-		if agentImage == "" {
-			agentImage = utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage]
+		// Determine operator image: per-cluster spec takes precedence, then env var, then default.
+		// Community argocd-operator manages its own agent image, so only override for Red Hat operator builds.
+		operatorImage := ""
+		if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage != "" {
+			operatorImage = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage
+		}
+		if operatorImage == "" {
+			operatorImage = os.Getenv(utils.EnvGitOpsOperatorImage)
+		}
+		if operatorImage == "" {
+			operatorImage = utils.DefaultOperatorImages[utils.EnvGitOpsOperatorImage]
+		}
+
+		agentImageLine := ""
+		if !strings.Contains(operatorImage, "argoprojlabs") {
+			agentImage := os.Getenv(utils.EnvArgoCDPrincipalImage)
+			if agentImage == "" {
+				agentImage = utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage]
+			}
+			agentImageLine = fmt.Sprintf("\n    image: \"%s\"", agentImage)
 		}
 
 		spec += fmt.Sprintf(`
 argoCDAgent:
   agent:
-    enabled: true
-    image: "%s"
+    enabled: true%s
     client:
       principalServerAddress: "%s"
       principalServerPort: "%s"
@@ -293,7 +313,7 @@ argoCDAgent:
     tls:
       secretName: argocd-agent-client-tls
       rootCASecretName: argocd-agent-ca`,
-			agentImage, serverAddress, serverPort, mode)
+			agentImageLine, serverAddress, serverPort, mode)
 	}
 
 	return spec

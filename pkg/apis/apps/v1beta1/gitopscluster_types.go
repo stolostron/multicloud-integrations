@@ -178,21 +178,25 @@ type GitOpsAddonSpec struct {
 	// +kubebuilder:default=false
 	OverrideExistingConfigs *bool `json:"overrideExistingConfigs,omitempty"`
 
-	// OLMSubscription defines the configuration for deploying the full OLM-managed
-	// OpenShift GitOps operator instead of the lightweight helm-based deployment.
-	// This is only supported on OpenShift ManagedClusters with OLM installed.
-	// When enabled, this takes precedence over the helm-based deployment.
+	// OLMSubscription defines optional custom OLM Subscription configuration for OCP managed clusters.
+	// The addon agent auto-detects OCP clusters and always uses OLM for operator installation.
+	// When olmSubscription.enabled is true, the specified fields (channel, source, etc.) are passed
+	// to the addon agent to override the default subscription values. Non-OCP clusters ignore this.
+	// Note: the local-cluster (hub) path skips operator installation and therefore ignores olmSubscription.
 	// Requires gitopsAddon.enabled to be true.
 	// +optional
 	OLMSubscription *OLMSubscriptionSpec `json:"olmSubscription,omitempty"`
 }
 
-// OLMSubscriptionSpec defines the OLM Subscription configuration for deploying
-// the OpenShift GitOps operator via Operator Lifecycle Manager.
+// OLMSubscriptionSpec defines optional custom OLM Subscription configuration.
+// The addon agent auto-detects OCP clusters and always uses OLM; this spec only
+// controls which subscription parameters are used (channel, source, etc.).
+// Non-OCP clusters always use embedded manifests regardless of this setting.
 type OLMSubscriptionSpec struct {
-	// Enabled indicates whether to deploy via OLM Subscription. Default is false.
-	// When enabled, the full OLM-managed OpenShift GitOps operator is deployed
-	// instead of the lightweight helm-based operator.
+	// Enabled indicates whether custom OLM subscription configuration should be passed
+	// to OCP managed clusters. When true, the specified fields override the default
+	// subscription values. When false, nil, or absent, auto-detect uses hardcoded defaults.
+	// Non-OCP clusters are unaffected regardless of this setting.
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
 
@@ -204,7 +208,7 @@ type OLMSubscriptionSpec struct {
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
-	// Channel is the OLM channel. Default is "stable".
+	// Channel is the OLM channel. Default is "latest".
 	// +optional
 	Channel string `json:"channel,omitempty"`
 

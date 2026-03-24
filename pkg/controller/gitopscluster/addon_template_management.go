@@ -27,7 +27,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
@@ -89,11 +88,6 @@ func (r *ReconcileGitOpsCluster) getControllerImage() (string, error) {
 func getAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
 	// Use namespace-name format for uniqueness
 	return fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
-}
-
-// getAddOnTemplateOLMName generates a unique AddOnTemplate name for argocd-agent + OLM mode
-func getAddOnTemplateOLMName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
-	return fmt.Sprintf("gitops-addon-olm-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 }
 
 // EnsureAddOnTemplate creates or updates the AddOnTemplate for a GitOpsCluster with ArgoCD agent enabled
@@ -165,76 +159,6 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 	return r.Create(context.Background(), addonTemplate)
 }
 
-// EnsureAddOnTemplateOLM creates or updates the AddOnTemplate for argocd-agent + OLM subscription mode
-func (r *ReconcileGitOpsCluster) EnsureAddOnTemplateOLM(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
-	templateName := getAddOnTemplateOLMName(gitOpsCluster)
-
-	// Get the controller image - error out if not available
-	addonImage, err := r.getControllerImage()
-	if err != nil {
-		klog.Errorf("Failed to get controller image: %v", err)
-		return fmt.Errorf("cannot create addon template: %w", err)
-	}
-
-	// Get OLM subscription values with defaults
-	subName, subNamespace, channel, source, sourceNamespace, installPlanApproval := GetOLMSubscriptionValues(gitOpsCluster.Spec.GitOpsAddon.OLMSubscription)
-
-	// Build the AddOnTemplate for argocd-agent + OLM mode
-	addonTemplate := &addonv1alpha1.AddOnTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: templateName,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by":                            "multicloud-integrations",
-				"app.kubernetes.io/component":                             "addon-template-olm-agent",
-				"gitopscluster.apps.open-cluster-management.io/name":      gitOpsCluster.Name,
-				"gitopscluster.apps.open-cluster-management.io/namespace": gitOpsCluster.Namespace,
-			},
-		},
-		Spec: addonv1alpha1.AddOnTemplateSpec{
-			AddonName: "gitops-addon",
-			AgentSpec: workv1.ManifestWorkSpec{
-				Workload: workv1.ManifestsTemplate{
-					Manifests: buildOLMAgentManifests(gitOpsCluster.Namespace, addonImage, subName, subNamespace, channel, source, sourceNamespace, installPlanApproval),
-				},
-			},
-			Registration: []addonv1alpha1.RegistrationSpec{
-				{
-					Type: addonv1alpha1.RegistrationTypeCustomSigner,
-					CustomSigner: &addonv1alpha1.CustomSignerRegistrationConfig{
-						SignerName: "open-cluster-management.io/argocd-agent-addon",
-						// Note: The certificate CN will be the full OCM path like:
-						// system:open-cluster-management:cluster:<cluster-name>:addon:gitops-addon:agent:gitops-addon-agent
-						// The ArgoCD principal is configured with a custom auth regex to extract
-						// just the cluster name from this full path.
-						SigningCA: addonv1alpha1.SigningCARef{
-							Name:      "argocd-agent-ca",
-							Namespace: gitOpsCluster.Namespace,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Check if AddOnTemplate already exists
-	existing := &addonv1alpha1.AddOnTemplate{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: templateName}, existing)
-	if err == nil {
-		// AddOnTemplate exists, update it
-		klog.V(2).Infof("Updating OLM Agent AddOnTemplate %s", templateName)
-		existing.Spec = addonTemplate.Spec
-		existing.Labels = addonTemplate.Labels
-		return r.Update(context.Background(), existing)
-	}
-
-	if !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("failed to get OLM Agent AddOnTemplate: %w", err)
-	}
-
-	// Create new AddOnTemplate
-	klog.Infof("Creating OLM Agent AddOnTemplate %s", templateName)
-	return r.Create(context.Background(), addonTemplate)
-}
 
 // buildAddonManifests builds the manifest list for the AddOnTemplate (argocd-agent without OLM)
 func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
@@ -256,28 +180,6 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	return manifests
 }
 
-// buildOLMAgentManifests builds the manifest list for argocd-agent + OLM AddOnTemplate
-func buildOLMAgentManifests(gitOpsNamespace, addonImage, subName, subNamespace, channel, source, sourceNamespace, installPlanApproval string) []workv1.Manifest {
-	if gitOpsNamespace == "" {
-		gitOpsNamespace = utils.GitOpsNamespace
-	}
-
-	manifests := []workv1.Manifest{
-		// Pre-delete cleanup job - consistent across all templates, no env vars needed
-		buildCleanupJobManifest(addonImage, subNamespace),
-		// OLM Subscription
-		buildOLMSubscriptionManifest(subName, subNamespace, channel, source, sourceNamespace, installPlanApproval),
-		// ServiceAccount for cleanup job and gitops-addon deployment
-		buildServiceAccountManifest(subNamespace),
-		// ClusterRoleBinding
-		buildClusterRoleBindingManifest(subNamespace),
-		// Deployment - needed to run the secret controller that copies argocd-agent-client-tls cert
-		// from open-cluster-management-agent-addon namespace to openshift-gitops namespace
-		buildDeploymentManifest(addonImage, subNamespace),
-	}
-
-	return manifests
-}
 
 // buildCleanupJobManifest creates the cleanup job manifest - consistent across all templates
 func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
@@ -310,13 +212,37 @@ func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"/usr/local/bin/gitopsaddon"},
 							Args:            []string{"-cleanup"},
-							// No env vars needed - cleanup uses label-based lookup
+							Env:             buildCleanupEnvVars(),
 						},
 					},
 				},
 			},
 		},
 	})
+}
+
+// buildCleanupEnvVars creates the environment variables for the cleanup Job container.
+// The cleanup code reads OLM_SUBSCRIPTION_NAMESPACE (and other OLM vars) to locate
+// subscriptions in custom namespaces. Without these, cleanup only checks the defaults.
+func buildCleanupEnvVars() []corev1.EnvVar {
+	vars := []string{
+		"ARGOCD_NAMESPACE",
+		"OLM_SUBSCRIPTION_ENABLED",
+		"OLM_SUBSCRIPTION_NAME",
+		"OLM_SUBSCRIPTION_NAMESPACE",
+		"OLM_SUBSCRIPTION_CHANNEL",
+		"OLM_SUBSCRIPTION_SOURCE",
+		"OLM_SUBSCRIPTION_SOURCE_NAMESPACE",
+		"OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL",
+	}
+	var envVars []corev1.EnvVar
+	for _, v := range vars {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  v,
+			Value: fmt.Sprintf("{{%s}}", v),
+		})
+	}
+	return envVars
 }
 
 // buildServiceAccountManifest creates the service account manifest
@@ -434,54 +360,6 @@ func buildDeploymentManifest(addonImage, namespace string) workv1.Manifest {
 	})
 }
 
-// buildOLMSubscriptionManifest creates the OLM Subscription manifest
-func buildOLMSubscriptionManifest(name, namespace, channel, source, sourceNamespace, installPlanApproval string) workv1.Manifest {
-	subscription := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "operators.coreos.com/v1alpha1",
-			"kind":       "Subscription",
-			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": namespace,
-				"labels": map[string]interface{}{
-					"app.kubernetes.io/managed-by": "multicloud-integrations",
-					GitOpsAddonLabel:               "true",
-				},
-			},
-			"spec": map[string]interface{}{
-				"channel":             channel,
-				"name":                name,
-				"source":              source,
-				"sourceNamespace":     sourceNamespace,
-				"installPlanApproval": installPlanApproval,
-				"config": map[string]interface{}{
-					"env": []map[string]interface{}{
-						{
-							"name":  "DISABLE_DEFAULT_ARGOCD_INSTANCE",
-							"value": "true",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	jsonBytes, err := json.Marshal(subscription.Object)
-	if err != nil {
-		klog.Errorf("Failed to marshal subscription: %v", err)
-		return workv1.Manifest{
-			RawExtension: runtime.RawExtension{
-				Object: subscription,
-			},
-		}
-	}
-
-	return workv1.Manifest{
-		RawExtension: runtime.RawExtension{
-			Raw: jsonBytes,
-		},
-	}
-}
 
 // buildAddonEnvVars creates the environment variables for the gitops-addon container.
 // Each variable uses a template placeholder (e.g., {{GITOPS_OPERATOR_IMAGE}}) that gets
@@ -525,6 +403,30 @@ func buildAddonEnvVars() []corev1.EnvVar {
 		corev1.EnvVar{Name: utils.EnvArgoCDAgentMode, Value: fmt.Sprintf("{{%s}}", utils.EnvArgoCDAgentMode)},
 	)
 
+	// Add ARGOCD_NAMESPACE - tells the addon agent which namespace the ArgoCD CR lives in
+	envVars = append(envVars, corev1.EnvVar{
+		Name:  "ARGOCD_NAMESPACE",
+		Value: "{{ARGOCD_NAMESPACE}}",
+	})
+
+	// Add OLM subscription environment variables — these pass custom subscription
+	// configuration from the hub to the addon agent for OCP clusters.
+	olmVars := []string{
+		"OLM_SUBSCRIPTION_ENABLED",
+		"OLM_SUBSCRIPTION_NAME",
+		"OLM_SUBSCRIPTION_NAMESPACE",
+		"OLM_SUBSCRIPTION_CHANNEL",
+		"OLM_SUBSCRIPTION_SOURCE",
+		"OLM_SUBSCRIPTION_SOURCE_NAMESPACE",
+		"OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL",
+	}
+	for _, v := range olmVars {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  v,
+			Value: fmt.Sprintf("{{%s}}", v),
+		})
+	}
+
 	return envVars
 }
 
@@ -535,18 +437,6 @@ func (r *ReconcileGitOpsCluster) CleanupDynamicAddOnTemplates(gitOpsCluster *git
 	templateName := getAddOnTemplateName(gitOpsCluster)
 	if err := r.deleteAddOnTemplateByName(templateName); err != nil {
 		klog.Warningf("Failed to delete AddOnTemplate %s: %v", templateName, err)
-	}
-
-	// Try to delete the argocd-agent + OLM template
-	olmTemplateName := getAddOnTemplateOLMName(gitOpsCluster)
-	if err := r.deleteAddOnTemplateByName(olmTemplateName); err != nil {
-		klog.Warningf("Failed to delete OLM AddOnTemplate %s: %v", olmTemplateName, err)
-	}
-
-	// Also try to delete any OLM-only templates (non-agent)
-	olmOnlyTemplateName := getOLMAddOnTemplateName(gitOpsCluster)
-	if err := r.deleteAddOnTemplateByName(olmOnlyTemplateName); err != nil {
-		klog.Warningf("Failed to delete OLM-only AddOnTemplate %s: %v", olmOnlyTemplateName, err)
 	}
 }
 

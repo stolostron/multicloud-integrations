@@ -5,28 +5,60 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 ## Key Concepts
 
 - **GitOpsCluster CR**: Defines which managed clusters should have ArgoCD deployed via the GitOps addon
-- **Placement**: Selects which managed clusters are targeted
-- **Policy**: The GitOpsCluster controller creates a Policy that deploys the ArgoCD CR to managed clusters. **This Policy is created once and is user-owned** - users can modify it to add RBAC, Applications, or customize ArgoCD settings.
-- **ManagedClusterAddOn**: Created automatically when GitOps addon is enabled - manages addon lifecycle on managed clusters
+- **Placement**: Selects which managed clusters are targeted (including `local-cluster` / hub)
+- **Policy**: The GitOpsCluster controller creates a Policy that deploys the ArgoCD CR to managed clusters. **This Policy is created once and is user-owned** - users can modify it to add RBAC, Applications, or customize ArgoCD settings. For `local-cluster`, the ArgoCD CR is deployed to the `local-cluster` namespace (not `openshift-gitops`) using a hub template.
+- **ManagedClusterAddOn**: Created automatically for ALL managed clusters including `local-cluster`. Manages addon lifecycle.
 - **Cluster Secrets**: For agent mode, the controller creates ArgoCD cluster secrets with proper server URLs including `agentName` query parameter
-- **DISABLE_DEFAULT_ARGOCD_INSTANCE**: The addon's Helm chart deploys the GitOps operator with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true` in `openshift-gitops-operator` namespace. For OLM scenarios, the Subscription includes this env var. This prevents the operator from creating a default `openshift-gitops` ArgoCD CR that would conflict with the addon's `acm-openshift-gitops` instance. Proper cleanup between scenarios is essential to avoid stale OLM operators from previous runs.
-- **AppProject Propagation (Agent Mode)**: In agent mode, the ArgoCD principal automatically propagates AppProjects from the hub to managed clusters. The `default` AppProject is created on the hub in the managed cluster's namespace alongside the Application - no Policy-based propagation is needed.
+- **DISABLE_DEFAULT_ARGOCD_INSTANCE**: On OCP managed clusters, the addon creates an OLM Subscription with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`. On non-OCP clusters, the embedded operator chart is deployed. On the hub (`local-cluster`), the operator is already present so no installation occurs.
+- **OLM Subscription Customization**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. The addon agent reads these and uses them when creating the OLM subscription on OCP clusters. Non-OCP clusters ignore these values. When absent or disabled, hardcoded defaults are used (`channel: latest`, `source: redhat-operators`, etc.).
+- **AppProject Propagation (Agent Mode)**: In agent mode, the ArgoCD principal automatically propagates AppProjects from the hub to managed clusters. The `default` AppProject is created on the hub in the managed cluster's namespace alongside the Application.
+- **Smart Cluster Detection**: The addon agent detects the cluster type at runtime:
+  - **OCP detection**: Checks for `clusterversions.config.openshift.io` CRD, `infrastructures.config.openshift.io` CRD, `version.openshift.io` ClusterClaim, or `product.open-cluster-management.io` ClusterClaim with value "OpenShift"
+  - **Hub detection**: Checks for `ClusterManager` resources or a `ManagedCluster` with name `local-cluster` or label `local-cluster=true`
+- **ARGOCD_NAMESPACE**: Environment variable passed to the addon agent via `AddOnDeploymentConfig`. Set to `local-cluster` for the hub and `openshift-gitops` for remote clusters. Controls where ArgoCD CR lives and where client certs are copied.
+
+## Architecture
+
+### Template Modes
+
+The system uses 2 addon template modes:
+
+| Mode | Template Name | When Used |
+|------|---------------|-----------|
+| **Static** | `gitops-addon` | `gitopsAddon.enabled=true`, `argoCDAgent.enabled=false` |
+| **Dynamic** | `gitops-addon-{ns}-{name}` | `gitopsAddon.enabled=true`, `argoCDAgent.enabled=true` (includes `RegistrationSpec` for client cert provisioning) |
+
+OLM vs. embedded operator installation is determined at runtime by the addon agent based on cluster detection, not by template selection.
+
+### Local-Cluster (Hub) Support
+
+When `local-cluster` is included in the Placement:
+1. The hub controller creates a `ManagedClusterAddOn` for `local-cluster` (no longer skipped)
+2. The `AddOnDeploymentConfig` sets `ARGOCD_NAMESPACE=local-cluster`
+3. The Policy deploys the ArgoCD CR to the `local-cluster` namespace (via hub template)
+4. The addon agent on the hub detects it is a hub cluster and skips operator installation
+5. The secret controller copies client certs to the `local-cluster` namespace (not `openshift-gitops`)
+6. The hub CA is propagated to `local-cluster` via ManifestWork targeting the `local-cluster` namespace
+7. Cleanup on hub only deletes addon-created ArgoCD CRs — operator and OLM resources are preserved
 
 ## Supported Scenarios
 
+All scenarios also deploy to `local-cluster` (hub) alongside the target managed cluster. The hub ArgoCD CR runs in the `local-cluster` namespace.
+
 | # | Scenario | Managed Cluster Type | Application Creation | Success Criteria |
 |---|----------|---------------------|---------------------|------------------|
-| **1** | gitops-addon | OCP | Via Policy on managed cluster | ArgoCD CR running, Policy compliant, guestbook deployment resource exists* |
-| **2** | gitops-addon | Non-OCP (Kind) | Via Policy on managed cluster | ArgoCD CR running, Policy compliant, guestbook deployed and pods running |
-| **3** | gitops-addon + OLM | OCP only | Via Policy on managed cluster | OLM Subscription created, ArgoCD CR running, Policy compliant, guestbook deployment resource exists* |
-| **4** | gitops-addon + Agent | OCP | On hub in managed cluster namespace | Agent connected, cluster secret created, guestbook deployment resource exists*, app status synced to hub |
-| **5** | gitops-addon + Agent | Non-OCP (Kind) | On hub in managed cluster namespace | Agent connected, cluster secret created, guestbook deployed and pods running via agent, app status synced to hub |
-| **6** | gitops-addon + Agent + OLM | OCP only | On hub in managed cluster namespace | OLM Subscription created, agent connected, guestbook deployment resource exists*, app status synced to hub |
+| **1** | gitops-addon (auto-detect) | OCP | Via Policy on managed cluster | OCP auto-detected, OLM subscription with defaults, ArgoCD running, guestbook deployed |
+| **2** | gitops-addon (auto-detect) | Non-OCP (Kind) | Via Policy on managed cluster | Non-OCP auto-detected, embedded operator, ArgoCD running, guestbook deployed and pods running |
+| **3** | gitops-addon + custom OLM | OCP only | Via Policy on managed cluster | Custom OLM values delivered via env vars, subscription uses custom source, guestbook deployed |
+| **4** | gitops-addon + Agent (auto-detect) | OCP | On hub in managed cluster namespace | OCP auto-detected, agent connected, certs provisioned, guestbook deployed via agent |
+| **5** | gitops-addon + Agent (auto-detect) | Non-OCP (Kind) | On hub in managed cluster namespace | Non-OCP auto-detected, agent connected, certs provisioned, guestbook deployed via agent |
 
 **Notes:**
-- `*` On OCP, the guestbook-ui pods will **crash** due to OCP's `restricted-v2` SCC (Apache tries to bind to privileged port 80). The success criteria checks that the Deployment resource exists (meaning ArgoCD successfully synced it), not that pods are healthy. On Kind (no SCC restrictions), pods run normally.
+- On OCP, guestbook-ui pods **crash** due to OCP's `restricted-v2` SCC (port 80 binding). Success criteria checks that the Deployment resource exists (ArgoCD synced it), not pod health. On Kind, pods run normally.
 - Agent mode on non-OCP clusters requires access to Red Hat registry for agent images.
-- OLM scenarios are OCP-only because they use the Red Hat operator catalog.
+- OLM scenarios are OCP-only (Red Hat operator catalog). Non-OCP clusters always use embedded operator regardless of `olmSubscription.enabled`.
+- `local-cluster` behaves as a fully managed cluster: gets its own ManagedClusterAddOn, client certs (agent mode), and ArgoCD instance.
+- Custom OLM scenario (3) sets `olmSubscription.enabled: true` with custom values to verify config passthrough from hub to managed cluster. The addon agent reads these values from env vars when creating the OLM subscription.
 
 ## Prerequisites
 
@@ -36,7 +68,7 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 
 ---
 
-## Scenario 1 & 2: Non-Agent Mode
+## Scenario 1, 2 & 3: Non-Agent Mode
 
 In non-agent mode, ArgoCD runs independently on each managed cluster. Applications can be:
 1. **Added to the Policy** (recommended) - The controller's Policy can be modified to include Applications
@@ -53,7 +85,8 @@ kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml
 ### Step 2: Create Placement and GitOpsCluster
 
 ```bash
-# Create a Placement to select managed clusters
+# Create a Placement to select managed clusters AND local-cluster (hub)
+# Including local-cluster exercises the hub deployment path (ArgoCD CR in local-cluster namespace)
 cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -66,10 +99,14 @@ spec:
         labelSelector:
           matchLabels:
             name: my-managed-cluster
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            local-cluster: "true"
 EOF
 
 # Create GitOpsCluster with gitopsAddon enabled
-# For OLM mode (OCP only), add olmSubscription.enabled: true
+# OLM vs. embedded operator is auto-detected by the addon agent (no config needed)
 cat <<EOF | kubectl apply -f -
 apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
@@ -86,8 +123,6 @@ spec:
     name: my-placement
   gitopsAddon:
     enabled: true
-    # olmSubscription:
-    #   enabled: true  # Uncomment for OCP clusters with OLM
 EOF
 ```
 
@@ -102,6 +137,9 @@ The GitOpsCluster controller creates a Policy but does NOT include RBAC or Appli
 kubectl get policy my-gitops-argocd-policy -n openshift-gitops
 
 # Add RBAC and Application to the Policy
+# NOTE: The ServiceAccount namespace below must match the ArgoCD namespace on each
+# target cluster. Use "openshift-gitops" for remote/spoke clusters, or "local-cluster"
+# for hub-local deployments where ArgoCD is in the local-cluster namespace.
 kubectl patch policy my-gitops-argocd-policy -n openshift-gitops --type=json -p='[
   {
     "op": "add",
@@ -199,7 +237,7 @@ KUBECONFIG=/path/to/managed kubectl get pods -n guestbook
 
 ---
 
-## Scenario 3 & 4: Agent Mode
+## Scenario 4 & 5: Agent Mode
 
 In agent mode, ArgoCD agents run on managed clusters and connect to a principal on the hub. Applications are:
 - **Created on the hub** in the **managed cluster's namespace**
@@ -238,7 +276,7 @@ kubectl patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{
 ### Step 1: Create GitOpsCluster with Agent Mode
 
 ```bash
-# Create Placement
+# Create Placement (includes local-cluster for hub deployment)
 cat <<EOF | kubectl apply -f -
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
@@ -251,6 +289,10 @@ spec:
         labelSelector:
           matchLabels:
             name: my-managed-cluster
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            local-cluster: "true"
 EOF
 
 # Create GitOpsCluster with Agent enabled
@@ -274,7 +316,9 @@ spec:
       enabled: true
       mode: managed
     # olmSubscription:
-    #   enabled: true  # For OCP clusters
+    #   enabled: true      # Pass custom OLM values to OCP clusters
+    #   channel: "stable"  # Override default OLM channel (default: latest)
+    #   source: "redhat-operators"  # Override CatalogSource (default: redhat-operators)
 EOF
 ```
 
@@ -476,12 +520,11 @@ export OCP_CLUSTER_NAME=ocp-cluster5
 ./gitopsaddon/test-scenarios.sh all
 
 # Run individual scenarios
-./gitopsaddon/test-scenarios.sh 1  # gitops-addon on OCP
-./gitopsaddon/test-scenarios.sh 2  # gitops-addon on Kind
-./gitopsaddon/test-scenarios.sh 3  # gitops-addon + OLM on OCP
-./gitopsaddon/test-scenarios.sh 4  # gitops-addon + Agent on OCP
-./gitopsaddon/test-scenarios.sh 5  # gitops-addon + Agent on Kind
-./gitopsaddon/test-scenarios.sh 6  # gitops-addon + Agent + OLM on OCP
+./gitopsaddon/test-scenarios.sh 1  # gitops-addon on OCP (OLM auto-detected)
+./gitopsaddon/test-scenarios.sh 2  # gitops-addon on Kind (embedded manifests)
+./gitopsaddon/test-scenarios.sh 3  # gitops-addon + custom OLM on OCP (Manual approval)
+./gitopsaddon/test-scenarios.sh 4  # gitops-addon + Agent on OCP (OLM auto-detected)
+./gitopsaddon/test-scenarios.sh 5  # gitops-addon + Agent on Kind (embedded manifests)
 
 # Cleanup only
 ./gitopsaddon/test-scenarios.sh cleanup
@@ -497,7 +540,7 @@ export OCP_CLUSTER_NAME=ocp-cluster5
   - **Kind**: guestbook-ui pods should be running (healthy)
   - **OCP**: guestbook-ui pods will crash due to `restricted-v2` SCC (port 80 binding) - this is expected
 
-**Agent Scenarios (4, 5, 6):**
+**Agent Scenarios (4, 5):**
 - ManagedClusterAddOn `gitops-addon` created in managed cluster namespace
 - Policy created and becomes Compliant
 - Principal server address auto-discovered and stored in GitOpsCluster
@@ -510,11 +553,17 @@ export OCP_CLUSTER_NAME=ocp-cluster5
 
 ### Cleanup Behavior
 
-All cleanup operations are performed **from the hub only**. The test script never directly connects to managed clusters for write operations (only read-only verification). The addon's pre-delete cleanup Job handles all managed-cluster-side cleanup:
-- Pauses the addon controller (via pause marker ConfigMap)
-- Deletes ArgoCD CRs, subscriptions, operator groups
-- Cleans up RBAC resources
-- Deletes the cleanup Job's own ClusterRoleBinding as the final step
+There are **two layers of cleanup** in the test script:
+
+1. **Initial cleanup (`cleanup_all`)**: Runs before the first scenario. Directly connects to all managed clusters and forcibly removes any residual resources (ArgoCD CRs, OLM subscriptions, CSVs, operator deployments, stale pause markers). Verifies every cluster is truly clean before proceeding. **Fails loudly** if resources are left behind.
+
+2. **Per-scenario cleanup (`cleanup_scenario`)**: Runs after each scenario. Operates **from the hub only** — deletes Placement, Policy, ManagedClusterAddOn, and GitOpsCluster in the correct order. The addon's pre-delete cleanup Job handles managed-cluster-side cleanup:
+   - Pauses the addon controller (via pause marker ConfigMap)
+   - **On remote managed clusters**: Deletes ArgoCD CRs, OLM subscriptions, operator resources, RBAC
+   - **On hub (local-cluster)**: Conservative cleanup — only deletes ArgoCD CRs labeled `apps.open-cluster-management.io/gitopsaddon=true` and ClusterRoleBinding
+   - Deletes the cleanup Job's own ClusterRoleBinding as the final step
+
+   After the addon cleanup completes, the script **verifies** the managed cluster is clean (ArgoCD CR removed, OLM subscription removed, operator deployment removed, guestbook namespace removed). If the addon cleanup fails to remove resources, the script reports errors — this indicates a code bug in the addon cleanup logic.
 
 The addon controller **automatically clears stale pause markers** on startup, so interrupted cleanups don't block future deployments.
 

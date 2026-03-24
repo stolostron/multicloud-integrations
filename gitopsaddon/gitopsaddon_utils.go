@@ -262,11 +262,17 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 		return err
 	}
 
-	// Check if existing resource has skip annotation
 	if err == nil {
+		// Resource exists — check if it's ours or pre-existing
 		annotations := existing.GetAnnotations()
 		if annotations != nil && annotations["gitops-addon.open-cluster-management.io/skip"] == "true" {
 			klog.Infof("Skipping %s/%s %s due to skip annotation", obj.GetKind(), obj.GetName(), obj.GetNamespace())
+			return nil
+		}
+
+		existingLabels := existing.GetLabels()
+		if existingLabels == nil || existingLabels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+			klog.Infof("Skipping %s/%s %s: pre-existing resource without gitopsaddon label", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 			return nil
 		}
 	}
@@ -285,7 +291,7 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 		return r.Create(context.TODO(), obj)
 	}
 
-	// Resource exists, update it
+	// Resource exists and is ours (has gitopsaddon label), update it
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	klog.Infof("Updating %s/%s %s", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 	return r.Update(context.TODO(), obj)

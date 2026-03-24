@@ -978,13 +978,6 @@ type mockKubernetesClient struct {
 	kubernetes.Interface
 }
 
-func TestNewReconciler(t *testing.T) {
-	// This test would require a more complex setup with a real manager
-	// For now, we'll test the basic structure
-	reconciler := &ReconcileGitOpsCluster{}
-	assert.NotNil(t, reconciler)
-}
-
 func TestReconcileRequest(t *testing.T) {
 	scheme := runtime.NewScheme()
 	err := v1.AddToScheme(scheme)
@@ -996,47 +989,25 @@ func TestReconcileRequest(t *testing.T) {
 	err = clusterv1beta1.AddToScheme(scheme)
 	require.NoError(t, err)
 
-	tests := []struct {
-		name            string
-		request         reconcile.Request
-		existingObjects []client.Object
-		expectedResult  reconcile.Result
-		expectedError   bool
-	}{
-		{
-			name: "reconcile with empty cluster list",
-			request: reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      "test-gitops",
-					Namespace: "test-ns",
-				},
+	t.Run("reconcile with nonexistent GitOpsCluster returns no error", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		reconciler := &ReconcileGitOpsCluster{
+			Client: fakeClient,
+		}
+
+		result, err := reconciler.Reconcile(context.TODO(), reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "nonexistent",
+				Namespace: "test-ns",
 			},
-			existingObjects: []client.Object{},
-			expectedResult:  reconcile.Result{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
-				Build()
-
-			reconciler := &ReconcileGitOpsCluster{
-				Client: fakeClient,
-			}
-
-			result, err := reconciler.Reconcile(context.TODO(), tt.request)
-
-			if tt.expectedError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-			assert.Equal(t, tt.expectedResult, result)
 		})
-	}
+
+		assert.NoError(t, err)
+		assert.Equal(t, reconcile.Result{}, result)
+	})
 }
 
 // TestCreatePolicyTemplateCall tests that the CreatePolicyTemplate method is called
@@ -1111,122 +1082,6 @@ func TestCreatePolicyTemplateCall(t *testing.T) {
 			// The important thing is that the CreatePolicyTemplate method was called, covering the changed lines
 			// We expect no errors for our test cases since they're designed to avoid actual resource creation
 			assert.NoError(t, err, tt.description)
-		})
-	}
-}
-
-// TestGitOpsAddonCreateBlankClusterSecretsLogic tests the specific logic changes in lines 579-588
-// This test directly exercises the changed code path for determining createBlankClusterSecrets
-func TestGitOpsAddonCreateBlankClusterSecretsLogic(t *testing.T) {
-	scheme := runtime.NewScheme()
-	err := gitopsclusterV1beta1.AddToScheme(scheme)
-	require.NoError(t, err)
-	err = spokeclusterv1.AddToScheme(scheme)
-	require.NoError(t, err)
-
-	tests := []struct {
-		name                          string
-		gitopsAddonEnabled            *bool
-		createBlankClusterSecretsSpec *bool
-		expectedResult                bool
-		description                   string
-	}{
-		{
-			name:                          "gitopsAddon enabled=true, spec=nil -> should be true",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(true),
-			createBlankClusterSecretsSpec: nil,
-			expectedResult:                true,
-			description:                   "When gitopsAddon is enabled, should always create blank cluster secrets regardless of spec",
-		},
-		{
-			name:                          "gitopsAddon enabled=true, spec=false -> should be true",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(true),
-			createBlankClusterSecretsSpec: func(b bool) *bool { return &b }(false),
-			expectedResult:                true,
-			description:                   "When gitopsAddon is enabled, should create blank cluster secrets even if spec says false",
-		},
-		{
-			name:                          "gitopsAddon enabled=true, spec=true -> should be true",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(true),
-			createBlankClusterSecretsSpec: func(b bool) *bool { return &b }(true),
-			expectedResult:                true,
-			description:                   "When gitopsAddon is enabled, should create blank cluster secrets when spec is true",
-		},
-		{
-			name:                          "gitopsAddon enabled=false, spec=nil -> should be false",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(false),
-			createBlankClusterSecretsSpec: nil,
-			expectedResult:                false,
-			description:                   "When gitopsAddon is disabled and spec is nil, should default to false",
-		},
-		{
-			name:                          "gitopsAddon enabled=false, spec=false -> should be false",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(false),
-			createBlankClusterSecretsSpec: func(b bool) *bool { return &b }(false),
-			expectedResult:                false,
-			description:                   "When gitopsAddon is disabled, should respect spec value false",
-		},
-		{
-			name:                          "gitopsAddon enabled=false, spec=true -> should be true",
-			gitopsAddonEnabled:            func(b bool) *bool { return &b }(false),
-			createBlankClusterSecretsSpec: func(b bool) *bool { return &b }(true),
-			expectedResult:                true,
-			description:                   "When gitopsAddon is disabled, should respect spec value true",
-		},
-		{
-			name:                          "gitopsAddon nil, spec=nil -> should be false",
-			gitopsAddonEnabled:            nil,
-			createBlankClusterSecretsSpec: nil,
-			expectedResult:                false,
-			description:                   "When gitopsAddon is nil and spec is nil, should default to false",
-		},
-		{
-			name:                          "gitopsAddon nil, spec=true -> should be true",
-			gitopsAddonEnabled:            nil,
-			createBlankClusterSecretsSpec: func(b bool) *bool { return &b }(true),
-			expectedResult:                true,
-			description:                   "When gitopsAddon is nil, should respect spec value true",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create GitOpsCluster with the specified configuration
-			gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-cluster",
-					Namespace: "test-namespace",
-				},
-				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-					CreateBlankClusterSecrets: tt.createBlankClusterSecretsSpec,
-				},
-			}
-
-			if tt.gitopsAddonEnabled != nil {
-				gitOpsCluster.Spec.GitOpsAddon = &gitopsclusterV1beta1.GitOpsAddonSpec{
-					Enabled: tt.gitopsAddonEnabled,
-				}
-			}
-
-			// Apply the logic from lines 579-588 (the changed code)
-			gitopsAddonEnabled := false
-			if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.Enabled != nil {
-				gitopsAddonEnabled = *gitOpsCluster.Spec.GitOpsAddon.Enabled
-			}
-
-			createBlankClusterSecrets := false
-			if gitopsAddonEnabled {
-				// Line 582: When gitopsAddon is enabled, always create blank cluster secrets
-				createBlankClusterSecrets = true
-			} else {
-				// Lines 585-587: When gitopsAddon is not enabled, respect the createBlankClusterSecrets field value
-				if gitOpsCluster.Spec.CreateBlankClusterSecrets != nil {
-					createBlankClusterSecrets = *gitOpsCluster.Spec.CreateBlankClusterSecrets
-				}
-			}
-
-			// Verify the result matches expected
-			assert.Equal(t, tt.expectedResult, createBlankClusterSecrets, tt.description)
 		})
 	}
 }
@@ -1479,132 +1334,6 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 	}
 }
 
-func TestAgentModeOverridesAllOptions(t *testing.T) {
-	t.Skip("Skipping test that requires CA infrastructure")
-
-	scheme := runtime.NewScheme()
-	_ = v1.AddToScheme(scheme)
-	_ = rbacv1.AddToScheme(scheme)
-	_ = spokeclusterv1.AddToScheme(scheme)
-	_ = clusterv1beta1.AddToScheme(scheme)
-	_ = addonv1alpha1.AddToScheme(scheme)
-	_ = workv1.AddToScheme(scheme)
-	_ = gitopsclusterV1beta1.AddToScheme(scheme)
-
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "test-ns",
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
-				ArgoNamespace: "argocd",
-			},
-			PlacementRef: &v1.ObjectReference{
-				Kind:       "Placement",
-				APIVersion: "cluster.open-cluster-management.io/v1beta1",
-				Name:       "test-placement",
-			},
-			// Set other options that should be ignored when agent is enabled
-			CreateBlankClusterSecrets: func(b bool) *bool { return &b }(false), // Should be ignored
-			ManagedServiceAccountRef:  "test-msa",                              // Should be ignored
-			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Enabled: func(b bool) *bool { return &b }(true),
-				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-					Enabled:       func(b bool) *bool { return &b }(true), // Agent wins
-					ServerAddress: "test-server.example.com",
-					ServerPort:    "443",
-				},
-			},
-		},
-	}
-
-	existingObjects := []client.Object{
-		&spokeclusterv1.ManagedCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
-		},
-		&clusterv1beta1.Placement{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-placement",
-				Namespace: "test-ns",
-			},
-		},
-		&clusterv1beta1.PlacementDecision{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-placement-decision",
-				Namespace: "test-ns",
-				Labels: map[string]string{
-					"cluster.open-cluster-management.io/placement": "test-placement",
-				},
-			},
-			Status: clusterv1beta1.PlacementDecisionStatus{
-				Decisions: []clusterv1beta1.ClusterDecision{
-					{ClusterName: "cluster1"},
-				},
-			},
-		},
-		// Create a traditional cluster secret that should be overridden
-		&v1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "cluster-cluster1",
-				Namespace: "argocd",
-				Labels: map[string]string{
-					argoCDTypeLabel: argoCDSecretTypeClusterValue,
-					// No agent mapping label - this is traditional
-				},
-			},
-			Data: map[string][]byte{
-				"server": []byte("https://traditional-server"),
-				"name":   []byte("cluster1"),
-			},
-		},
-		createTestArgoCDRedisSecret("argocd"),
-		createTestArgoCDJWTSecret("argocd"),
-		createTestArgoCDServerService("argocd"),
-		createTestArgoCDServerPod("argocd"),
-		createTestArgoCDAgentPrincipalService("argocd"),
-	}
-
-	// Add the GitOpsCluster to existing objects
-	allObjects := append(existingObjects, &gitOpsCluster)
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(allObjects...).
-		WithStatusSubresource(&gitopsclusterV1beta1.GitOpsCluster{}).
-		Build()
-
-	reconciler := &ReconcileGitOpsCluster{
-		Client: fakeClient,
-	}
-
-	orphanSecretsList := map[types.NamespacedName]string{}
-
-	// Get the GitOpsCluster from the fake client to ensure status updates work
-	gitOpsClusterFromClient := &gitopsclusterV1beta1.GitOpsCluster{}
-	err := fakeClient.Get(context.TODO(), types.NamespacedName{
-		Name:      gitOpsCluster.Name,
-		Namespace: gitOpsCluster.Namespace,
-	}, gitOpsClusterFromClient)
-	require.NoError(t, err, "Should be able to get GitOpsCluster from fake client")
-
-	_, err = reconciler.reconcileGitOpsCluster(context.TODO(), *gitOpsClusterFromClient, orphanSecretsList)
-	assert.NoError(t, err)
-
-	// Verify traditional secret was overridden with agent configuration
-	secret := &v1.Secret{}
-	err = fakeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
-	require.NoError(t, err)
-
-	// Should now have agent labels and URL format
-	assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
-	assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
-
-	serverURL := string(secret.Data["server"])
-	assert.Contains(t, serverURL, "agentName=cluster1", "Should be agent URL format")
-	assert.NotContains(t, serverURL, "traditional-server", "Should not contain traditional server")
-}
-
 // Helper functions for controller tests
 
 func createTestArgoCDRedisSecret(namespace string) *v1.Secret {
@@ -1626,7 +1355,7 @@ func createTestArgoCDJWTSecret(namespace string) *v1.Secret {
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			"signing-key": []byte("test-jwt-key"),
+			"jwt.key": []byte("test-jwt-key"),
 		},
 	}
 }

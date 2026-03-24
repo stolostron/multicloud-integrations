@@ -111,6 +111,14 @@ rules:
       - get
       - list
       - watch
+    apiGroups:
+      - ''
+    resources:
+      - nodes
+  - verbs:
+      - get
+      - list
+      - watch
       - create
       - update
       - patch
@@ -168,3 +176,10 @@ rules:
     resources:
       - deployments
       - deployments/finalizers
+  - verbs:
+      - get
+      - list
+    apiGroups:
+      - route.openshift.io
+    resources:
+      - routes

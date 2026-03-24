@@ -193,7 +193,13 @@ func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Contex
 		// Fallback to LoadBalancer discovery
 		serverAddress, serverPort, err = r.discoverFromLoadBalancer(ctx, argoNamespace)
 		if err != nil {
-			return fmt.Errorf("failed to discover ArgoCD agent principal endpoint (tried Route and LoadBalancer): %w", err)
+			klog.Warningf("LoadBalancer discovery failed: %v, trying NodePort", err)
+
+			// Fallback to NodePort discovery
+			serverAddress, serverPort, err = r.discoverFromNodePort(ctx, argoNamespace)
+			if err != nil {
+				return fmt.Errorf("failed to discover ArgoCD agent principal endpoint (tried Route, LoadBalancer, and NodePort): %w", err)
+			}
 		}
 	}
 
@@ -347,6 +353,76 @@ func (r *ReconcileGitOpsCluster) discoverFromLoadBalancer(ctx context.Context, a
 	}
 
 	return serverAddress, serverPort, nil
+}
+
+// discoverFromNodePort discovers the server address from a NodePort Service
+func (r *ReconcileGitOpsCluster) discoverFromNodePort(ctx context.Context, argoNamespace string) (string, string, error) {
+	service, err := r.FindArgoCDAgentPrincipalService(ctx, argoNamespace)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to find ArgoCD agent principal service: %w", err)
+	}
+
+	if service.Spec.Type != v1.ServiceTypeNodePort && service.Spec.Type != v1.ServiceTypeLoadBalancer {
+		return "", "", fmt.Errorf("ArgoCD agent principal service '%s' is not NodePort or LoadBalancer type (type=%s)", service.Name, service.Spec.Type)
+	}
+
+	// Prefer the HTTPS port (port 443 or named "https"), fall back to first non-zero NodePort
+	var nodePort int32
+	for _, port := range service.Spec.Ports {
+		if port.NodePort != 0 && (port.Port == 443 || port.Name == "https") {
+			nodePort = port.NodePort
+			break
+		}
+	}
+	if nodePort == 0 {
+		for _, port := range service.Spec.Ports {
+			if port.NodePort != 0 {
+				nodePort = port.NodePort
+				break
+			}
+		}
+	}
+	if nodePort == 0 {
+		return "", "", fmt.Errorf("ArgoCD agent principal service '%s' has no NodePort assigned", service.Name)
+	}
+
+	nodeList := &v1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return "", "", fmt.Errorf("failed to list nodes: %w", err)
+	}
+	if len(nodeList.Items) == 0 {
+		return "", "", fmt.Errorf("no nodes found in cluster")
+	}
+
+	var nodeAddress string
+	for i := range nodeList.Items {
+		ready := false
+		for _, cond := range nodeList.Items[i].Status.Conditions {
+			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+		for _, addr := range nodeList.Items[i].Status.Addresses {
+			if addr.Type == v1.NodeInternalIP {
+				nodeAddress = addr.Address
+				break
+			}
+		}
+		if nodeAddress != "" {
+			break
+		}
+	}
+	if nodeAddress == "" {
+		return "", "", fmt.Errorf("no InternalIP found on any ready node")
+	}
+
+	serverPort := fmt.Sprintf("%d", nodePort)
+	klog.Infof("Discovered server address from NodePort service %s: %s:%s", service.Name, nodeAddress, serverPort)
+	return nodeAddress, serverPort, nil
 }
 
 // GetManagedClusters retrieves managed cluster names from placement decision

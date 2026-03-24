@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -141,183 +142,6 @@ func TestParseImageComponents(t *testing.T) {
 			repo, tag := parseImageComponents(tt.imageRef)
 			g.Expect(repo).To(gomega.Equal(tt.expectedRepo))
 			g.Expect(tag).To(gomega.Equal(tt.expectedTag))
-		})
-	}
-}
-
-func TestApplyManifest(t *testing.T) {
-	t.Skip("Skipping due to resourceVersion conflicts with fake client")
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name         string
-		obj          *unstructured.Unstructured
-		existingObj  *unstructured.Unstructured
-		expectCreate bool
-		expectUpdate bool
-		expectError  bool
-	}{
-		{
-			name: "create_new_object",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
-						"name":      "test-cm",
-						"namespace": "test-ns",
-					},
-					"data": map[string]interface{}{
-						"key": "value",
-					},
-				},
-			},
-			existingObj:  nil,
-			expectCreate: true,
-			expectUpdate: false,
-			expectError:  false,
-		},
-		{
-			name: "update_existing_object",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
-						"name":      "existing-cm",
-						"namespace": "test-ns",
-					},
-					"data": map[string]interface{}{
-						"key": "new-value",
-					},
-				},
-			},
-			existingObj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
-						"name":            "existing-cm",
-						"namespace":       "test-ns",
-						"resourceVersion": "123",
-					},
-					"data": map[string]interface{}{
-						"key": "old-value",
-					},
-				},
-			},
-			expectCreate: false,
-			expectUpdate: true,
-			expectError:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create mock client
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-			}
-
-			// Create existing object if specified
-			if tt.existingObj != nil {
-				err := reconciler.Create(context.TODO(), tt.existingObj)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-
-			// Test the function
-			err := reconciler.applyManifest(tt.obj)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-
-				// Verify the object exists
-				key := types.NamespacedName{
-					Name:      tt.obj.GetName(),
-					Namespace: tt.obj.GetNamespace(),
-				}
-				result := &unstructured.Unstructured{}
-				result.SetAPIVersion(tt.obj.GetAPIVersion())
-				result.SetKind(tt.obj.GetKind())
-
-				err = reconciler.Get(context.TODO(), key, result)
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-		})
-	}
-}
-
-func TestApplyManifestSelectively(t *testing.T) {
-	t.Skip("Skipping due to resource conflicts with fake client setup")
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name        string
-		obj         *unstructured.Unstructured
-		expectError bool
-	}{
-		{
-			name: "argocd_manifest",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "argoproj.io/v1beta1",
-					"kind":       "ArgoCD",
-					"metadata": map[string]interface{}{
-						"name":      GitOpsNamespace,
-						"namespace": GitOpsNamespace,
-					},
-				},
-			},
-			expectError: true, // Will fail because ArgoCD CR doesn't exist to wait for
-		},
-		{
-			name: "default_service_account",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "ServiceAccount",
-					"metadata": map[string]interface{}{
-						"name":      "default",
-						"namespace": "test-ns",
-					},
-				},
-			},
-			expectError: false, // Fixed: SA exists in fake client, so no error
-		},
-		{
-			name: "regular_configmap",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
-						"name":      "regular-cm",
-						"namespace": "test-ns",
-					},
-					"data": map[string]interface{}{
-						"key": "value",
-					},
-				},
-			},
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-			}
-
-			err := reconciler.applyManifestSelectively(tt.obj)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
 		})
 	}
 }
@@ -565,4 +389,165 @@ func TestApplyCRDIfNotExists_DirectCRDCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyManifestSkipsPreExistingResources(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "apply-manifest-test-"}}
+	err := reconciler.Create(context.TODO(), ns)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "failed to create test namespace")
+	testNS := ns.Name
+	defer func() {
+		if delErr := reconciler.Delete(context.TODO(), ns); delErr != nil {
+			t.Logf("warning: failed to delete test namespace %s: %v", testNS, delErr)
+		}
+	}()
+
+	t.Run("creates new resource with gitopsaddon label", func(t *testing.T) {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("v1")
+		obj.SetKind("ConfigMap")
+		obj.SetName("test-new-cm")
+		obj.SetNamespace(testNS)
+		if err := unstructured.SetNestedStringMap(obj.Object, map[string]string{"key": "val"}, "data"); err != nil {
+			t.Fatalf("failed to set nested string map: %v", err)
+		}
+
+		err := reconciler.applyManifest(obj)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		created := &unstructured.Unstructured{}
+		created.SetAPIVersion("v1")
+		created.SetKind("ConfigMap")
+		t.Cleanup(func() {
+			if err := reconciler.Delete(context.TODO(), created); err != nil {
+				t.Errorf("failed to clean up ConfigMap test-new-cm: %v", err)
+			}
+		})
+
+		err = reconciler.Get(context.TODO(), types.NamespacedName{Name: "test-new-cm", Namespace: testNS}, created)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(created.GetLabels()["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
+	})
+
+	t.Run("skips pre-existing resource without gitopsaddon label", func(t *testing.T) {
+		preExisting := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pre-existing-cm",
+				Namespace: testNS,
+			},
+			Data: map[string]string{"original": "data"},
+		}
+		err := reconciler.Create(context.TODO(), preExisting)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		t.Cleanup(func() {
+			if err := reconciler.Delete(context.TODO(), preExisting); err != nil {
+				t.Errorf("failed to clean up ConfigMap pre-existing-cm: %v", err)
+			}
+		})
+
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("v1")
+		obj.SetKind("ConfigMap")
+		obj.SetName("pre-existing-cm")
+		obj.SetNamespace(testNS)
+		if err := unstructured.SetNestedStringMap(obj.Object, map[string]string{"new": "data"}, "data"); err != nil {
+			t.Fatalf("failed to set nested string map: %v", err)
+		}
+
+		err = reconciler.applyManifest(obj)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		existing := &corev1.ConfigMap{}
+		err = reconciler.Get(context.TODO(), types.NamespacedName{Name: "pre-existing-cm", Namespace: testNS}, existing)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(existing.Data["original"]).To(gomega.Equal("data"))
+		g.Expect(existing.Data).NotTo(gomega.HaveKey("new"))
+		g.Expect(existing.Labels).NotTo(gomega.HaveKey("apps.open-cluster-management.io/gitopsaddon"))
+	})
+
+	t.Run("updates owned resource with gitopsaddon label", func(t *testing.T) {
+		owned := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "owned-cm",
+				Namespace: testNS,
+				Labels: map[string]string{
+					"apps.open-cluster-management.io/gitopsaddon": "true",
+				},
+			},
+			Data: map[string]string{"original": "data"},
+		}
+		err := reconciler.Create(context.TODO(), owned)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		t.Cleanup(func() {
+			if err := reconciler.Delete(context.TODO(), owned); err != nil {
+				t.Errorf("failed to clean up ConfigMap owned-cm: %v", err)
+			}
+		})
+
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("v1")
+		obj.SetKind("ConfigMap")
+		obj.SetName("owned-cm")
+		obj.SetNamespace(testNS)
+		if err := unstructured.SetNestedStringMap(obj.Object, map[string]string{"updated": "data"}, "data"); err != nil {
+			t.Fatalf("failed to set nested string map: %v", err)
+		}
+
+		err = reconciler.applyManifest(obj)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		existing := &corev1.ConfigMap{}
+		err = reconciler.Get(context.TODO(), types.NamespacedName{Name: "owned-cm", Namespace: testNS}, existing)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(existing.Data["updated"]).To(gomega.Equal("data"))
+		g.Expect(existing.Labels["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
+	})
+
+	t.Run("skips resource with skip annotation", func(t *testing.T) {
+		skipped := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "skip-cm",
+				Namespace: testNS,
+				Labels: map[string]string{
+					"apps.open-cluster-management.io/gitopsaddon": "true",
+				},
+				Annotations: map[string]string{
+					"gitops-addon.open-cluster-management.io/skip": "true",
+				},
+			},
+			Data: map[string]string{"original": "data"},
+		}
+		err := reconciler.Create(context.TODO(), skipped)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		t.Cleanup(func() {
+			if err := reconciler.Delete(context.TODO(), skipped); err != nil {
+				t.Errorf("failed to clean up ConfigMap skip-cm: %v", err)
+			}
+		})
+
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("v1")
+		obj.SetKind("ConfigMap")
+		obj.SetName("skip-cm")
+		obj.SetNamespace(testNS)
+		if err := unstructured.SetNestedStringMap(obj.Object, map[string]string{"updated": "data"}, "data"); err != nil {
+			t.Fatalf("failed to set nested string map: %v", err)
+		}
+
+		err = reconciler.applyManifest(obj)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+
+		existing := &corev1.ConfigMap{}
+		err = reconciler.Get(context.TODO(), types.NamespacedName{Name: "skip-cm", Namespace: testNS}, existing)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(existing.Data["original"]).To(gomega.Equal("data"))
+		g.Expect(existing.Data).NotTo(gomega.HaveKey("updated"))
+	})
 }

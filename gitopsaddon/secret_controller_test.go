@@ -16,7 +16,6 @@ package gitopsaddon
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -573,50 +572,49 @@ func TestPredicateFunctions(t *testing.T) {
 }
 
 func TestGetSourceSecretName(t *testing.T) {
-	g := NewWithT(t)
-
-	// Save original environment variable value if it exists
-	originalValue := os.Getenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME")
-	defer func() {
-		if originalValue != "" {
-			os.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", originalValue)
-		} else {
-			os.Unsetenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME")
-		}
-	}()
-
-	t.Run("default behavior - no environment variable", func(t *testing.T) {
-		// Ensure environment variable is not set
-		os.Unsetenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME")
-
-		result := getSourceSecretName()
+	t.Run("empty or unset environment variable falls back to default", func(t *testing.T) {
+		t.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", "")
+		g := NewWithT(t)
 		expected := "gitops-addon-open-cluster-management.io-argocd-agent-addon-client-cert"
-		g.Expect(result).To(Equal(expected))
+		g.Expect(getSourceSecretName()).To(Equal(expected))
 	})
 
 	t.Run("environment variable override", func(t *testing.T) {
-		customSecretName := "my-custom-secret-name"
-		os.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", customSecretName)
-
-		result := getSourceSecretName()
-		g.Expect(result).To(Equal(customSecretName))
-	})
-
-	t.Run("empty environment variable falls back to default", func(t *testing.T) {
-		// Set environment variable to empty string
-		os.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", "")
-
-		result := getSourceSecretName()
-		expected := "gitops-addon-open-cluster-management.io-argocd-agent-addon-client-cert"
-		g.Expect(result).To(Equal(expected))
+		t.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", "my-custom-secret-name")
+		g := NewWithT(t)
+		g.Expect(getSourceSecretName()).To(Equal("my-custom-secret-name"))
 	})
 
 	t.Run("whitespace-only environment variable falls back to default", func(t *testing.T) {
-		// Set environment variable to whitespace only
-		os.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", "   ")
+		t.Setenv("GITOPS_ADDON_ARGOCD_AGENT_SECRET_NAME", "   ")
+		g := NewWithT(t)
+		expected := "gitops-addon-open-cluster-management.io-argocd-agent-addon-client-cert"
+		g.Expect(getSourceSecretName()).To(Equal(expected))
+	})
+}
 
-		result := getSourceSecretName()
-		// Since we only check for empty string, whitespace will be returned as-is
-		g.Expect(result).To(Equal("   "))
+func TestGetTargetNamespace(t *testing.T) {
+	t.Run("default returns GitOpsNamespace", func(t *testing.T) {
+		t.Setenv("ARGOCD_NAMESPACE", "")
+		g := NewWithT(t)
+		g.Expect(getTargetNamespace()).To(Equal(GitOpsNamespace))
+	})
+
+	t.Run("env var overrides to local-cluster", func(t *testing.T) {
+		t.Setenv("ARGOCD_NAMESPACE", "local-cluster")
+		g := NewWithT(t)
+		g.Expect(getTargetNamespace()).To(Equal("local-cluster"))
+	})
+
+	t.Run("env var overrides to custom namespace", func(t *testing.T) {
+		t.Setenv("ARGOCD_NAMESPACE", "my-custom-ns")
+		g := NewWithT(t)
+		g.Expect(getTargetNamespace()).To(Equal("my-custom-ns"))
+	})
+
+	t.Run("whitespace-only ARGOCD_NAMESPACE falls back to default", func(t *testing.T) {
+		t.Setenv("ARGOCD_NAMESPACE", "   ")
+		g := NewWithT(t)
+		g.Expect(getTargetNamespace()).To(Equal(GitOpsNamespace))
 	})
 }
