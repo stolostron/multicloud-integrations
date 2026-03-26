@@ -29,6 +29,8 @@ global:
     ARGO_ROLLOUTS_IMAGE: ""
     # ArgoCD Agent (Principal) image
     ARGOCD_PRINCIPAL_IMAGE: ""
+    # ArgoCD Agent image
+    ARGOCD_AGENT_IMAGE: ""
     # ArgoCD Image Updater image
     ARGOCD_IMAGE_UPDATER_IMAGE: ""
   proxyConfig:

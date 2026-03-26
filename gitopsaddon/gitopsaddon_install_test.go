@@ -340,6 +340,127 @@ func TestPatchArgoCDServiceAccountsWithImagePullSecrets(t *testing.T) {
 	}
 }
 
+func TestPatchArgoCDServiceAccountsWithCustomNamespace(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	customNS := "local-cluster"
+	t.Setenv("ARGOCD_NAMESPACE", customNS)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+	}
+
+	// Create the custom namespace
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: customNS},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	secretName := "open-cluster-management-image-pull-credentials"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: customNS,
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			".dockerconfigjson": []byte(`{"auths":{"registry.redhat.io":{"auth":"test"}}}`),
+		},
+	}
+	err = reconciler.Create(context.TODO(), secret)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	saName := "test-sa-custom-ns"
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: customNS,
+		},
+	}
+	err = reconciler.Create(context.TODO(), sa)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	err = reconciler.patchArgoCDServiceAccountsWithImagePullSecrets()
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Verify SA was patched in the custom namespace
+	patchedSA := &corev1.ServiceAccount{}
+	err = reconciler.Get(context.TODO(), types.NamespacedName{Name: saName, Namespace: customNS}, patchedSA)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	found := false
+	for _, ref := range patchedSA.ImagePullSecrets {
+		if ref.Name == secretName {
+			found = true
+			break
+		}
+	}
+	g.Expect(found).To(gomega.BeTrue(), "SA in custom namespace should have imagePullSecrets")
+
+	// Cleanup
+	_ = reconciler.Delete(context.TODO(), sa)
+	_ = reconciler.Delete(context.TODO(), secret)
+}
+
+func TestDeletePodsWithImagePullIssuesCustomNamespace(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	customNS := "local-cluster"
+	t.Setenv("ARGOCD_NAMESPACE", customNS)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	// Create the custom namespace
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: customNS},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	// Create a pod with ImagePullBackOff in custom namespace
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failing-pod-custom-ns",
+			Namespace: customNS,
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "ImagePullBackOff",
+						},
+					},
+				},
+			},
+		},
+	}
+	err = reconciler.Create(context.TODO(), pod)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	err = reconciler.deletePodsWithImagePullIssues()
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// Verify the pod was deleted
+	checkPod := &corev1.Pod{}
+	err = reconciler.Get(context.TODO(), types.NamespacedName{Name: "failing-pod-custom-ns", Namespace: customNS}, checkPod)
+	g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Pod in custom namespace should have been deleted")
+}
+
 func TestCopyImagePullSecret(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -1061,6 +1182,16 @@ func TestGetArgoCDNamespace(t *testing.T) {
 			envValue: "custom-ns",
 			expected: "custom-ns",
 		},
+		{
+			name:     "whitespace-only env var returns default",
+			envValue: "   ",
+			expected: GitOpsNamespace,
+		},
+		{
+			name:     "env var with trailing whitespace is trimmed",
+			envValue: "local-cluster  ",
+			expected: "local-cluster",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1074,4 +1205,87 @@ func TestGetArgoCDNamespace(t *testing.T) {
 			g.Expect(getArgoCDNamespace()).To(gomega.Equal(tt.expected))
 		})
 	}
+}
+
+func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_CHANNEL")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
+	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
+
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+	}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	// Create a subscription with gitopsaddon label and InstallPlanMissing condition
+	sub := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name":      "openshift-gitops-operator",
+				"namespace": "openshift-operators",
+				"labels": map[string]interface{}{
+					"apps.open-cluster-management.io/gitopsaddon": "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"name":               "openshift-gitops-operator",
+				"channel":            "latest",
+				"source":             "redhat-operators",
+				"sourceNamespace":    "openshift-marketplace",
+				"installPlanApproval": "Automatic",
+			},
+			"status": map[string]interface{}{
+				"conditions": []interface{}{
+					map[string]interface{}{
+						"type":   "InstallPlanMissing",
+						"status": "True",
+					},
+				},
+			},
+		},
+	}
+
+	err = reconciler.Create(context.Background(), sub)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+
+	t.Cleanup(func() {
+		sub2 := &unstructured.Unstructured{}
+		sub2.SetAPIVersion("operators.coreos.com/v1alpha1")
+		sub2.SetKind("Subscription")
+		sub2.SetName("openshift-gitops-operator")
+		sub2.SetNamespace("openshift-operators")
+		_ = reconciler.Delete(context.TODO(), sub2)
+	})
+
+	// Call createOrUpdateOLMSubscription — should detect InstallPlanMissing and recreate
+	err = reconciler.createOrUpdateOLMSubscription(context.Background())
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// The subscription should still exist (recreated)
+	newSub := &unstructured.Unstructured{}
+	newSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+	newSub.SetKind("Subscription")
+	err = reconciler.Get(context.Background(), types.NamespacedName{
+		Name:      "openshift-gitops-operator",
+		Namespace: "openshift-operators",
+	}, newSub)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(newSub.GetLabels()["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 }

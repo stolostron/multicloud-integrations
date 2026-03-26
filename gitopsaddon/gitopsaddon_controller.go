@@ -19,6 +19,7 @@ package gitopsaddon
 import (
 	"context"
 	"embed"
+	"fmt"
 	"os"
 	"time"
 
@@ -133,12 +134,32 @@ func (r *GitopsAddonReconciler) reconcile(ctx context.Context) {
 	}
 
 	// Perform install/update
+	var reconcileErrors []string
 	if err := r.installOrUpdateOpenshiftGitops(); err != nil {
 		klog.Errorf("Failed to reconcile Gitops Addon: %v", err)
-		// Continue running - will retry on next interval
-		return
+		reconcileErrors = append(reconcileErrors, fmt.Sprintf("install: %v", err))
+		// Fall through to SA patching — even if install fails, we should fix image pull issues
 	}
-	klog.V(2).Info("Successfully reconciled Gitops Addon")
+
+	// Patch SAs and fix image pull issues on every reconciliation cycle.
+	// These run unconditionally because:
+	// - The ArgoCD operator creates new SAs (e.g. for agent) after the initial install
+	// - Those SAs won't have imagePullSecrets, causing ImagePullBackOff on non-OCP clusters
+	// - The install step may have returned early (hub, OCP) or errored out
+	if err := r.patchArgoCDServiceAccountsWithImagePullSecrets(); err != nil {
+		klog.Warningf("Failed to patch ArgoCD ServiceAccounts: %v", err)
+		reconcileErrors = append(reconcileErrors, fmt.Sprintf("SA patching: %v", err))
+	}
+	if err := r.deletePodsWithImagePullIssues(); err != nil {
+		klog.Warningf("Failed to delete pods with image pull issues: %v", err)
+		reconcileErrors = append(reconcileErrors, fmt.Sprintf("pod cleanup: %v", err))
+	}
+
+	if len(reconcileErrors) > 0 {
+		klog.Warningf("Reconciliation completed with %d error(s): %v", len(reconcileErrors), reconcileErrors)
+	} else {
+		klog.V(2).Info("Successfully reconciled Gitops Addon")
+	}
 }
 
 // Start implements manager.Runnable for cleanup and runs once then exits

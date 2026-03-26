@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -131,14 +132,6 @@ func (r *GitopsAddonReconciler) installViaEmbeddedManifests() error {
 		return fmt.Errorf("failed to create/update %s namespace: %w", GitOpsNamespace, err)
 	}
 
-	if err := r.patchArgoCDServiceAccountsWithImagePullSecrets(); err != nil {
-		klog.Warningf("Failed to patch ArgoCD ServiceAccounts: %v (continuing anyway)", err)
-	}
-
-	if err := r.deletePodsWithImagePullIssues(); err != nil {
-		klog.Warningf("Failed to delete pods with image pull issues: %v", err)
-	}
-
 	return nil
 }
 
@@ -238,7 +231,7 @@ func (r *GitopsAddonReconciler) isHubCluster(ctx context.Context) (bool, error) 
 
 // getArgoCDNamespace returns the namespace where the ArgoCD CR lives for this cluster.
 func getArgoCDNamespace() string {
-	if ns := os.Getenv("ARGOCD_NAMESPACE"); ns != "" {
+	if ns := strings.TrimSpace(os.Getenv("ARGOCD_NAMESPACE")); ns != "" {
 		return ns
 	}
 	return GitOpsNamespace
@@ -327,6 +320,35 @@ func (r *GitopsAddonReconciler) createOrUpdateOLMSubscription(ctx context.Contex
 
 	labels := existing.GetLabels()
 	if labels != nil && labels["apps.open-cluster-management.io/gitopsaddon"] == "true" {
+		// Check for InstallPlanMissing condition — if present, delete and recreate
+		// to force OLM to generate a new install plan
+		conditions, _, _ := unstructured.NestedSlice(existing.Object, "status", "conditions")
+		for _, c := range conditions {
+			if cm, ok := c.(map[string]interface{}); ok {
+				if cm["type"] == "InstallPlanMissing" && cm["status"] == "True" {
+					klog.Infof("OLM subscription %s has InstallPlanMissing condition, deleting and recreating", subName)
+					if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
+						return fmt.Errorf("failed to delete stale OLM subscription: %w", err)
+					}
+					nsName := types.NamespacedName{Name: subName, Namespace: subNamespace}
+					pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+					defer cancel()
+					if err := wait.PollUntilContextCancel(pollCtx, time.Second, true, func(ctx context.Context) (bool, error) {
+						check := &unstructured.Unstructured{}
+						check.SetAPIVersion("operators.coreos.com/v1alpha1")
+						check.SetKind("Subscription")
+						if err := r.Get(ctx, nsName, check); errors.IsNotFound(err) {
+							return true, nil
+						}
+						return false, nil
+					}); err != nil {
+						return fmt.Errorf("timed out waiting for stale OLM subscription %s to be deleted: %w", subName, err)
+					}
+					return r.Create(ctx, sub)
+				}
+			}
+		}
+
 		klog.Infof("OLM subscription %s exists with gitopsaddon label, updating spec", subName)
 		sub.SetResourceVersion(existing.GetResourceVersion())
 		return r.Update(ctx, sub)
@@ -592,13 +614,14 @@ func (r *GitopsAddonReconciler) WaitForImagePullSecret(nameSpaceKey types.Namesp
 // - dex-server (if SSO enabled), applicationset-controller, notifications-controller
 func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets() error {
 	secretName := "open-cluster-management-image-pull-credentials"
+	targetNS := getArgoCDNamespace()
 
 	// First check if the secret exists in the namespace
 	secret := &corev1.Secret{}
-	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: GitOpsNamespace}, secret)
+	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: targetNS}, secret)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			klog.V(2).Infof("Image pull secret %s not found in namespace %s, skipping SA patching", secretName, GitOpsNamespace)
+			klog.V(2).Infof("Image pull secret %s not found in namespace %s, skipping SA patching", secretName, targetNS)
 			return nil // Not an error - secret might not exist in OCP environments where node-level secrets work
 		}
 		return fmt.Errorf("failed to check for image pull secret: %v", err)
@@ -606,7 +629,7 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 
 	// List all ServiceAccounts in the namespace
 	saList := &corev1.ServiceAccountList{}
-	if err := r.List(context.TODO(), saList, &client.ListOptions{Namespace: GitOpsNamespace}); err != nil {
+	if err := r.List(context.TODO(), saList, &client.ListOptions{Namespace: targetNS}); err != nil {
 		return fmt.Errorf("failed to list ServiceAccounts: %v", err)
 	}
 
@@ -629,10 +652,10 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 			// Add the secret reference
 			sa.ImagePullSecrets = append(sa.ImagePullSecrets, secretRef)
 			if err := r.Update(context.TODO(), sa); err != nil {
-				klog.Warningf("Failed to patch ServiceAccount %s/%s: %v", GitOpsNamespace, sa.Name, err)
+				klog.Warningf("Failed to patch ServiceAccount %s/%s: %v", targetNS, sa.Name, err)
 				continue
 			}
-			klog.Infof("Patched ServiceAccount %s/%s with imagePullSecrets", GitOpsNamespace, sa.Name)
+			klog.Infof("Patched ServiceAccount %s/%s with imagePullSecrets", targetNS, sa.Name)
 			patchedCount++
 		}
 	}
@@ -644,11 +667,12 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 	return nil
 }
 
-// deletePodsWithImagePullIssues deletes pods in the GitOps namespace that have ImagePullBackOff or ErrImagePull status
-// This forces Kubernetes to recreate them, and the new pods will use the patched ServiceAccounts with imagePullSecrets
+// deletePodsWithImagePullIssues deletes pods in the ArgoCD namespace that have ImagePullBackOff or ErrImagePull status.
+// This forces Kubernetes to recreate them, and the new pods will use the patched ServiceAccounts with imagePullSecrets.
 func (r *GitopsAddonReconciler) deletePodsWithImagePullIssues() error {
+	targetNS := getArgoCDNamespace()
 	podList := &corev1.PodList{}
-	if err := r.List(context.TODO(), podList, &client.ListOptions{Namespace: GitOpsNamespace}); err != nil {
+	if err := r.List(context.TODO(), podList, &client.ListOptions{Namespace: targetNS}); err != nil {
 		return fmt.Errorf("failed to list pods: %v", err)
 	}
 
@@ -695,4 +719,5 @@ func (r *GitopsAddonReconciler) deletePodsWithImagePullIssues() error {
 
 	return nil
 }
+
 

@@ -30,13 +30,13 @@ func TestGitOpsAddonConfig(t *testing.T) {
 	t.Run("DefaultValues", func(t *testing.T) {
 		config := utils.NewGitOpsAddonConfig()
 
-		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8-operator"))
-		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel8"))
+		g.Expect(config.OperatorImages[utils.EnvGitOpsOperatorImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel9-operator"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-rhel9"))
 		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.ContainSubstring("registry.redhat.io/rhel9/redis-7"))
-		g.Expect(config.OperatorImages[utils.EnvBackendImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel8"))
-		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePlugin]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel8"))
+		g.Expect(config.OperatorImages[utils.EnvBackendImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/gitops-rhel9"))
+		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePlugin]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/console-plugin-rhel9"))
 		g.Expect(config.ArgoCDAgentEnabled).To(gomega.BeFalse())
-		g.Expect(config.OperatorImages[utils.EnvArgoCDPrincipalImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8"))
+		g.Expect(config.OperatorImages[utils.EnvArgoCDPrincipalImage]).To(gomega.ContainSubstring("registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9"))
 		g.Expect(config.ArgoCDAgentServerAddress).To(gomega.Equal(""))
 		g.Expect(config.ArgoCDAgentServerPort).To(gomega.Equal(""))
 		g.Expect(config.ArgoCDAgentMode).To(gomega.Equal("managed"))

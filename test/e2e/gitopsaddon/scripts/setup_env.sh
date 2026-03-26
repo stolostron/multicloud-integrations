@@ -11,7 +11,7 @@ SPOKE_CLUSTER=${SPOKE_CLUSTER:-cluster1}
 HUB_CTX="kind-${HUB_CLUSTER}"
 SPOKE_CTX="kind-${SPOKE_CLUSTER}"
 E2E_IMG=${E2E_IMG:-quay.io/stolostron/multicloud-integrations:latest}
-ARGOCD_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-operator:v0.17.0}
+ARGOCD_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-operator:latest}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
@@ -121,6 +121,9 @@ ${KUBECTL} --context ${HUB_CTX} wait deployment argocd-operator-controller-manag
 ${KUBECTL} --context ${HUB_CTX} create namespace openshift-gitops --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
 
 # Create ArgoCD instance on hub (agent principal enabled for agent tests)
+# Controller must be enabled: the ApplicationSet controller is embedded in the
+# application-controller process in ArgoCD 2.14+, so disabling the controller
+# also disables ApplicationSet generation.
 cat <<'EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD
@@ -128,13 +131,14 @@ metadata:
   name: openshift-gitops
   namespace: openshift-gitops
 spec:
-  controller:
-    enabled: false
+  applicationSet:
+    enabled: true
   sourceNamespaces:
     - "*"
   argoCDAgent:
     principal:
       enabled: true
+      destinationBasedMapping: true
       auth: "mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent"
       logLevel: trace
       server:

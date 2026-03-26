@@ -85,6 +85,10 @@ spec:
         - name: ARGOCD_PRINCIPAL_IMAGE
           value: {{ .Values.global.operatorImages.ARGOCD_PRINCIPAL_IMAGE | quote }}
         {{- end }}
+        {{- if .Values.global.operatorImages.ARGOCD_AGENT_IMAGE }}
+        - name: ARGOCD_AGENT_IMAGE
+          value: {{ .Values.global.operatorImages.ARGOCD_AGENT_IMAGE | quote }}
+        {{- end }}
         {{- if .Values.global.operatorImages.ARGOCD_IMAGE_UPDATER_IMAGE }}
         - name: ARGOCD_IMAGE_UPDATER_IMAGE
           value: {{ .Values.global.operatorImages.ARGOCD_IMAGE_UPDATER_IMAGE | quote }}

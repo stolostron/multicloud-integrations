@@ -17,14 +17,12 @@ package gitopscluster
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
-	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // ErrPolicyFrameworkNotAvailable is returned when the governance-policy-framework is not installed.
@@ -263,11 +261,16 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
   enabled: false`
 
 	// Add ArgoCD agent configuration if enabled
-	// NOTE: We must set the agent image explicitly because the operator only has
-	// ARGOCD_PRINCIPAL_IMAGE env var for the principal component, not the agent.
-	// The agent component uses hardcoded community defaults, so we override it here
-	// with the default Red Hat image (same as ARGOCD_PRINCIPAL_IMAGE).
-	// Users can override this directly in the ArgoCD CR if needed.
+	// The operator handles agent image selection via ARGOCD_AGENT_IMAGE env var (v1.20+),
+	// so we don't set the image in the ArgoCD CR - the operator picks the correct Red Hat image.
+	//
+	// destinationBasedMapping is DISABLED on the agent side. The principal keeps DBM enabled
+	// for routing (apps are dispatched to agents based on spec.destination.name). On the agent,
+	// DBM=false means getTargetNamespaceForApp() returns the agent's own namespace. This is
+	// critical for local-cluster: the agent's ArgoCD is in "local-cluster" namespace (to avoid
+	// conflicting with the hub's ArgoCD in "openshift-gitops"), so the agent must store apps
+	// in "local-cluster" where the app controller watches. For remote clusters (Kind/OCP), the
+	// agent namespace IS "openshift-gitops", so DBM=true/false produces the same result.
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 		agentConfig := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
 		serverAddress := agentConfig.ServerAddress
@@ -280,32 +283,12 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 			mode = "managed"
 		}
 
-		// Determine operator image: per-cluster spec takes precedence, then env var, then default.
-		// Community argocd-operator manages its own agent image, so only override for Red Hat operator builds.
-		operatorImage := ""
-		if gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage != "" {
-			operatorImage = gitOpsCluster.Spec.GitOpsAddon.GitOpsOperatorImage
-		}
-		if operatorImage == "" {
-			operatorImage = os.Getenv(utils.EnvGitOpsOperatorImage)
-		}
-		if operatorImage == "" {
-			operatorImage = utils.DefaultOperatorImages[utils.EnvGitOpsOperatorImage]
-		}
-
-		agentImageLine := ""
-		if !strings.Contains(operatorImage, "argoprojlabs") {
-			agentImage := os.Getenv(utils.EnvArgoCDPrincipalImage)
-			if agentImage == "" {
-				agentImage = utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage]
-			}
-			agentImageLine = fmt.Sprintf("\n    image: \"%s\"", agentImage)
-		}
-
 		spec += fmt.Sprintf(`
 argoCDAgent:
   agent:
-    enabled: true%s
+    enabled: true
+    allowedNamespaces:
+      - "*"
     client:
       principalServerAddress: "%s"
       principalServerPort: "%s"
@@ -313,7 +296,7 @@ argoCDAgent:
     tls:
       secretName: argocd-agent-client-tls
       rootCASecretName: argocd-agent-ca`,
-			agentImageLine, serverAddress, serverPort, mode)
+			serverAddress, serverPort, mode)
 	}
 
 	return spec

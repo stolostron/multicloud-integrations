@@ -195,7 +195,6 @@ func TestGenerateArgoCDSpec_BasicConfig(t *testing.T) {
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
-	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
 	enabled := true
 	agentEnabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -222,19 +221,20 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 	assert.Contains(t, spec, "server:")
 	assert.Contains(t, spec, "enabled: false")
 
-	// ArgoCD agent should be configured with default Red Hat image
+	// ArgoCD agent should be configured (no image override - operator handles it via env var)
 	assert.Contains(t, spec, "argoCDAgent:")
 	assert.Contains(t, spec, "agent:")
 	assert.Contains(t, spec, "enabled: true")
-	assert.Contains(t, spec, "image: \"registry.redhat.io")
+	assert.NotContains(t, spec, "image:")
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
 	assert.Contains(t, spec, "principalServerPort: \"443\"")
-	// This test explicitly sets Mode: "managed", so it should output managed
 	assert.Contains(t, spec, "mode: \"managed\"")
+	assert.Contains(t, spec, "allowedNamespaces:")
+	assert.NotContains(t, spec, "destinationBasedMapping:")
+	assert.NotContains(t, spec, "sourceNamespaces:")
 }
 
-func TestGenerateArgoCDSpec_WithArgoCDAgentDefaultImage(t *testing.T) {
-	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
+func TestGenerateArgoCDSpec_WithArgoCDAgentNoImageOverride(t *testing.T) {
 	enabled := true
 	agentEnabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -248,7 +248,6 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaultImage(t *testing.T) {
 				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
 					Enabled:       &agentEnabled,
 					ServerAddress: "192.168.1.100",
-					// No custom image - should use default Red Hat image
 				},
 			},
 		},
@@ -256,9 +255,11 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaultImage(t *testing.T) {
 
 	spec := generateArgoCDSpec(gitOpsCluster)
 
-	// Should use default Red Hat agent image
+	// No image override - operator handles agent image via ARGOCD_AGENT_IMAGE env var
 	assert.Contains(t, spec, "argoCDAgent:")
-	assert.Contains(t, spec, "image: \"registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8")
+	assert.NotContains(t, spec, "image:")
+	assert.Contains(t, spec, "allowedNamespaces:")
+	assert.NotContains(t, spec, "destinationBasedMapping:")
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
@@ -288,9 +289,7 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
 	assert.Contains(t, spec, "mode: \"managed\"")
 }
 
-func TestGenerateArgoCDSpec_CommunityOperatorSkipsAgentImage(t *testing.T) {
-	t.Setenv("GITOPS_OPERATOR_IMAGE", "quay.io/argoprojlabs/argocd-operator:v0.17.0")
-
+func TestGenerateArgoCDSpec_NoAgentImageForAnyOperator(t *testing.T) {
 	enabled := true
 	agentEnabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
@@ -312,40 +311,13 @@ func TestGenerateArgoCDSpec_CommunityOperatorSkipsAgentImage(t *testing.T) {
 
 	spec := generateArgoCDSpec(gitOpsCluster)
 
+	// Agent image is no longer set in the CR - operator handles it via ARGOCD_AGENT_IMAGE env var
 	assert.Contains(t, spec, "argoCDAgent:")
 	assert.Contains(t, spec, "enabled: true")
-	// Community operator manages its own agent image, so no explicit image override
 	assert.NotContains(t, spec, "image:")
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
-}
-
-func TestGenerateArgoCDSpec_RedHatOperatorSetsAgentImage(t *testing.T) {
-	t.Setenv("GITOPS_OPERATOR_IMAGE", "")
-
-	enabled := true
-	agentEnabled := true
-	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gitops",
-			Namespace: "openshift-gitops",
-		},
-		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
-			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
-				Enabled: &enabled,
-				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-					Enabled:       &agentEnabled,
-					ServerAddress: "192.168.1.100",
-					ServerPort:    "443",
-				},
-			},
-		},
-	}
-
-	spec := generateArgoCDSpec(gitOpsCluster)
-
-	assert.Contains(t, spec, "argoCDAgent:")
-	assert.Contains(t, spec, "enabled: true")
-	assert.Contains(t, spec, "image: \"registry.redhat.io/openshift-gitops-1/argocd-agent-rhel8")
+	assert.Contains(t, spec, "allowedNamespaces:")
+	assert.NotContains(t, spec, "destinationBasedMapping:")
 }
 
 func TestIndentYaml(t *testing.T) {
