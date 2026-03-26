@@ -543,24 +543,47 @@ func deployGuestbookApp(timeout time.Duration) {
 	verifyGuestbookDeployed(spokeContext, timeout)
 }
 
+func guestbookApplicationSetYAML(placementName, ns string) string {
+	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: %s-guestbook-appset
+  namespace: %s
+spec:
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: %s
+        requeueAfterSeconds: 30
+  template:
+    metadata:
+      name: '{{name}}-guestbook'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/argoproj/argocd-example-apps
+        targetRevision: HEAD
+        path: guestbook
+      destination:
+        name: '{{name}}'
+        namespace: guestbook
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true`, placementName, ns, placementName)
+}
+
 func deployGuestbookAgentMode(timeout time.Duration) {
 	ensureArgoCDClusterAdmin(spokeContext, argoCDNamespace)
-
-	destServer := verifyPrincipalServerAddress(3 * time.Minute)
 
 	ensureHubPrincipalRunning()
 
 	By("patching default AppProject in ArgoCD namespace on hub to allow source namespaces")
 	Expect(applyLiteral(hubContext, appProjectYAML(argoCDNamespace))).To(Succeed())
-
-	By("ensuring spoke namespace on hub")
-	Expect(applyLiteral(hubContext, fmt.Sprintf(`apiVersion: v1
-kind: Namespace
-metadata:
-  name: %s`, spokeName))).To(Succeed())
-
-	By("creating AppProject on hub in spoke namespace")
-	Expect(applyLiteral(hubContext, appProjectYAML(spokeName))).To(Succeed())
 
 	By("ensuring default AppProject exists on spoke (agent should propagate; create as fallback)")
 	Eventually(func() error {
@@ -572,27 +595,120 @@ metadata:
 		return err
 	}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
-	By("creating guestbook Application on hub in spoke namespace")
-	Expect(applyLiteral(hubContext, guestbookAppYAML(spokeName, destServer))).To(Succeed())
+	By("ensuring acm-placement ConfigMap exists for clusterDecisionResource generator")
+	Expect(applyLiteral(hubContext, fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acm-placement
+  namespace: %s
+data:
+  apiVersion: cluster.open-cluster-management.io/v1beta1
+  kind: placementdecisions
+  statusListKey: decisions
+  matchKey: clusterName`, argoCDNamespace))).To(Succeed())
 
-	By("waiting for agent to propagate guestbook Application to spoke")
-	Eventually(func() error {
-		_, err := kubectlCtx(spokeContext, "get", "application", "guestbook",
-			"-n", argoCDNamespace)
-		return err
-	}, 5*time.Minute, 15*time.Second).Should(Succeed())
+	By("ensuring ApplicationSet controller can read PlacementDecisions")
+	Expect(applyLiteral(hubContext, `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: appset-placement-reader
+rules:
+- apiGroups: ["cluster.open-cluster-management.io"]
+  resources: ["placementdecisions"]
+  verbs: ["get", "list", "watch"]`)).To(Succeed())
+	Expect(applyLiteral(hubContext, fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: appset-placement-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: appset-placement-reader
+subjects:
+- kind: ServiceAccount
+  name: openshift-gitops-argocd-application-controller
+  namespace: %s
+- kind: ServiceAccount
+  name: openshift-gitops-applicationset-controller
+  namespace: %s`, argoCDNamespace, argoCDNamespace))).To(Succeed())
 
-	By("verifying guestbook deployed on spoke")
-	verifyGuestbookDeployed(spokeContext, timeout)
+	appsetName := placementName + "-guestbook-appset"
+	appName := spokeName + "-guestbook"
 
-	By("verifying Application sync status reflected back to hub")
+	By("waiting for application-controller (includes ApplicationSet) to be ready on hub")
+	Eventually(func(g Gomega) int {
+		out, err := kubectlCtx(hubContext, "get", "statefulset",
+			"openshift-gitops-application-controller", "-n", argoCDNamespace,
+			"-o", "jsonpath={.status.readyReplicas}")
+		g.Expect(err).NotTo(HaveOccurred())
+		if out == "" {
+			return 0
+		}
+		var n int
+		fmt.Sscanf(out, "%d", &n)
+		return n
+	}, 5*time.Minute, 10*time.Second).Should(BeNumerically(">=", 1))
+
+	By("checking PlacementDecision for placement")
+	pdOut, _ := kubectlCtx(hubContext, "get", "placementdecision", "-n", argoCDNamespace,
+		"-l", "cluster.open-cluster-management.io/placement="+placementName,
+		"-o", "jsonpath={range .items[*]}{.metadata.name}: {.status.decisions}{','}{end}")
+	fmt.Fprintf(GinkgoWriter, "  [diag] PlacementDecisions: %s\n", pdOut)
+
+	By("creating guestbook ApplicationSet on hub")
+	Expect(applyLiteral(hubContext, guestbookApplicationSetYAML(placementName, argoCDNamespace))).To(Succeed())
+
+	By(fmt.Sprintf("waiting for ApplicationSet to generate %s", appName))
+	waitForResourceExists(hubContext, "application", appName, argoCDNamespace, 8*time.Minute)
+
+	By("waiting for agent to propagate guestbook to spoke")
+	Eventually(func(g Gomega) int {
+		out, err := kubectlCtx(spokeContext, "get", "deployment", "guestbook-ui",
+			"-n", "guestbook",
+			"-o", "jsonpath={.status.availableReplicas}")
+		if err != nil {
+			appInfo, _ := kubectlCtx(hubContext, "get", "application", appName,
+				"-n", argoCDNamespace,
+				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
+			fmt.Fprintf(GinkgoWriter, "  [diag] guestbook-ui not found on spoke; hub app: %s\n", appInfo)
+		}
+		g.Expect(err).NotTo(HaveOccurred())
+		if out == "" {
+			return 0
+		}
+		replicas, convErr := strconv.Atoi(strings.TrimSpace(out))
+		g.Expect(convErr).NotTo(HaveOccurred())
+		return replicas
+	}, timeout, 10*time.Second).Should(BeNumerically(">", 0))
+
+	By("verifying Application sync status on hub")
 	Eventually(func(g Gomega) string {
-		out, err := kubectlCtx(hubContext, "get", "application", "guestbook",
-			"-n", spokeName,
+		out, err := kubectlCtx(hubContext, "get", "application", appName,
+			"-n", argoCDNamespace,
 			"-o", "jsonpath={.status.sync.status}")
 		g.Expect(err).NotTo(HaveOccurred())
 		return out
 	}, 3*time.Minute, 10*time.Second).Should(Equal("Synced"))
+
+	_ = appsetName
+}
+
+func verifyRedHatImages(ctx, ns string) {
+	By(fmt.Sprintf("verifying all pods in %s use Red Hat images", ns))
+	Eventually(func(g Gomega) {
+		out, err := kubectlCtx(ctx, "get", "pods", "-n", ns,
+			"-o", "jsonpath={range .items[*]}{range .spec.containers[*]}{.image}{','}{end}{end}")
+		g.Expect(err).NotTo(HaveOccurred())
+		images := strings.Split(strings.TrimRight(out, ","), ",")
+		for _, img := range images {
+			img = strings.TrimSpace(img)
+			if img == "" {
+				continue
+			}
+			g.Expect(img).To(HavePrefix("registry.redhat.io/"),
+				"expected Red Hat image, got: %s", img)
+		}
+	}, 2*time.Minute, 10*time.Second).Should(Succeed())
 }
 
 // ---- Local-cluster verification helpers ----
@@ -633,8 +749,35 @@ func verifyLocalClusterGuestbook(isAgentMode bool, timeout time.Duration) {
 		By("verifying ArgoCD app controller is running in local-cluster namespace")
 		waitForPodPhase(hubContext, localClusterName,
 			"app.kubernetes.io/name=acm-openshift-gitops-application-controller", "Running", 5*time.Minute)
+
+		ensureArgoCDClusterAdmin(hubContext, localClusterName)
+
+		// In agent mode, the ApplicationSet generates local-cluster-guestbook in
+		// openshift-gitops. The principal dispatches it to the local-cluster agent,
+		// which copies it into the local-cluster namespace (agent's own namespace,
+		// because destinationBasedMapping is disabled on agents). We verify the
+		// agent-copied app rather than creating a separate one.
+		agentAppName := localClusterName + "-guestbook"
+
+		By("waiting for agent to copy local-cluster-guestbook to local-cluster namespace")
+		waitForResourceExists(hubContext, "applications.argoproj.io", agentAppName, localClusterName, timeout)
+
+		By("verifying guestbook-ui deployment on local-cluster (hub)")
+		verifyGuestbookDeployed(hubContext, timeout)
+
+		By("verifying local-cluster-guestbook sync status in local-cluster namespace")
+		Eventually(func(g Gomega) string {
+			out, err := kubectlCtx(hubContext, "get", "applications.argoproj.io", agentAppName,
+				"-n", localClusterName,
+				"-o", "jsonpath={.status.sync.status}")
+			g.Expect(err).NotTo(HaveOccurred())
+			return out
+		}, 3*time.Minute, 10*time.Second).Should(Equal("Synced"))
+
+		return
 	}
 
+	// Non-agent mode: create a direct guestbook app in local-cluster namespace
 	ensureArgoCDClusterAdmin(hubContext, localClusterName)
 
 	By("creating AppProject in local-cluster namespace")
@@ -657,9 +800,16 @@ func verifyLocalClusterGuestbook(isAgentMode bool, timeout time.Duration) {
 }
 
 func verifyLocalClusterControllerNamespace() {
-	By("verifying guestbook on local-cluster managed by local-cluster controller")
+	// Try agent-mode app name first, fall back to direct app name
+	appName := localClusterName + "-guestbook"
+	_, err := kubectlCtx(hubContext, "get", "applications.argoproj.io", appName, "-n", localClusterName)
+	if err != nil {
+		appName = "guestbook"
+	}
+
+	By(fmt.Sprintf("verifying %s on local-cluster managed by local-cluster controller", appName))
 	Eventually(func(g Gomega) string {
-		out, _ := kubectlCtx(hubContext, "get", "application", "guestbook",
+		out, _ := kubectlCtx(hubContext, "get", "applications.argoproj.io", appName,
 			"-n", localClusterName,
 			"-o", "jsonpath={.status.controllerNamespace}")
 		return out
@@ -692,12 +842,20 @@ func cleanupGuestbookResources(isAgentMode bool) {
 	kubectlCtx(spokeContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(spokeContext, "delete", "clusterrolebinding", "acm-openshift-gitops-cluster-admin", "--ignore-not-found")
 	if isAgentMode {
+		By("cleaning up ApplicationSet and agent-generated apps on hub")
+		appsetName := placementName + "-guestbook-appset"
+		kubectlCtx(hubContext, "delete", "applicationset", appsetName, "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "application", spokeName+"-guestbook", "-n", argoCDNamespace, "--ignore-not-found")
 		kubectlCtx(hubContext, "delete", "application", "guestbook", "-n", spokeName, "--ignore-not-found")
 		kubectlCtx(hubContext, "delete", "appproject", "default", "-n", spokeName, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "configmap", "acm-placement", "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "clusterrolebinding", "appset-placement-reader", "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "clusterrole", "appset-placement-reader", "--ignore-not-found")
 	}
 
 	By("cleaning up guestbook resources on local-cluster (hub)")
 	kubectlCtx(hubContext, "delete", "application", "guestbook", "-n", localClusterName, "--ignore-not-found")
+	kubectlCtx(hubContext, "delete", "applications.argoproj.io", localClusterName+"-guestbook", "-n", localClusterName, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "appproject", "default", "-n", localClusterName, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "clusterrolebinding", "acm-openshift-gitops-cluster-admin", "--ignore-not-found")
@@ -711,8 +869,14 @@ func scenarioCleanup(opts gitOpsClusterOpts) {
 
 	By("2. Deleting hub-side agent resources if applicable")
 	if opts.agentEnabled {
+		appsetName := opts.placementName + "-guestbook-appset"
+		kubectlCtx(hubContext, "delete", "applicationset", appsetName, "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "application", spokeName+"-guestbook", "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "applications.argoproj.io", localClusterName+"-guestbook", "-n", argoCDNamespace, "--ignore-not-found")
 		kubectlCtx(hubContext, "delete", "applications.argoproj.io", "--all", "-n", spokeName, "--ignore-not-found", "--wait=false")
+		kubectlCtx(hubContext, "delete", "applications.argoproj.io", "--all", "-n", localClusterName, "--ignore-not-found", "--wait=false")
 		kubectlCtx(hubContext, "delete", "appproject", "--all", "-n", spokeName, "--ignore-not-found", "--wait=false")
+		kubectlCtx(hubContext, "delete", "appproject", "--all", "-n", localClusterName, "--ignore-not-found", "--wait=false")
 	}
 
 	By("3. Deleting Policy and PlacementBinding (stops enforcement on managed cluster)")
@@ -778,11 +942,19 @@ func safeCleanup(opts gitOpsClusterOpts) {
 	kubectlCtx(hubContext, "delete", "policy.policy.open-cluster-management.io", policyName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "placementbinding.policy.open-cluster-management.io", bindingName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "application", "guestbook", "-n", localClusterName, "--ignore-not-found")
+	kubectlCtx(hubContext, "delete", "applications.argoproj.io", localClusterName+"-guestbook", "-n", localClusterName, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "appproject", "default", "-n", localClusterName, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	if opts.agentEnabled {
+		appsetName := opts.placementName + "-guestbook-appset"
+		kubectlCtx(hubContext, "delete", "applicationset", appsetName, "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "application", spokeName+"-guestbook", "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "applications.argoproj.io", localClusterName+"-guestbook", "-n", argoCDNamespace, "--ignore-not-found")
 		kubectlCtx(hubContext, "delete", "application", "guestbook", "-n", spokeName, "--ignore-not-found")
 		kubectlCtx(hubContext, "delete", "appproject", "--all", "-n", spokeName, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "configmap", "acm-placement", "-n", argoCDNamespace, "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "clusterrolebinding", "appset-placement-reader", "--ignore-not-found")
+		kubectlCtx(hubContext, "delete", "clusterrole", "appset-placement-reader", "--ignore-not-found")
 	}
 	kubectlCtx(spokeContext, "delete", "application", "guestbook", "-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(spokeContext, "delete", "appproject", "default", "-n", argoCDNamespace, "--ignore-not-found")

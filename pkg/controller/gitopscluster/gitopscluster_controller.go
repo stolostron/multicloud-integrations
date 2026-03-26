@@ -299,9 +299,9 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 
 	// Remove all invalid/orphan GitOps cluster secrets
 	if !r.cleanupOrphanSecrets(orphanGitOpsClusterSecretList) {
-		// If it failed to delete orphan GitOps managed cluster secrets, reconile again in 10 minutes.
+		// If it failed to delete orphan GitOps managed cluster secrets, reconcile again in 10 minutes.
 		if returnErr == nil {
-			return reconcile.Result{Requeue: true, RequeueAfter: time.Duration(10) * time.Minute}, err
+			return reconcile.Result{Requeue: true, RequeueAfter: time.Duration(10) * time.Minute}, nil
 		}
 	}
 
@@ -619,6 +619,8 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
 			return 3, err2
 		}
+
+		return 3, err
 	}
 
 	managedClusterNames := []string{}

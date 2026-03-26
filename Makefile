@@ -145,7 +145,7 @@ deploy-ocm:
 HUB_CLUSTER ?= hub
 SPOKE_CLUSTER ?= cluster1
 E2E_IMG ?= quay.io/stolostron/multicloud-integrations:latest
-ARGOCD_OPERATOR_VERSION ?= v0.17.0
+ARGOCD_OPERATOR_VERSION ?= latest
 ARGOCD_OPERATOR_IMAGE ?= quay.io/argoprojlabs/argocd-operator:$(ARGOCD_OPERATOR_VERSION)
 export ARGOCD_OPERATOR_IMAGE
 KIND ?= kind

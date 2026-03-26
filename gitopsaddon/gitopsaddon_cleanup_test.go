@@ -231,6 +231,218 @@ func TestIsPaused(t *testing.T) {
 	}
 }
 
+// TestIsPausedFailsClosed verifies that API errors are treated as "paused"
+// to prevent race conditions during cleanup.
+func TestIsPausedFailsClosed(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	// Create a scheme that does NOT include ConfigMap, so Get will fail
+	// with a "no kind is registered" error (not NotFound).
+	scheme := runtime.NewScheme()
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	paused := IsPaused(context.TODO(), testClient)
+	g.Expect(paused).To(gomega.BeTrue(), "IsPaused should return true on API errors (fail closed)")
+}
+
+// TestDeleteRemainingGitOpsCSVs verifies cleanup of leftover CSVs
+func TestDeleteRemainingGitOpsCSVs(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	csv1 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "ClusterServiceVersion",
+			"metadata": map[string]interface{}{
+				"name":      "openshift-gitops-operator.v1.14.0",
+				"namespace": "openshift-operators",
+			},
+		},
+	}
+	csv2 := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "ClusterServiceVersion",
+			"metadata": map[string]interface{}{
+				"name":      "openshift-gitops-operator.v1.15.0",
+				"namespace": "openshift-operators",
+			},
+		},
+	}
+	unrelatedCSV := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "ClusterServiceVersion",
+			"metadata": map[string]interface{}{
+				"name":      "other-operator.v1.0.0",
+				"namespace": "openshift-operators",
+			},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(csv1, csv2, unrelatedCSV).
+		Build()
+
+	err = deleteRemainingGitOpsCSVs(context.TODO(), testClient, "openshift-operators")
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// gitops CSVs should be deleted
+	remaining := &unstructured.Unstructured{}
+	remaining.SetAPIVersion("operators.coreos.com/v1alpha1")
+	remaining.SetKind("ClusterServiceVersion")
+
+	err = testClient.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator.v1.14.0", Namespace: "openshift-operators",
+	}, remaining)
+	g.Expect(err).To(gomega.HaveOccurred(), "gitops CSV v1.14 should be deleted")
+
+	err = testClient.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator.v1.15.0", Namespace: "openshift-operators",
+	}, remaining)
+	g.Expect(err).To(gomega.HaveOccurred(), "gitops CSV v1.15 should be deleted")
+
+	// Unrelated CSV should remain
+	err = testClient.Get(context.TODO(), types.NamespacedName{
+		Name: "other-operator.v1.0.0", Namespace: "openshift-operators",
+	}, remaining)
+	g.Expect(err).ToNot(gomega.HaveOccurred(), "unrelated CSV should not be deleted")
+}
+
+// TestPatchArgoCDCRDConversionWebhook tests the CRD conversion webhook patching
+func TestPatchArgoCDCRDConversionWebhook(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	t.Run("no_crd_exists_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		err := clientgoscheme.AddToScheme(scheme)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		testClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		err = patchArgoCDCRDConversionWebhook(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+
+	t.Run("crd_no_conversion_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		err := clientgoscheme.AddToScheme(scheme)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		crd := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "argocds.argoproj.io",
+				},
+				"spec": map[string]interface{}{
+					"group": "argoproj.io",
+				},
+			},
+		}
+
+		testClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(crd).
+			Build()
+
+		err = patchArgoCDCRDConversionWebhook(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+
+	t.Run("crd_strategy_none_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		err := clientgoscheme.AddToScheme(scheme)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		crd := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "argocds.argoproj.io",
+				},
+				"spec": map[string]interface{}{
+					"group": "argoproj.io",
+					"conversion": map[string]interface{}{
+						"strategy": "None",
+					},
+				},
+			},
+		}
+
+		testClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(crd).
+			Build()
+
+		err = patchArgoCDCRDConversionWebhook(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+
+	t.Run("crd_webhook_strategy_patched_to_none", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		err := clientgoscheme.AddToScheme(scheme)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		crd := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "argocds.argoproj.io",
+				},
+				"spec": map[string]interface{}{
+					"group": "argoproj.io",
+					"conversion": map[string]interface{}{
+						"strategy": "Webhook",
+						"webhook": map[string]interface{}{
+							"clientConfig": map[string]interface{}{
+								"service": map[string]interface{}{
+									"name":      "gitops-operator-webhook",
+									"namespace": "openshift-gitops-operator",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		testClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(crd).
+			Build()
+
+		err = patchArgoCDCRDConversionWebhook(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// Verify the CRD conversion strategy was changed to None
+		result := &unstructured.Unstructured{}
+		result.SetAPIVersion("apiextensions.k8s.io/v1")
+		result.SetKind("CustomResourceDefinition")
+		err = testClient.Get(context.TODO(), types.NamespacedName{Name: "argocds.argoproj.io"}, result)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		conversion, found, _ := unstructured.NestedMap(result.Object, "spec", "conversion")
+		g.Expect(found).To(gomega.BeTrue(), "spec.conversion should still exist")
+		g.Expect(conversion["strategy"]).To(gomega.Equal("None"), "conversion strategy should be None")
+		_, webhookExists, _ := unstructured.NestedMap(conversion, "webhook")
+		g.Expect(webhookExists).To(gomega.BeFalse(), "webhook config should be removed")
+	})
+}
+
 // TestClearStalePauseMarker tests the ClearStalePauseMarker function
 func TestClearStalePauseMarker(t *testing.T) {
 	g := gomega.NewWithT(t)

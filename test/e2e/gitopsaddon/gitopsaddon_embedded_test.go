@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Mirrors test-scenarios.sh Scenario 2: Kind cluster + local-cluster, no agent, no OLM
+// Mirrors test-scenarios.sh Scenario 1: Kind cluster + local-cluster, no agent, no OLM
 var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("embedded"), Ordered, func() {
 	SetDefaultEventuallyTimeout(5 * time.Minute)
 	SetDefaultEventuallyPollingInterval(5 * time.Second)

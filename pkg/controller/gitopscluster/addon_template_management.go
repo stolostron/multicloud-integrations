@@ -159,7 +159,6 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 	return r.Create(context.Background(), addonTemplate)
 }
 
-
 // buildAddonManifests builds the manifest list for the AddOnTemplate (argocd-agent without OLM)
 func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	if gitOpsNamespace == "" {
@@ -179,7 +178,6 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 
 	return manifests
 }
-
 
 // buildCleanupJobManifest creates the cleanup job manifest - consistent across all templates
 func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
@@ -359,7 +357,6 @@ func buildDeploymentManifest(addonImage, namespace string) workv1.Manifest {
 		},
 	})
 }
-
 
 // buildAddonEnvVars creates the environment variables for the gitops-addon container.
 // Each variable uses a template placeholder (e.g., {{GITOPS_OPERATOR_IMAGE}}) that gets

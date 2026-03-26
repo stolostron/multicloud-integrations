@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -238,16 +239,15 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 	return nil
 }
 
-// deleteGitOpsServiceCR deletes the GitOpsService CR if it exists (used in OLM mode)
+// deleteGitOpsServiceCR deletes the GitOpsService CR if it exists (used in OLM mode).
+// GitOpsService is cluster-scoped, so no namespace is set.
 func deleteGitOpsServiceCR(ctx context.Context, c client.Client) error {
 	klog.Info("Deleting GitOpsService CR (if exists)")
 
-	// GitOpsService is typically in the openshift-gitops namespace
 	gitOpsService := &unstructured.Unstructured{}
 	gitOpsService.SetAPIVersion("pipelines.openshift.io/v1alpha1")
 	gitOpsService.SetKind("GitopsService")
 	gitOpsService.SetName("cluster")
-	gitOpsService.SetNamespace(GitOpsNamespace)
 
 	err := c.Delete(ctx, gitOpsService)
 	if err != nil {
@@ -326,8 +326,93 @@ func deleteOLMResources(ctx context.Context, c client.Client) error {
 		}
 	}
 
+	// Step 4: Clean up any remaining openshift-gitops-operator CSVs that were not
+	// referenced by status.installedCSV (e.g. replacement CSVs from an OLM upgrade
+	// cycle that are stuck in Pending after the installed CSV was deleted).
+	for _, ns := range subscriptionNamespaces {
+		if err := deleteRemainingGitOpsCSVs(ctx, c, ns); err != nil {
+			klog.Warningf("Error cleaning remaining CSVs in %s: %v", ns, err)
+			errs = append(errs, fmt.Errorf("failed to clean remaining CSVs in %s: %w", ns, err))
+		}
+	}
+
+	// Step 5: Fix CRD conversion webhook. After deleting the operator, the ArgoCD CRD
+	// still references the operator's webhook service for v1alpha1<->v1beta1 conversion.
+	// When OLM reinstalls, its InstallPlan validates existing CRs via this webhook,
+	// which fails ("service not found"). Patch to None so the next install can proceed.
+	if err := patchArgoCDCRDConversionWebhook(ctx, c); err != nil {
+		klog.Warningf("Error patching ArgoCD CRD conversion webhook: %v", err)
+		errs = append(errs, fmt.Errorf("failed to patch ArgoCD CRD conversion webhook: %w", err))
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("OLM resource cleanup had %d error(s): %w", len(errs), errs[0])
+	}
+	return nil
+}
+
+// patchArgoCDCRDConversionWebhook patches the argocds.argoproj.io CRD to remove
+// the conversion webhook. After the operator is deleted, the CRD still references
+// the operator's webhook service. OLM's InstallPlan validation then fails because
+// it can't reach the webhook to convert existing CRs to the new schema.
+func patchArgoCDCRDConversionWebhook(ctx context.Context, c client.Client) error {
+	crd := &unstructured.Unstructured{}
+	crd.SetAPIVersion("apiextensions.k8s.io/v1")
+	crd.SetKind("CustomResourceDefinition")
+
+	err := c.Get(ctx, types.NamespacedName{Name: "argocds.argoproj.io"}, crd)
+	if err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get ArgoCD CRD: %w", err)
+	}
+
+	conversion, found, _ := unstructured.NestedMap(crd.Object, "spec", "conversion")
+	if !found {
+		return nil
+	}
+
+	strategy, _, _ := unstructured.NestedString(conversion, "strategy")
+	if strategy != "Webhook" {
+		return nil
+	}
+
+	klog.Info("Patching ArgoCD CRD conversion webhook from Webhook to None")
+	patch := client.RawPatch(types.JSONPatchType,
+		[]byte(`[{"op": "replace", "path": "/spec/conversion", "value": {"strategy": "None"}}]`))
+	if err := c.Patch(ctx, crd, patch); err != nil {
+		return fmt.Errorf("failed to patch ArgoCD CRD conversion: %w", err)
+	}
+	klog.Info("Successfully patched ArgoCD CRD conversion to None")
+	return nil
+}
+
+// deleteRemainingGitOpsCSVs deletes any ClusterServiceVersion whose name starts
+// with "openshift-gitops-operator." in the given namespace. This catches CSVs
+// that were created by OLM's upgrade mechanism (status "Replacing") and are not
+// referenced by the subscription's status.installedCSV field.
+func deleteRemainingGitOpsCSVs(ctx context.Context, c client.Client, namespace string) error {
+	csvList := &unstructured.UnstructuredList{}
+	csvList.SetAPIVersion("operators.coreos.com/v1alpha1")
+	csvList.SetKind("ClusterServiceVersionList")
+
+	if err := c.List(ctx, csvList, client.InNamespace(namespace)); err != nil {
+		if apierrors.IsNotFound(err) || isNoKindMatchError(err) {
+			return nil
+		}
+		return err
+	}
+
+	for i := range csvList.Items {
+		csv := &csvList.Items[i]
+		name := csv.GetName()
+		if len(name) > 0 && strings.HasPrefix(name, "openshift-gitops-operator.") {
+			klog.Infof("Deleting remaining gitops-operator CSV: %s/%s", namespace, name)
+			if err := c.Delete(ctx, csv); err != nil && !apierrors.IsNotFound(err) {
+				klog.Warningf("Failed to delete remaining CSV %s/%s: %v", namespace, name, err)
+			}
+		}
 	}
 	return nil
 }
@@ -800,8 +885,10 @@ func IsPaused(ctx context.Context, c client.Client) bool {
 		if apierrors.IsNotFound(err) {
 			return false
 		}
-		klog.Warningf("Error checking pause marker: %v", err)
-		return false
+		// Fail closed: treat API errors as paused to prevent race conditions
+		// where a transient error could unpause the agent during cleanup.
+		klog.Warningf("Error checking pause marker (treating as paused): %v", err)
+		return true
 	}
 
 	// Check if the pause marker indicates paused state
