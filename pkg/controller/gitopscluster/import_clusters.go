@@ -336,8 +336,9 @@ func (r *ReconcileGitOpsCluster) createClusterSecretWithFallback(
 		return secret, DataSourceBlankSecret, err
 	}
 
-	// Option 1: Try cluster proxy service if available
-	if clusterProxyInfo != nil && clusterProxyInfo.Available {
+	// Option 1: Try cluster proxy service if available and not using legacy mode
+	// Legacy mode uses direct cluster URLs instead of cluster proxy
+	if clusterProxyInfo != nil && clusterProxyInfo.Available && !legacyClusterSecret {
 		klog.Infof("Attempting Option 1: Cluster proxy service for managed cluster %s", managedClusterName)
 
 		secret, err := r.tryClusterProxyOption(argoNamespace, managedCluster, clusterProxyInfo, msaRef, legacyClusterSecret)
@@ -346,6 +347,8 @@ func (r *ReconcileGitOpsCluster) createClusterSecretWithFallback(
 			return secret, DataSourceClusterProxy, nil
 		}
 		klog.Infof("Cluster proxy option failed for %s: %v, trying next option", managedClusterName, err)
+	} else if legacyClusterSecret && clusterProxyInfo != nil && clusterProxyInfo.Available {
+		klog.Infof("Skipping cluster proxy for %s due to legacy cluster secret annotation, will use direct cluster URL", managedClusterName)
 	}
 
 	// Option 2: Try ManagedServiceAccount with managed cluster client configs
