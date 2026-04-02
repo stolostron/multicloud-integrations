@@ -30,6 +30,9 @@ CLEANXARGS = xargs ${XARGS_FLAGS}
 REGISTRY = quay.io/stolostron
 VERSION = latest
 IMAGE_NAME_AND_VERSION ?= $(REGISTRY)/multicloud-integrations:$(VERSION)
+
+# clusteradm CLI version - installs stable OCM components by default
+CLUSTERADM_VERSION ?= v1.1.1
 export GOPACKAGES   = $(shell go list ./... | grep -v /manager | grep -v /bindata  | grep -v /vendor | grep -v /internal | grep -v /build | grep -v /test | grep -v /e2e )
 
 TEST_TMP :=/tmp
@@ -136,7 +139,7 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
-CONTROLLER_TOOLS_VERSION ?= v0.16.1
+CONTROLLER_TOOLS_VERSION ?= v0.17.3
 
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 
@@ -147,7 +150,7 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 
 .PHONY: deploy-ocm
 deploy-ocm:
-	deploy/ocm/install.sh
+	CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) deploy/ocm/install.sh
 
 # E2E Test Configuration
 HUB_CLUSTER ?= hub
@@ -171,7 +174,7 @@ test-e2e-full:
 	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-full.log'
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-full.log' && echo "✓ E2E Full Test Complete - Logs: /tmp/e2e-full.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-full.log' && echo "✓ E2E Full Test Complete - Logs: /tmp/e2e-full.log"
 
 # test-e2e-cluster-secret-deletion: For CI - assumes clusters, images, and base e2e ran, tests cluster secret deletion protection
 .PHONY: test-e2e-cluster-secret-deletion
@@ -189,7 +192,7 @@ test-e2e-cluster-secret-deletion-full:
 	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-cluster-secret-deletion-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) e2e/run_e2e.sh 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log'
 	@bash -o pipefail -c 'e2e/cluster_secret_deletion_test.sh 2>&1 | tee -a /tmp/e2e-cluster-secret-deletion-full.log' && echo "✓ E2E Cluster Secret Deletion Full Test Complete - Logs: /tmp/e2e-cluster-secret-deletion-full.log"
 
 # test-e2e-gitopsaddon-full: For local - creates clusters, builds images, verifies GitOps addon with app sync
@@ -202,19 +205,19 @@ test-e2e-gitopsaddon-full:
 	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-gitopsaddon-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log'
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log' && echo "✓ E2E GitOps Addon Full Test Complete - Logs: /tmp/e2e-gitopsaddon-full.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-full.log' && echo "✓ E2E GitOps Addon Full Test Complete - Logs: /tmp/e2e-gitopsaddon-full.log"
 
 # test-e2e-gitopsaddon: For CI - assumes clusters and images exist, verifies GitOps addon (no app sync)
 .PHONY: test-e2e-gitopsaddon
 test-e2e-gitopsaddon: manifests
 	@echo "===== E2E GitOps Addon Test (CI mode) ====="
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon.sh 2>&1 | tee /tmp/e2e-gitopsaddon.log' && echo "✓ E2E GitOps Addon Test Complete - Logs: /tmp/e2e-gitopsaddon.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon.sh 2>&1 | tee /tmp/e2e-gitopsaddon.log' && echo "✓ E2E GitOps Addon Test Complete - Logs: /tmp/e2e-gitopsaddon.log"
 
 # test-e2e-gitopsaddon-cleanup: For CI - assumes clusters and images exist, verifies GitOps addon cleanup
 .PHONY: test-e2e-gitopsaddon-cleanup
 test-e2e-gitopsaddon-cleanup: manifests
 	@echo "===== E2E GitOps Addon Cleanup Test (CI mode) ====="
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-cleanup.sh 2>&1 | tee /tmp/e2e-gitopsaddon-cleanup.log' && echo "✓ E2E GitOps Addon Cleanup Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-cleanup.sh 2>&1 | tee /tmp/e2e-gitopsaddon-cleanup.log' && echo "✓ E2E GitOps Addon Cleanup Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup.log"
 
 # test-e2e-gitopsaddon-cleanup-full: For local - creates clusters, builds images, verifies GitOps addon cleanup
 .PHONY: test-e2e-gitopsaddon-cleanup-full
@@ -226,13 +229,13 @@ test-e2e-gitopsaddon-cleanup-full:
 	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-gitopsaddon-cleanup-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log'
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-gitopsaddon-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log' && echo "✓ E2E GitOps Addon Cleanup Full Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup-full.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-gitopsaddon-cleanup-full.sh 2>&1 | tee -a /tmp/e2e-gitopsaddon-cleanup-full.log' && echo "✓ E2E GitOps Addon Cleanup Full Test Complete - Logs: /tmp/e2e-gitopsaddon-cleanup-full.log"
 
 # test-e2e-olm-subscription: For CI - assumes clusters and images exist, verifies OLM subscription mode
 .PHONY: test-e2e-olm-subscription
 test-e2e-olm-subscription: manifests
 	@echo "===== E2E OLM Subscription Test (CI mode) ====="
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee /tmp/e2e-olm-subscription.log' && echo "✓ E2E OLM Subscription Test Complete - Logs: /tmp/e2e-olm-subscription.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee /tmp/e2e-olm-subscription.log' && echo "✓ E2E OLM Subscription Test Complete - Logs: /tmp/e2e-olm-subscription.log"
 
 # test-e2e-olm-subscription-full: For local - creates clusters, builds images, verifies OLM subscription mode
 .PHONY: test-e2e-olm-subscription-full
@@ -244,7 +247,7 @@ test-e2e-olm-subscription-full:
 	@bash -o pipefail -c '$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG) 2>&1 | tee /tmp/e2e-olm-subscription-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log'
 	@bash -o pipefail -c '$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER) 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log'
-	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log' && echo "✓ E2E OLM Subscription Full Test Complete - Logs: /tmp/e2e-olm-subscription-full.log"
+	@bash -o pipefail -c 'E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ./test/e2e/scripts/e2e-olm-subscription.sh 2>&1 | tee -a /tmp/e2e-olm-subscription-full.log' && echo "✓ E2E OLM Subscription Full Test Complete - Logs: /tmp/e2e-olm-subscription-full.log"
 
 .PHONY: clean-full
 clean-full:

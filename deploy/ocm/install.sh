@@ -7,6 +7,8 @@ set -o pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
 
+# CLUSTERADM_VERSION should be passed from Makefile, fallback to v1.1.1 stable release
+CLUSTERADM_CLI_VERSION="${CLUSTERADM_VERSION:-v1.1.1}"
 
 BUILD_DIR="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 DEPLOY_DIR="$(dirname "$BUILD_DIR")"
@@ -17,17 +19,19 @@ CLUSTERADM="clusteradm"
 
 export PATH=$PATH:${WORK_DIR}/bin
 
-echo "############  Install clusteradm"
-go install open-cluster-management.io/clusteradm/cmd/clusteradm@main
+echo "############  Install clusteradm ${CLUSTERADM_CLI_VERSION}"
+go install open-cluster-management.io/clusteradm/cmd/clusteradm@${CLUSTERADM_CLI_VERSION}
+
+echo "############  clusteradm will install stable OCM components by default"
 
 echo "############ Init hub"
 $KUBECTL config use-context kind-hub
-${CLUSTERADM} init --wait --bundle-version=latest
+${CLUSTERADM} init --wait
 joincmd=$(${CLUSTERADM} get token | grep clusteradm)
 
 echo "############ Init agent as cluster1"
 $KUBECTL config use-context kind-cluster1
-$(echo ${joincmd} --force-internal-endpoint-lookup --wait --bundle-version=latest | sed "s/<cluster_name>/cluster1/g")
+$(echo ${joincmd} --force-internal-endpoint-lookup --wait | sed "s/<cluster_name>/cluster1/g")
 
 echo "############ Accept join of cluster1"
 $KUBECTL config use-context kind-hub
