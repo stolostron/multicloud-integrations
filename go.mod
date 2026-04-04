@@ -1,8 +1,6 @@
 module open-cluster-management.io/multicloud-integrations
 
-go 1.24.4
-
-toolchain go1.24.9
+go 1.25.0
 
 require (
 	github.com/ghodss/yaml v1.0.1-0.20220118164431-d8423dcdf344
@@ -26,7 +24,7 @@ require (
 )
 
 require (
-	cloud.google.com/go/compute/metadata v0.7.0 // indirect
+	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
@@ -61,11 +59,11 @@ require (
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.42.0 // indirect
-	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/tools v0.36.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
-	google.golang.org/grpc v1.72.1 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/tools v0.42.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
+	google.golang.org/grpc v1.80.0 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	k8s.io/apiserver v0.34.1 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
@@ -103,14 +101,14 @@ require (
 	github.com/stolostron/search-v2-api v0.0.0-20221004171925-9c1d91614943
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/term v0.35.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/oauth2 v0.34.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/term v0.41.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1
