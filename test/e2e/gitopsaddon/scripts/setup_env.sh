@@ -50,6 +50,9 @@ clusteradm accept --clusters ${SPOKE_CLUSTER} --wait
 echo ">> Waiting for ManagedCluster ${SPOKE_CLUSTER} to be available"
 ${KUBECTL} --context ${HUB_CTX} wait managedcluster ${SPOKE_CLUSTER} --for=condition=ManagedClusterConditionAvailable --timeout=120s
 
+echo ">> Labeling ${SPOKE_CLUSTER} with name=${SPOKE_CLUSTER}"
+${KUBECTL} --context ${HUB_CTX} label managedcluster ${SPOKE_CLUSTER} name=${SPOKE_CLUSTER} --overwrite
+
 # ------- Step 1.5: Register hub as local-cluster -------
 echo "===== Step 1.5: Registering hub as local-cluster ====="
 ${KUBECTL} config use-context ${HUB_CTX}
@@ -65,7 +68,7 @@ else
 fi
 
 echo ">> Labeling local-cluster"
-${KUBECTL} --context ${HUB_CTX} label managedcluster local-cluster local-cluster=true --overwrite
+${KUBECTL} --context ${HUB_CTX} label managedcluster local-cluster local-cluster=true name=local-cluster --overwrite
 
 echo ">> Waiting for local-cluster to be available"
 ${KUBECTL} --context ${HUB_CTX} wait managedcluster local-cluster --for=condition=ManagedClusterConditionAvailable --timeout=120s
@@ -178,30 +181,10 @@ else
   echo "WARN: argocd-export-crd.yaml not found at ${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml, skipping"
 fi
 
-# Install a minimal Route CRD on both clusters so the ArgoCD operator doesn't fail on route reconciliation.
-# Hub needs it for the local-cluster ArgoCD that the policy deploys there.
-ROUTE_CRD='apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: routes.route.openshift.io
-spec:
-  group: route.openshift.io
-  names:
-    kind: Route
-    listKind: RouteList
-    plural: routes
-    singular: route
-  scope: Namespaced
-  versions:
-    - name: v1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          x-kubernetes-preserve-unknown-fields: true'
-echo "${ROUTE_CRD}" | ${KUBECTL} --context ${SPOKE_CTX} apply --server-side --force-conflicts -f -
-echo "${ROUTE_CRD}" | ${KUBECTL} --context ${HUB_CTX} apply --server-side --force-conflicts -f -
+# The Route CRD is NOT installed here. The upstream ArgoCD operator gracefully handles the
+# absence of Route API (logs "route.openshift.io/v1 API is not registered" and skips Route
+# creation). On managed clusters, the gitopsaddon agent installs the Route CRD stub
+# (gitopsaddon/routes-openshift-crd/) as part of the embedded chart deployment.
 
 # ------- Step 4: Deploy controller -------
 echo "===== Step 4: Deploying multicloud-integrations controller ====="

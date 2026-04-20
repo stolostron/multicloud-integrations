@@ -33,6 +33,8 @@ spec:
           value: ""
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: "*"
+        - name: CLUSTER_SCOPED_ARGO_ROLLOUTS_NAMESPACES
+          value: "openshift-gitops"
         - name: DISABLE_DEFAULT_ARGOCD_INSTANCE
           value: "true"
         - name: OPERATOR_NAME

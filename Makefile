@@ -217,6 +217,10 @@ test-e2e-gitopsaddon-embedded: manifests
 test-e2e-gitopsaddon-embedded-agent: manifests
 	$(call RUN_GITOPSADDON_E2E,embedded-agent)
 
+.PHONY: test-e2e-gitopsaddon-olm-override
+test-e2e-gitopsaddon-olm-override: manifests
+	$(call RUN_GITOPSADDON_E2E,olm-override)
+
 # --- Scenarios (Local) ---
 
 .PHONY: test-local-e2e-gitopsaddon-embedded
@@ -229,10 +233,18 @@ test-local-e2e-gitopsaddon-embedded-agent:
 	$(SETUP_KIND_CLUSTERS)
 	$(MAKE) test-e2e-gitopsaddon-embedded-agent
 
+.PHONY: test-local-e2e-gitopsaddon-olm-override
+test-local-e2e-gitopsaddon-olm-override:
+	$(SETUP_KIND_CLUSTERS)
+	$(MAKE) test-e2e-gitopsaddon-olm-override
+
 # --- Aggregate targets ---
 
 .PHONY: test-e2e-gitopsaddon-all
-test-e2e-gitopsaddon-all: test-e2e-gitopsaddon-embedded test-e2e-gitopsaddon-embedded-agent
+test-e2e-gitopsaddon-all:
+	$(MAKE) test-e2e-gitopsaddon-embedded
+	$(MAKE) test-e2e-gitopsaddon-embedded-agent
+	$(MAKE) test-e2e-gitopsaddon-olm-override
 
 .PHONY: clean-e2e
 clean-e2e:

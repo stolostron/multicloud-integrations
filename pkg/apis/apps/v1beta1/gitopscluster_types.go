@@ -93,6 +93,7 @@ const (
 	ReasonSuccess     = "Success"
 	ReasonDisabled    = "Disabled"
 	ReasonNotRequired = "NotRequired"
+	ReasonSkipped     = "Skipped"
 
 	// Progress reasons
 	ReasonReconciling = "Reconciling"
@@ -178,25 +179,27 @@ type GitOpsAddonSpec struct {
 	// +kubebuilder:default=false
 	OverrideExistingConfigs *bool `json:"overrideExistingConfigs,omitempty"`
 
-	// OLMSubscription defines optional custom OLM Subscription configuration for OCP managed clusters.
-	// The addon agent auto-detects OCP clusters and always uses OLM for operator installation.
-	// When olmSubscription.enabled is true, the specified fields (channel, source, etc.) are passed
-	// to the addon agent to override the default subscription values. Non-OCP clusters ignore this.
-	// Note: the local-cluster (hub) path skips operator installation and therefore ignores olmSubscription.
+	// OLMSubscription defines OLM Subscription configuration for managed clusters.
+	// When olmSubscription.enabled is true, the addon agent is forced to use OLM subscription
+	// mode for operator installation regardless of OCP auto-detection. This acts as an override:
+	// even if OCP detection fails or the cluster is non-OCP, the agent will attempt OLM installation.
+	// The specified fields (channel, source, etc.) override the default subscription values.
+	// Note: the local-cluster (hub) path always skips operator installation and ignores olmSubscription.
 	// Requires gitopsAddon.enabled to be true.
 	// +optional
 	OLMSubscription *OLMSubscriptionSpec `json:"olmSubscription,omitempty"`
 }
 
-// OLMSubscriptionSpec defines optional custom OLM Subscription configuration.
-// The addon agent auto-detects OCP clusters and always uses OLM; this spec only
-// controls which subscription parameters are used (channel, source, etc.).
-// Non-OCP clusters always use embedded manifests regardless of this setting.
+// OLMSubscriptionSpec defines OLM Subscription configuration for managed clusters.
+// When enabled, the addon agent is forced to use OLM subscription mode for operator
+// installation, bypassing OCP auto-detection. This allows OLM mode to be used even
+// when cluster detection fails. The subscription parameters control the OLM channel,
+// source, approval strategy, etc.
 type OLMSubscriptionSpec struct {
-	// Enabled indicates whether custom OLM subscription configuration should be passed
-	// to OCP managed clusters. When true, the specified fields override the default
-	// subscription values. When false, nil, or absent, auto-detect uses hardcoded defaults.
-	// Non-OCP clusters are unaffected regardless of this setting.
+	// Enabled forces the addon agent to use OLM subscription mode for operator installation.
+	// When true, the agent bypasses OCP auto-detection and always attempts OLM installation,
+	// and the specified fields override the default subscription values.
+	// When false, nil, or absent, the agent falls back to OCP auto-detection.
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
 

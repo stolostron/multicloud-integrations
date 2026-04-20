@@ -3,7 +3,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.14.0
-  creationTimestamp: null
   name: clusteranalysistemplates.argoproj.io
 spec:
   group: argoproj.io
@@ -14,6 +13,7 @@ spec:
     shortNames:
     - cat
     singular: clusteranalysistemplate
+  preserveUnknownFields: false
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -3188,9 +3188,3 @@ spec:
     served: true
     storage: true
     subresources: {}
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: null
-  storedVersions: null

@@ -19,6 +19,7 @@ import (
 	"os"
 
 	routev1 "github.com/openshift/api/route/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -76,7 +77,11 @@ func RunManager() {
 			opts.ByObject = map[client.Object]cache.ByObject{
 				&v1.Secret{}: {
 					Label: labels.SelectorFromSet(labels.Set{"apps.open-cluster-management.io/cluster-name,argocd.argoproj.io/secret-type": "cluster"}),
-				}}
+				},
+				&appsv1.Deployment{}: {
+					Label: labels.SelectorFromSet(labels.Set{"app.kubernetes.io/component": "principal"}),
+				},
+			}
 			return cache.New(config, opts)
 		},
 		LeaseDuration: &options.LeaderElectionLeaseDuration,
