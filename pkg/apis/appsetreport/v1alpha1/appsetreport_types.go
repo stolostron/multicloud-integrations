@@ -25,6 +25,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope="Namespaced"
 // +kubebuilder:resource:shortName=appsetreport;appsetreports
+// +kubebuilder:deprecatedversion:warning="apps.open-cluster-management.io/v1alpha1 MulticlusterApplicationSetReport is deprecated and will be removed in a future release."
 type MulticlusterApplicationSetReport struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
