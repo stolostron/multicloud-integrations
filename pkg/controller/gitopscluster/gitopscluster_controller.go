@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
@@ -233,6 +234,22 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 			if err != nil {
 				return err
 			}
+		}
+
+		// Watch principal Deployment image changes for agent version drift detection.
+		// When the OpenShift GitOps Operator upgrades the principal, this watch
+		// triggers reconciliation so HealAgentVersionDrift can patch the Policy.
+		deployMapper := &principalDeploymentMapper{mgr.GetClient()}
+		err = c.Watch(
+			source.Kind(
+				mgr.GetCache(),
+				&appsv1.Deployment{},
+				handler.TypedEnqueueRequestsFromMapFunc[*appsv1.Deployment](deployMapper.Map),
+				PrincipalDeploymentPredicateFunc,
+			),
+		)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -911,37 +928,62 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 
 		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework
+		policySkipped := false
 		err = r.CreateArgoCDPolicy(instance)
 		if err != nil {
-			klog.Errorf("failed to create ArgoCD Policy for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
-			r.updateGitOpsClusterConditions(instance, "failed",
-				fmt.Sprintf("Failed to create ArgoCD Policy: %v", err),
+			if errors.Is(err, ErrArgoCDPolicySkipped) {
+				policySkipped = true
+				klog.Infof("ArgoCD Policy creation skipped for GitOpsCluster %s/%s (skip-argocd-policy annotation)", instance.Namespace, instance.Name)
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSkipped,
+							Message: "ArgoCD Policy creation skipped (skip-argocd-policy annotation set)",
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD Policy skipped: %s", instance.Namespace+"/"+instance.Name, err2)
+				}
+			} else {
+				klog.Errorf("failed to create ArgoCD Policy for GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+				r.updateGitOpsClusterConditions(instance, "failed",
+					fmt.Sprintf("Failed to create ArgoCD Policy: %v", err),
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonArgoCDPolicyCreationFailed,
+							Message: fmt.Sprintf("Failed to create the ArgoCD Policy for managing ArgoCD CR on managed clusters: %v", err),
+						},
+					})
+				err2 := r.Client.Status().Update(context.TODO(), instance)
+				if err2 != nil {
+					klog.Errorf("failed to update GitOpsCluster %s status after ArgoCD Policy failure: %s", instance.Namespace+"/"+instance.Name, err2)
+					return 3, err2
+				}
+				return 3, err
+			}
+		} else {
+			r.updateGitOpsClusterConditions(instance, "", "",
 				map[string]ConditionUpdate{
 					gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonArgoCDPolicyCreationFailed,
-						Message: fmt.Sprintf("Failed to create the ArgoCD Policy for managing ArgoCD CR on managed clusters: %v", err),
+						Status:  metav1.ConditionTrue,
+						Reason:  gitopsclusterV1beta1.ReasonSuccess,
+						Message: "ArgoCD Policy created/updated successfully",
 					},
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status after ArgoCD Policy failure: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
+				klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD Policy success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
-			return 3, err
 		}
 
-		r.updateGitOpsClusterConditions(instance, "", "",
-			map[string]ConditionUpdate{
-				gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
-					Status:  metav1.ConditionTrue,
-					Reason:  gitopsclusterV1beta1.ReasonSuccess,
-					Message: "ArgoCD Policy created/updated successfully",
-				},
-			})
-		err2 := r.Client.Status().Update(context.TODO(), instance)
-		if err2 != nil {
-			klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD Policy success: %s", instance.Namespace+"/"+instance.Name, err2)
+		if argoCDAgentEnabled && !policySkipped {
+			if healErr := r.HealAgentVersionDrift(instance); healErr != nil {
+				klog.Warningf("agent version drift heal failed for %s/%s: %v",
+					instance.Namespace, instance.Name, healErr)
+			}
 		}
 
 		// Track addon creation results

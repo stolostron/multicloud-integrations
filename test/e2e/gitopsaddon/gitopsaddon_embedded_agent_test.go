@@ -64,7 +64,16 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 				"ClustersRegistered",
 				"AddOnDeploymentConfigsReady",
 				"ManagedClusterAddOnsReady",
+				"ArgoCDPolicyReady",
 			}, 3*time.Minute)
+		})
+
+		It("should propagate ARGOCD_AGENT_ENABLED=true to AddOnDeploymentConfig", func() {
+			verifyAddOnDeploymentConfigEnvVar(spokeName, "ARGOCD_AGENT_ENABLED", "true", 3*time.Minute)
+		})
+
+		It("should propagate OLM_SUBSCRIPTION_ENABLED=false to AddOnDeploymentConfig", func() {
+			verifyAddOnDeploymentConfigEnvVar(spokeName, "OLM_SUBSCRIPTION_ENABLED", "false", 3*time.Minute)
 		})
 	})
 
@@ -80,14 +89,12 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 		})
 	})
 
-	// Local-cluster gets a ManagedClusterAddOn and ArgoCD CR in the local-cluster
-	// namespace, and those are verified below. However, the local-cluster agent
-	// guestbook test is skipped because the Kind e2e hub uses the upstream
-	// argocd-operator (quay.io/argoprojlabs/argocd-operator) which does NOT
-	// support the argoCDAgent spec — it can't create agent pods. In a real ACM
-	// environment, the hub runs the Red Hat OpenShift GitOps Operator which
-	// includes agent support, and test-scenarios.sh fully tests local-cluster
-	// agent guestbook against real clusters.
+	Context("Agent Version Drift Auto-Heal", func() {
+		It("should patch ArgoCD Policy with principal image for agent drift heal", func() {
+			verifyAgentVersionDriftHeal(gitopsClusterName, argoCDNamespace, 5*time.Minute)
+		})
+	})
+
 	Context("Local-Cluster Verification", func() {
 		It("should create ManagedClusterAddOn for local-cluster", func() {
 			verifyLocalClusterAddon(5 * time.Minute)
@@ -101,12 +108,12 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 			verifyNoDuplicateArgoCDOnHub()
 		})
 
-		PIt("should deploy and sync guestbook on local-cluster via agent (skipped: hub operator lacks agent support in Kind e2e)", func() {
+		It("should deploy and sync guestbook on local-cluster via ApplicationSet agent pipeline", func() {
 			verifyLocalClusterGuestbook(true, 10*time.Minute)
 		})
 
-		PIt("should have correct controller namespace for local-cluster app (skipped: hub operator lacks agent support in Kind e2e)", func() {
-			verifyLocalClusterControllerNamespace()
+		It("should have correct controller namespace for local-cluster app", func() {
+			verifyLocalClusterControllerNamespace(true)
 		})
 
 		It("should have no cross-namespace conflicts on local-cluster", func() {

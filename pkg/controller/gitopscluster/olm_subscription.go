@@ -28,12 +28,12 @@ const (
 	DefaultOLMInstallPlanApproval         = "Automatic"
 )
 
-// IsOLMSubscriptionEnabled checks if custom OLM subscription overrides are requested.
+// IsOLMSubscriptionEnabled checks if OLM subscription mode is explicitly requested.
 // Requires both gitopsAddon.enabled and olmSubscription.enabled to be true.
-// Note: OLM_SUBSCRIPTION_* env vars are always populated in the AddOnDeploymentConfig
-// (with defaults) so that AddOnTemplate placeholders can be resolved. This function
-// only controls whether OLM_SUBSCRIPTION_ENABLED is set to "true" (custom overrides active)
-// vs "false" (auto-detect mode with defaults).
+// When this returns true, OLM_SUBSCRIPTION_ENABLED=true is set on the AddOnDeploymentConfig,
+// which forces the addon agent to use OLM subscription mode regardless of OCP auto-detection.
+// OLM_SUBSCRIPTION_* env vars are always populated (with defaults) so that AddOnTemplate
+// placeholders can be resolved; this function controls whether OLM mode is forced.
 func IsOLMSubscriptionEnabled(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) bool {
 	if gitOpsCluster.Spec.GitOpsAddon == nil {
 		return false

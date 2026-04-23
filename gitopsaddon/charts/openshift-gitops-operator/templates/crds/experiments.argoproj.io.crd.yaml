@@ -3,7 +3,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.14.0
-  creationTimestamp: null
   name: experiments.argoproj.io
 spec:
   group: argoproj.io
@@ -14,6 +13,7 @@ spec:
     shortNames:
     - exp
     singular: experiment
+  preserveUnknownFields: false
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -2856,9 +2856,3 @@ spec:
     served: true
     storage: true
     subresources: {}
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: null
-  storedVersions: null

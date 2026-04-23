@@ -28,6 +28,10 @@ import (
 // ErrPolicyFrameworkNotAvailable is returned when the governance-policy-framework is not installed.
 var ErrPolicyFrameworkNotAvailable = fmt.Errorf("governance-policy-framework is not installed: Policy CRD not found")
 
+// ErrArgoCDPolicySkipped is returned when the skip-argocd-policy annotation is set,
+// allowing callers to distinguish intentional skips from real errors.
+var ErrArgoCDPolicySkipped = fmt.Errorf("ArgoCD Policy creation skipped: skip-argocd-policy annotation is set")
+
 // CreateArgoCDPolicy creates a Policy wrapping the ArgoCD CR for managed clusters.
 // The Policy uses ConfigurationPolicy to enforce the ArgoCD CR on managed clusters selected by the Placement.
 // All resources (Policy, PlacementBinding, ManagedClusterSetBinding) are created in the same namespace
@@ -49,6 +53,13 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDPolicy(instance *gitopsclusterV1bet
 	if instance.Spec.PlacementRef == nil {
 		klog.Info("PlacementRef is nil, skipping ArgoCD Policy creation")
 		return nil
+	}
+
+	// Allow users to prevent policy recreation after intentional deletion
+	if instance.GetAnnotations()[skipArgoCDPolicyAnnotation] == "true" {
+		klog.Infof("skip-argocd-policy annotation set, skipping ArgoCD Policy creation for %s/%s",
+			instance.Namespace, instance.Name)
+		return ErrArgoCDPolicySkipped
 	}
 
 	// Check if Policy CRD exists (governance-policy-framework installed)

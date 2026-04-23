@@ -457,9 +457,10 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 		}
 
 		// Always populate OLM subscription variables so AddOnTemplate {{…}}
-		// placeholders can be resolved. Use spec overrides only when
-		// olmSubscription.enabled is true; otherwise use canonical defaults
-		// so the agent reverts to default behavior.
+		// placeholders can be resolved. When olmSubscription.enabled is true,
+		// OLM_SUBSCRIPTION_ENABLED=true forces the agent to use OLM mode
+		// (bypassing OCP auto-detection); otherwise defaults are used and the
+		// agent falls back to auto-detection.
 		if IsOLMSubscriptionEnabled(gitOpsCluster) {
 			managedVariables["OLM_SUBSCRIPTION_ENABLED"] = "true"
 			name, ns, channel, source, sourceNs, approval := GetOLMSubscriptionValues(

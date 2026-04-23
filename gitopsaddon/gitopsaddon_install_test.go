@@ -1289,3 +1289,53 @@ func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 	g.Expect(newSub.GetLabels()["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
 }
+
+func TestInstallOrUpdateOpenshiftGitopsOLMOverride(t *testing.T) {
+	// Verify that OLM_SUBSCRIPTION_ENABLED=true forces OLM mode on a non-OCP cluster.
+	t.Run("OLM override forces OLM path on non-OCP cluster", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+
+		scheme := runtime.NewScheme()
+		reconciler := &GitopsAddonReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}
+
+		t.Setenv("OLM_SUBSCRIPTION_ENABLED", "true")
+
+		err := reconciler.installOrUpdateOpenshiftGitops()
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("OLM subscription"))
+	})
+
+	t.Run("OLM override case-insensitive", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+
+		scheme := runtime.NewScheme()
+		reconciler := &GitopsAddonReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}
+
+		t.Setenv("OLM_SUBSCRIPTION_ENABLED", "True")
+
+		err := reconciler.installOrUpdateOpenshiftGitops()
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("OLM subscription"))
+	})
+
+	t.Run("OLM override disabled falls through to auto-detect", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+
+		scheme := runtime.NewScheme()
+		reconciler := &GitopsAddonReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			Config: getTestEnv().Config,
+		}
+
+		t.Setenv("OLM_SUBSCRIPTION_ENABLED", "false")
+
+		err := reconciler.installOrUpdateOpenshiftGitops()
+		// Non-OCP, non-hub → embedded path; error won't mention OLM subscription
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).ToNot(gomega.ContainSubstring("OLM subscription"))
+	})
+}

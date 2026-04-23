@@ -36,10 +36,12 @@ import (
 )
 
 // installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process.
-// The addon agent detects the cluster type at runtime:
-//   - Hub cluster: skip operator installation (operator already exists from OLM)
-//   - OCP cluster: create OLM subscription for openshift-gitops-operator
-//   - Non-OCP cluster (Kind, EKS): deploy embedded operator manifests
+// The addon agent selects the installation method using the following priority:
+//  1. Hub cluster: skip operator installation (operator already exists from OLM)
+//  2. OLM_SUBSCRIPTION_ENABLED=true (set via GitOpsCluster olmSubscription.enabled):
+//     force OLM subscription mode regardless of cluster type
+//  3. OCP auto-detect: create OLM subscription for openshift-gitops-operator
+//  4. Fallback: deploy embedded operator manifests (Kind, EKS, etc.)
 //
 // ArgoCD CR is created by Policy (argocd_policy.go on the hub), not by this addon.
 func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
@@ -49,10 +51,6 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	isHub, err := r.isHubCluster(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to detect hub cluster: %w", err)
-	}
-	isOCP, err := r.isOCPCluster(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to detect OCP cluster: %w", err)
 	}
 
 	if isHub {
@@ -67,6 +65,20 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 			}
 		}
 		return nil
+	}
+
+	// OLM override: when olmSubscription.enabled=true in GitOpsCluster spec, the hub
+	// sets OLM_SUBSCRIPTION_ENABLED=true on the agent. This forces OLM subscription
+	// mode regardless of OCP auto-detection, allowing operators to explicitly choose
+	// OLM even if the cluster detection fails or the cluster is non-OCP.
+	if strings.EqualFold(os.Getenv("OLM_SUBSCRIPTION_ENABLED"), "true") {
+		klog.Info("OLM subscription mode forced by GitOpsCluster spec (OLM_SUBSCRIPTION_ENABLED=true)")
+		return r.installViaOLMSubscription(ctx)
+	}
+
+	isOCP, err := r.isOCPCluster(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to detect OCP cluster: %w", err)
 	}
 
 	if isOCP {

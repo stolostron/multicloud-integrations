@@ -56,6 +56,7 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 				"ClustersRegistered",
 				"AddOnDeploymentConfigsReady",
 				"ManagedClusterAddOnsReady",
+				"ArgoCDPolicyReady",
 			}, 3*time.Minute)
 		})
 	})
@@ -69,6 +70,22 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 	Context("Spoke Environment Health", func() {
 		It("should have no cross-namespace application controller conflicts", func() {
 			verifyEnvironmentHealth(spokeContext)
+		})
+	})
+
+	Context("Skip ArgoCD Policy Annotation", func() {
+		It("should have ArgoCD Policy on hub before annotation", func() {
+			policyName := gitopsClusterName + "-argocd-policy"
+			waitForResourceExists(hubContext, "policy.policy.open-cluster-management.io",
+				policyName, argoCDNamespace, 2*time.Minute)
+		})
+
+		It("should not recreate Policy after annotation + deletion", func() {
+			verifySkipArgoCDPolicyAnnotation(gitopsClusterName, argoCDNamespace, 3*time.Minute)
+		})
+
+		It("should recreate Policy after removing annotation", func() {
+			verifyPolicyRecreatedAfterAnnotationRemoval(gitopsClusterName, argoCDNamespace, 3*time.Minute)
 		})
 	})
 
@@ -90,7 +107,7 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 		})
 
 		It("should have correct controller namespace for local-cluster app", func() {
-			verifyLocalClusterControllerNamespace()
+			verifyLocalClusterControllerNamespace(false)
 		})
 
 		It("should have no cross-namespace conflicts on local-cluster", func() {

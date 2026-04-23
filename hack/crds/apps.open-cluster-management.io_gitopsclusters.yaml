@@ -107,21 +107,24 @@ spec:
                     type: string
                   olmSubscription:
                     description: |-
-                      OLMSubscription defines the configuration for deploying the full OLM-managed
-                      OpenShift GitOps operator instead of the lightweight helm-based deployment.
-                      This is only supported on OpenShift ManagedClusters with OLM installed.
-                      When enabled, this takes precedence over the helm-based deployment.
+                      OLMSubscription defines OLM Subscription configuration for managed clusters.
+                      When olmSubscription.enabled is true, the addon agent is forced to use OLM subscription
+                      mode for operator installation regardless of OCP auto-detection. This acts as an override:
+                      even if OCP detection fails or the cluster is non-OCP, the agent will attempt OLM installation.
+                      The specified fields (channel, source, etc.) override the default subscription values.
+                      Note: the local-cluster (hub) path always skips operator installation and ignores olmSubscription.
                       Requires gitopsAddon.enabled to be true.
                     properties:
                       channel:
-                        description: Channel is the OLM channel. Default is "stable".
+                        description: Channel is the OLM channel. Default is "latest".
                         type: string
                       enabled:
                         default: false
                         description: |-
-                          Enabled indicates whether to deploy via OLM Subscription. Default is false.
-                          When enabled, the full OLM-managed OpenShift GitOps operator is deployed
-                          instead of the lightweight helm-based operator.
+                          Enabled forces the addon agent to use OLM subscription mode for operator installation.
+                          When true, the agent bypasses OCP auto-detection and always attempts OLM installation,
+                          and the specified fields override the default subscription values.
+                          When false, nil, or absent, the agent falls back to OCP auto-detection.
                         type: boolean
                       installPlanApproval:
                         description: |-
