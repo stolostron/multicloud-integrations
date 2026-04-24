@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -2705,6 +2706,72 @@ func TestCleanupOrphanSecretsOnlyWhenManagedClusterDeleted(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestTruncateLabelValue(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "short value unchanged",
+			input:    "example.com",
+			expected: "example.com",
+		},
+		{
+			name:     "exactly 63 chars ending with alphanumeric",
+			input:    "api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud1",
+			expected: "api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud1",
+		},
+		{
+			// Regression test: hostname longer than 63 chars whose 63-char prefix ends with '.'
+			// e.g. api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud.zlocal
+			// truncated to 63 chars becomes "api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud."
+			name:     "truncation produces trailing dot",
+			input:    "api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud.zlocal",
+			expected: "api.observability.stage.mastercard-uscentral-tst-az1.mks.cloud",
+		},
+		{
+			name:     "truncation produces trailing dash",
+			input:    strings.Repeat("a", 62) + "-extra",
+			expected: strings.Repeat("a", 62),
+		},
+		{
+			name:     "truncation produces trailing underscore",
+			input:    strings.Repeat("a", 62) + "_extra",
+			expected: strings.Repeat("a", 62),
+		},
+		{
+			name:     "truncation produces trailing other non-alphanumeric character",
+			input:    strings.Repeat("a", 62) + "@extra",
+			expected: strings.Repeat("a", 62),
+		},
+		{
+			name:     "multiple trailing separators trimmed after truncation",
+			input:    strings.Repeat("a", 60) + "...extra",
+			expected: strings.Repeat("a", 60),
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "result never exceeds 63 chars",
+			input:    strings.Repeat("b", 70),
+			expected: strings.Repeat("b", 63),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateLabelValue(tt.input)
+			g.Expect(result).To(gomega.Equal(tt.expected), "input: %q", tt.input)
 		})
 	}
 }
