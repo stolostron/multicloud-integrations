@@ -551,7 +551,7 @@ func (r *ReconcileGitOpsCluster) CreateManagedClusterSecretFromManagedServiceAcc
 				"argocd.argoproj.io/secret-type":                 "cluster",
 				"apps.open-cluster-management.io/acm-cluster":    "true",
 				"apps.open-cluster-management.io/cluster-name":   managedCluster.Name,
-				"apps.open-cluster-management.io/cluster-server": fmt.Sprintf("%.63s", strippedClusterURL),
+				"apps.open-cluster-management.io/cluster-server": truncateLabelValue(strippedClusterURL),
 			},
 		},
 		Type: "Opaque",
@@ -738,4 +738,17 @@ func getManagedClusterURL(managedCluster *spokeclusterv1.ManagedCluster, token s
 
 	// If no URL was accessible, return the first URL as fallback
 	return firstURL, nil
+}
+
+// truncateLabelValue truncates a string to 63 characters (the Kubernetes label value limit) and
+// trims any trailing non-alphanumeric characters that would make the value invalid.
+// Kubernetes label values must start and end with an alphanumeric character.
+func truncateLabelValue(s string) string {
+	if len(s) > 63 {
+		s = s[:63]
+	}
+
+	return strings.TrimRightFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	})
 }
