@@ -15,12 +15,14 @@ limitations under the License.
 package gitopscluster
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -2694,6 +2696,253 @@ func TestCreateManagedClusterSecretFromManagedServiceAccount(t *testing.T) {
 				} else {
 					assert.Contains(t, secret.StringData["config"], `"insecure":true`, "Config should set insecure to true when TLS disabled")
 				}
+			}
+		})
+	}
+}
+
+func TestCleanupOldArgoClusterSecrets(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := v1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	const argoNs = "argocd"
+	const clusterName = "test-cluster"
+	const directURL = "https://api.test-cluster.example.com:6443"
+	const proxyURL = "https://cluster-proxy-addon-user.multicluster-engine.svc.cluster.local:9092/test-cluster"
+
+	// newSecret simulates the freshly-created/updated secret. Server lives in StringData
+	// because it has not been persisted yet (mirrors real usage in AddManagedClustersToArgo).
+	newSecret := func(name, serverURL string) *v1.Secret {
+		return &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: argoNs,
+				Labels: map[string]string{
+					"apps.open-cluster-management.io/acm-cluster":  "true",
+					"argocd.argoproj.io/secret-type":               "cluster",
+					"apps.open-cluster-management.io/cluster-name": clusterName,
+				},
+			},
+			StringData: map[string]string{
+				"server": serverURL,
+			},
+		}
+	}
+
+	// acmSecret creates a persisted ACM-managed ArgoCD cluster secret (server in Data).
+	acmSecret := func(name, serverURL string, extraLabels ...map[string]string) *v1.Secret {
+		s := &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: argoNs,
+				Labels: map[string]string{
+					"apps.open-cluster-management.io/acm-cluster":  "true",
+					"argocd.argoproj.io/secret-type":               "cluster",
+					"apps.open-cluster-management.io/cluster-name": clusterName,
+				},
+			},
+			Data: map[string][]byte{
+				"server": []byte(serverURL),
+			},
+		}
+		for _, extra := range extraLabels {
+			for k, v := range extra {
+				s.Labels[k] = v
+			}
+		}
+		return s
+	}
+
+	// agentSecret creates an agent-mode ACM ArgoCD cluster secret.
+	agentSecret := func(name, serverURL string) *v1.Secret {
+		return acmSecret(name, serverURL, map[string]string{
+			labelKeyClusterAgentMapping: clusterName,
+		})
+	}
+
+	// otherClusterSecret creates an ACM secret for a different cluster.
+	otherClusterSecret := func(name string) *v1.Secret {
+		return &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: argoNs,
+				Labels: map[string]string{
+					"apps.open-cluster-management.io/acm-cluster":  "true",
+					"argocd.argoproj.io/secret-type":               "cluster",
+					"apps.open-cluster-management.io/cluster-name": "other-cluster",
+				},
+			},
+			Data: map[string][]byte{
+				"server": []byte(directURL),
+			},
+		}
+	}
+
+	tests := []struct {
+		name            string
+		newSecret       *v1.Secret
+		existingSecrets []client.Object
+		// names of secrets expected to survive (not be deleted)
+		expectedSurvive []string
+		// names of secrets expected to be deleted
+		expectedDeleted []string
+	}{
+		{
+			name:            "no existing secrets - nothing to clean up",
+			newSecret:       newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{},
+			expectedSurvive: []string{},
+			expectedDeleted: []string{},
+		},
+		{
+			name:      "only the new secret exists - not deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{"test-cluster-application-manager-cluster-secret"},
+			expectedDeleted: []string{},
+		},
+		{
+			name:      "old secret with same server URL and different name - deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{"test-cluster-application-manager-cluster-secret"},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			name:      "multiple old secrets with same server URL - all deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+				acmSecret("test-cluster-old-msa-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{"test-cluster-application-manager-cluster-secret"},
+			expectedDeleted: []string{"test-cluster-cluster-secret", "test-cluster-old-msa-cluster-secret"},
+		},
+		{
+			name:      "old secret with different server URL (proxy vs direct) - NOT deleted to protect Apps",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"test-cluster-cluster-secret",
+			},
+			expectedDeleted: []string{},
+		},
+		{
+			name:      "mixed: same-URL old secret deleted, different-URL old secret preserved",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-old-proxy-cluster-secret", proxyURL),  // same URL — safe to delete
+				acmSecret("test-cluster-cluster-secret", directURL),           // different URL — keep it
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"test-cluster-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-old-proxy-cluster-secret"},
+		},
+		{
+			name:      "agent-mode secret coexists - not deleted regardless of server URL",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				agentSecret("test-cluster-agent-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"test-cluster-agent-cluster-secret",
+			},
+			expectedDeleted: []string{},
+		},
+		{
+			name:      "agent-mode secret alongside old push-model secret with same URL - only push-model deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				agentSecret("test-cluster-agent-cluster-secret", directURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"test-cluster-agent-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			name:      "secrets for a different cluster are not touched",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				otherClusterSecret("other-cluster-cluster-secret"),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"other-cluster-cluster-secret",
+			},
+			expectedDeleted: []string{},
+		},
+		{
+			name:      "non-ACM secret (no acm-cluster label) is not touched",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", directURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", directURL),
+				// Non-ACM ArgoCD cluster secret — no acm-cluster label
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "user-created-cluster-secret",
+						Namespace: argoNs,
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":               "cluster",
+							"apps.open-cluster-management.io/cluster-name": clusterName,
+						},
+					},
+					Data: map[string][]byte{"server": []byte(directURL)},
+				},
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"user-created-cluster-secret",
+			},
+			expectedDeleted: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingSecrets...).
+				Build()
+
+			reconciler := &ReconcileGitOpsCluster{
+				Client: fakeClient,
+			}
+
+			reconciler.cleanupOldArgoClusterSecrets(tt.newSecret, clusterName)
+
+			// Verify expected-to-survive secrets still exist
+			for _, name := range tt.expectedSurvive {
+				secret := &v1.Secret{}
+				getErr := fakeClient.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: argoNs}, secret)
+				assert.NoError(t, getErr, "secret %q should still exist after cleanup", name)
+			}
+
+			// Verify expected-to-be-deleted secrets are gone
+			for _, name := range tt.expectedDeleted {
+				secret := &v1.Secret{}
+				getErr := fakeClient.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: argoNs}, secret)
+				assert.True(t, k8errors.IsNotFound(getErr), "secret %q should have been deleted, but still exists", name)
 			}
 		})
 	}
