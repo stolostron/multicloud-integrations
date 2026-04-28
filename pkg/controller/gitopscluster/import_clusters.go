@@ -301,6 +301,9 @@ func (r *ReconcileGitOpsCluster) AddManagedClustersToArgo(
 			r.cleanupOldClusterSecrets(managedCluster.Name)
 		}
 
+		// Cleanup old ArgoCD cluster secrets with alternate naming scheme to prevent duplicates
+		r.cleanupOldArgoClusterSecrets(newSecret, managedCluster.Name)
+
 		// Managed cluster secret successfully created/updated - remove from orphan list
 		delete(orphanSecretsList, client.ObjectKeyFromObject(newSecret))
 	}
@@ -589,6 +592,77 @@ func (r *ReconcileGitOpsCluster) createBlankClusterSecret(
 	}
 
 	return newSecret, nil
+}
+
+// cleanupOldArgoClusterSecrets lists all ACM-managed ArgoCD cluster secrets for the given
+// managed cluster and deletes any that are stale (different name, same server URL as the new
+// secret, not an agent-mode secret). Only secrets whose server URL matches the new secret are
+// deleted — if the server URL differs the old secret may still be referenced by ArgoCD
+// Applications, and deleting it could cause those Applications to be removed by ArgoCD.
+func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secret, managedClusterName string) {
+	secretList := &v1.SecretList{}
+
+	secretSelector := &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"apps.open-cluster-management.io/acm-cluster":  "true",
+			"argocd.argoproj.io/secret-type":               "cluster",
+			"apps.open-cluster-management.io/cluster-name": managedClusterName,
+		},
+	}
+
+	secretSelectionLabel, err := utils.ConvertLabels(secretSelector)
+	if err != nil {
+		klog.Warningf("Failed to convert label selector for old ArgoCD cluster secret cleanup: %v", err)
+		return
+	}
+
+	err = r.List(context.TODO(), secretList, &client.ListOptions{
+		Namespace:     newSecret.Namespace,
+		LabelSelector: secretSelectionLabel,
+	})
+	if err != nil {
+		klog.Warningf("Failed to list ArgoCD cluster secrets for managed cluster %s in namespace %s: %v",
+			managedClusterName, newSecret.Namespace, err)
+		return
+	}
+
+	// Resolve the new secret's server URL — it may live in StringData (pre-persist) or Data (post-persist).
+	newServer := newSecret.StringData["server"]
+	if newServer == "" {
+		newServer = string(newSecret.Data["server"])
+	}
+
+	for i := range secretList.Items {
+		oldSecret := &secretList.Items[i]
+
+		if oldSecret.Name == newSecret.Name {
+			continue
+		}
+
+		// Skip ArgoCD agent-mode cluster secrets — they coexist with push-model secrets
+		if _, isAgentSecret := oldSecret.Labels[labelKeyClusterAgentMapping]; isAgentSecret {
+			klog.Infof("Skipping deletion of %s/%s: ArgoCD agent-mode cluster secret", oldSecret.Namespace, oldSecret.Name)
+			continue
+		}
+
+		// Only delete if the server URL matches the new secret. A different server URL means the
+		// old secret points to a different cluster endpoint that ArgoCD Applications may still
+		// reference — deleting it could cause ArgoCD to remove those Applications.
+		oldServer := string(oldSecret.Data["server"])
+		if oldServer != newServer {
+			klog.Infof("Skipping deletion of %s/%s: server URL %q differs from new secret %q — Applications may still reference it",
+				oldSecret.Namespace, oldSecret.Name, oldServer, newServer)
+			continue
+		}
+
+		klog.Infof("Cleaning up old ArgoCD cluster secret %s/%s (replaced by %s)", oldSecret.Namespace, oldSecret.Name, newSecret.Name)
+
+		if err := r.Delete(context.TODO(), oldSecret); err != nil {
+			klog.Warningf("Failed to delete old ArgoCD cluster secret %s/%s: %v", oldSecret.Namespace, oldSecret.Name, err)
+		} else {
+			klog.Infof("Successfully cleaned up old ArgoCD cluster secret %s/%s", oldSecret.Namespace, oldSecret.Name)
+		}
+	}
 }
 
 // cleanupOldClusterSecrets removes old cluster secrets from the managed cluster namespace
