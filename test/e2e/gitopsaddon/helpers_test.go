@@ -126,6 +126,7 @@ type gitOpsClusterOpts struct {
 	namespace     string
 	placementName string
 	agentEnabled  bool
+	agentMode     string // "managed" or "autonomous" (empty defaults to managed)
 	olmEnabled    bool
 	olmSource     string
 	olmSourceNS   string
@@ -154,6 +155,11 @@ spec:
     enabled: true
     argoCDAgent:
       enabled: %t`, opts.agentEnabled)
+
+	if opts.agentMode != "" {
+		spec += fmt.Sprintf(`
+      mode: %s`, opts.agentMode)
+	}
 
 	if opts.olmEnabled {
 		spec += `
@@ -1193,6 +1199,168 @@ func verifyAgentVersionDriftHeal(gitopsClusterName, ns string, timeout time.Dura
 	_, err = kubectlCtx(hubContext, "patch", "gitopscluster", gitopsClusterName, "-n", ns,
 		"--type=merge", "-p", `{"spec":{"gitopsAddon":{"overrideExistingConfigs":false}}}`)
 	Expect(err).NotTo(HaveOccurred(), "failed to restore gitopscluster overrideExistingConfigs=false after drift heal test")
+}
+
+// ---- Autonomous mode helpers ----
+
+func patchPolicyWithRBACAndApp(policyName, ns string) {
+	By(fmt.Sprintf("waiting for Policy %s to be created by controller", policyName))
+	waitForResourceExists(hubContext, "policy.policy.open-cluster-management.io",
+		policyName, ns, 2*time.Minute)
+
+	By("patching Policy with RBAC (cluster-admin) and guestbook Application")
+	patchJSON := fmt.Sprintf(`[{
+  "op": "add",
+  "path": "/spec/policy-templates/-",
+  "value": {
+    "objectDefinition": {
+      "apiVersion": "policy.open-cluster-management.io/v1",
+      "kind": "ConfigurationPolicy",
+      "metadata": { "name": "%s-rbac" },
+      "spec": {
+        "remediationAction": "enforce",
+        "severity": "medium",
+        "object-templates": [
+          {
+            "complianceType": "musthave",
+            "objectDefinition": {
+              "apiVersion": "rbac.authorization.k8s.io/v1",
+              "kind": "ClusterRoleBinding",
+              "metadata": { "name": "acm-openshift-gitops-cluster-admin" },
+              "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin"
+              },
+              "subjects": [{
+                "kind": "ServiceAccount",
+                "name": "acm-openshift-gitops-argocd-application-controller",
+                "namespace": "%s"
+              }]
+            }
+          },
+          {
+            "complianceType": "musthave",
+            "objectDefinition": {
+              "apiVersion": "v1",
+              "kind": "Namespace",
+              "metadata": { "name": "guestbook" }
+            }
+          },
+          {
+            "complianceType": "musthave",
+            "objectDefinition": {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "Application",
+              "metadata": {
+                "name": "guestbook",
+                "namespace": "%s"
+              },
+              "spec": {
+                "project": "default",
+                "source": {
+                  "repoURL": "https://github.com/argoproj/argocd-example-apps",
+                  "targetRevision": "HEAD",
+                  "path": "guestbook"
+                },
+                "destination": {
+                  "server": "https://kubernetes.default.svc",
+                  "namespace": "guestbook"
+                },
+                "syncPolicy": {
+                  "automated": { "prune": true, "selfHeal": true }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}]`, policyName, ns, ns)
+
+	_, err := kubectlCtx(hubContext, "patch", "policy.policy.open-cluster-management.io",
+		policyName, "-n", ns, "--type=json", fmt.Sprintf("-p=%s", patchJSON))
+	Expect(err).NotTo(HaveOccurred(), "failed to patch Policy with RBAC and guestbook Application")
+}
+
+func deployGuestbookAutonomousMode(timeout time.Duration) {
+	policyName := gitopsClusterName + "-argocd-policy"
+
+	ensureHubPrincipalRunning()
+
+	patchPolicyWithRBACAndApp(policyName, argoCDNamespace)
+
+	By("waiting for Policy to be Compliant (all templates enforced on spoke)")
+	Eventually(func(g Gomega) string {
+		out, err := kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
+			policyName, "-n", argoCDNamespace,
+			"-o", "jsonpath={.status.compliant}")
+		g.Expect(err).NotTo(HaveOccurred())
+		return out
+	}, 7*time.Minute, 10*time.Second).Should(Equal("Compliant"))
+
+	By("verifying guestbook-ui deployment exists on spoke via autonomous agent")
+	Eventually(func(g Gomega) int {
+		out, err := kubectlCtx(spokeContext, "get", "deployment", "guestbook-ui",
+			"-n", "guestbook",
+			"-o", "jsonpath={.status.availableReplicas}")
+		if err != nil {
+			appInfo, _ := kubectlCtx(spokeContext, "get", "applications.argoproj.io", "guestbook",
+				"-n", argoCDNamespace,
+				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
+			fmt.Fprintf(GinkgoWriter, "  [diag] guestbook-ui not found on spoke; app: %s\n", appInfo)
+		}
+		g.Expect(err).NotTo(HaveOccurred())
+		if out == "" {
+			return 0
+		}
+		replicas, convErr := strconv.Atoi(strings.TrimSpace(out))
+		g.Expect(convErr).NotTo(HaveOccurred())
+		return replicas
+	}, timeout, 10*time.Second).Should(BeNumerically(">", 0))
+
+	By("checking Application sync status on spoke (informational)")
+	spokeSync, _ := kubectlCtx(spokeContext, "get", "applications.argoproj.io", "guestbook",
+		"-n", argoCDNamespace,
+		"-o", "jsonpath={.status.sync.status}")
+	fmt.Fprintf(GinkgoWriter, "  [info] spoke Application guestbook sync status: %s\n", spokeSync)
+}
+
+func verifyLocalClusterAutonomousInfrastructure(timeout time.Duration) {
+	By("verifying ArgoCD CR in local-cluster namespace")
+	waitForResourceExists(hubContext, "argocd", "acm-openshift-gitops", localClusterName, timeout)
+
+	verifyNoDuplicateArgoCDOnHub()
+
+	By("verifying agent client cert in local-cluster namespace")
+	Eventually(func() error {
+		_, err := kubectlCtx(hubContext, "get", "secret", "argocd-agent-client-tls",
+			"-n", localClusterName)
+		return err
+	}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+	fmt.Fprintf(GinkgoWriter,
+		"  [info] local-cluster autonomous infrastructure verified "+
+			"(app sync skipped — known limitation on hub)\n")
+}
+
+func cleanupGuestbookAutonomous() {
+	By("cleaning up guestbook app on spoke (deployed by Policy)")
+	kubectlCtx(spokeContext, "delete", "applications.argoproj.io", "guestbook",
+		"-n", argoCDNamespace, "--ignore-not-found")
+	kubectlCtx(spokeContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
+	kubectlCtx(spokeContext, "delete", "clusterrolebinding",
+		"acm-openshift-gitops-cluster-admin", "--ignore-not-found")
+
+	By("cleaning up guestbook resources on local-cluster (hub)")
+	kubectlCtx(hubContext, "delete", "applications.argoproj.io", "guestbook",
+		"-n", localClusterName, "--ignore-not-found")
+	kubectlCtx(hubContext, "delete", "appproject", "default",
+		"-n", localClusterName, "--ignore-not-found")
+	kubectlCtx(hubContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
+	kubectlCtx(hubContext, "delete", "clusterrolebinding",
+		"acm-openshift-gitops-cluster-admin", "--ignore-not-found")
 }
 
 // ---- OLM Override helpers ----

@@ -170,7 +170,8 @@ subjects:
 // 1. Delete Policy CR first (stops enforcement, allows cleanup job to delete ArgoCD CR)
 // 2. Delete ManagedClusterAddOn -> cleanup job runs and deletes ArgoCD CR and other resources
 // 3. Delete GitOpsCluster CR
-// When ArgoCD agent is enabled, AppProject is NOT included because argocd-agent propagates it from the hub.
+// When ArgoCD agent is enabled in managed mode, AppProject is NOT included because argocd-agent propagates it from the hub.
+// When ArgoCD agent is enabled in autonomous mode, AppProject IS included because Applications are reconciled locally.
 func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string {
 	argoCDSpec := generateArgoCDSpec(gitOpsCluster)
 
@@ -226,9 +227,22 @@ spec:
 		namespaceTemplate,
 		indentYaml(argoCDSpec, 18))
 
-	// Only include AppProject when ArgoCD agent is NOT enabled.
-	// When argocd-agent is enabled, AppProject is propagated from the hub by the agent.
-	if !argoCDAgentEnabled {
+	// Determine the agent mode
+	agentMode := ""
+	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
+		agentMode = gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Mode
+	}
+
+	// Include AppProject when:
+	// - ArgoCD agent is NOT enabled (non-agent mode needs it directly), OR
+	// - ArgoCD agent IS enabled AND mode is "autonomous" (autonomous agents reconcile
+	//   Applications locally and need the AppProject present before the principal
+	//   propagates it; including it in the Policy guarantees correct ordering)
+	// Exclude AppProject when agent is enabled in managed mode (principal propagates it).
+	if !argoCDAgentEnabled || agentMode == "autonomous" {
+		if agentMode == "autonomous" {
+			klog.Infof("ArgoCD agent autonomous mode: including AppProject in policy (needed for local reconciliation)")
+		}
 		yamlString += fmt.Sprintf(`
             - complianceType: musthave
               objectDefinition:
@@ -248,7 +262,7 @@ spec:
                     - '*'
 `, namespaceTemplate)
 	} else {
-		klog.Infof("ArgoCD agent is enabled, excluding AppProject from policy (will be propagated by agent)")
+		klog.Infof("ArgoCD agent is enabled (managed mode), excluding AppProject from policy (will be propagated by agent)")
 		yamlString += "\n"
 	}
 
