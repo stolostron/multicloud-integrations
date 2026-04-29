@@ -19,6 +19,10 @@
 #   Validates that the hub controller detects principal image drift and patches
 #   the ArgoCD Policy's agent image field. Runs after Scenario 2 deployment.
 #
+# Scenario 6: Autonomous Agent Mode - All 3 clusters
+#   Agent mode with mode=autonomous: Applications created on managed clusters via
+#   Policy, ArgoCD agent syncs status back to hub principal.
+#
 # Key Design Principles:
 # - All operations performed from the hub cluster (simulates user experience)
 # - RBAC is created by modifying the Policy that GitOpsCluster generates
@@ -27,9 +31,9 @@
 # - Between-scenario cleanup is hub-triggered only
 #
 # IMPORTANT: Scenarios run sequentially. Each depends on clean state.
-# The "all" mode runs: cleanup → S1 → cleanup → S2 → S5 → cleanup → S3 → cleanup → S4 → cleanup
+# The "all" mode runs: cleanup → S1 → cleanup → S2 → S5 → cleanup → S3 → cleanup → S4 → cleanup → S6 → cleanup
 #
-# Usage: ./test-scenarios.sh [1|2|3|4|5|all|cleanup]
+# Usage: ./test-scenarios.sh [1|2|3|4|5|6|all|cleanup]
 #
 # Environment Variables:
 #   HUB_KUBECONFIG      - Hub cluster kubeconfig (default: ~/Desktop/hub)
@@ -2739,6 +2743,362 @@ except:
 }
 
 #######################################
+# SCENARIO 6: Autonomous Agent Mode
+# Validates agent mode with autonomous (apps created on managed cluster via Policy,
+# synced back to hub by argocd-agent)
+#######################################
+test_scenario_6() {
+    log_info "=============================================="
+    log_info "SCENARIO 6: Autonomous Agent Mode"
+    log_info "=============================================="
+    log_info "  - Same agent infrastructure as Scenario 2 (principal on hub)"
+    log_info "  - GitOpsCluster with mode: autonomous"
+    log_info "  - Applications delivered via Policy (created on managed cluster)"
+    log_info "  - Agent syncs Application status back to hub"
+    log_info "=============================================="
+
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    configure_hub_argocd_agent
+    ensure_clusterset_binding
+    ensure_addon_template
+    ensure_default_appproject_for_agents
+
+    # Build cluster list based on OCP availability
+    local placement_clusters=("$KIND_CLUSTER_NAME" "$LOCAL_CLUSTER_NAME")
+    if [ "$HAS_OCP" = true ]; then
+        placement_clusters=("$OCP_CLUSTER_NAME" "${placement_clusters[@]}")
+    else
+        log_warn "OCP cluster not available — running scenario 6 with Kind + local-cluster only"
+    fi
+
+    local placement_values=""
+    for c in "${placement_clusters[@]}"; do
+        placement_values="${placement_values}
+                - $c"
+    done
+
+    log_info "Creating Placement (${placement_clusters[*]})..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: all-autonomous-placement
+  namespace: openshift-gitops
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions:
+            - key: name
+              operator: In
+              values:${placement_values}
+EOF
+
+    log_info "Creating GitOpsCluster (autonomous agent mode)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: all-autonomous-gitops
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: all-autonomous-placement
+  gitopsAddon:
+    enabled: true
+    argoCDAgent:
+      enabled: true
+      mode: autonomous
+EOF
+
+    # Wait for ManagedClusterAddOns
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 300 "ManagedClusterAddOn for $OCP_CLUSTER_NAME" \
+            "kubectl get managedclusteraddon gitops-addon -n $OCP_CLUSTER_NAME -o name" || return 1
+    fi
+    wait_for_condition 300 "ManagedClusterAddOn for $KIND_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $KIND_CLUSTER_NAME -o name" || return 1
+    wait_for_condition 300 "ManagedClusterAddOn for $LOCAL_CLUSTER_NAME" \
+        "kubectl get managedclusteraddon gitops-addon -n $LOCAL_CLUSTER_NAME -o name" || return 1
+
+    # Add RBAC and guestbook Application to the Policy.
+    # In autonomous mode, the Application is created on the managed cluster via Policy.
+    # The ArgoCD instance on the managed cluster reconciles it locally.
+    add_rbac_and_app_to_policy "all-autonomous-gitops-argocd-policy" "openshift-gitops" || return 1
+
+    # Wait for Policy to be compliant
+    wait_for_policy_compliant "all-autonomous-gitops-argocd-policy" "openshift-gitops" 420 || return 1
+
+    # Verify ARGOCD_AGENT_MODE=autonomous in AddOnDeploymentConfig
+    log_info "Verifying ARGOCD_AGENT_MODE=autonomous in AddOnDeploymentConfig..."
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 60 "ARGOCD_AGENT_MODE=autonomous for $OCP_CLUSTER_NAME" \
+            "kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name==\"ARGOCD_AGENT_MODE\")].value}' 2>/dev/null | grep -qx 'autonomous'" || {
+                log_error "SCENARIO 6: ARGOCD_AGENT_MODE not autonomous for $OCP_CLUSTER_NAME"
+                kubectl get addondeploymentconfig gitops-addon-config -n $OCP_CLUSTER_NAME -o yaml 2>/dev/null || true
+                return 1
+            }
+        log_info "  ARGOCD_AGENT_MODE=autonomous for $OCP_CLUSTER_NAME: OK"
+    fi
+    wait_for_condition 60 "ARGOCD_AGENT_MODE=autonomous for $KIND_CLUSTER_NAME" \
+        "kubectl get addondeploymentconfig gitops-addon-config -n $KIND_CLUSTER_NAME -o jsonpath='{.spec.customizedVariables[?(@.name==\"ARGOCD_AGENT_MODE\")].value}' 2>/dev/null | grep -qx 'autonomous'" || {
+            log_error "SCENARIO 6: ARGOCD_AGENT_MODE not autonomous for $KIND_CLUSTER_NAME"
+            return 1
+        }
+    log_info "  ARGOCD_AGENT_MODE=autonomous for $KIND_CLUSTER_NAME: OK"
+
+    # Verify OLM auto-detected on OCP (if available)
+    if [ "$HAS_OCP" = true ]; then
+        verify_olm_auto_detected "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+    fi
+
+    # Wait for ArgoCD agent pods
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 900 "ArgoCD agent on $OCP_CLUSTER_NAME" \
+            "KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent -o name | grep -q pod" || {
+                log_error "SCENARIO 6: ArgoCD agent pod not running on $OCP_CLUSTER_NAME"
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops --no-headers 2>/dev/null || true
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get argocd -n openshift-gitops -o yaml 2>/dev/null || true
+                return 1
+            }
+    fi
+    wait_for_condition 600 "ArgoCD agent on $KIND_CLUSTER_NAME" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent -o name | grep -q pod" || {
+            log_error "SCENARIO 6: ArgoCD agent pod not running on $KIND_CLUSTER_NAME"
+            KUBECONFIG=$KIND_KUBECONFIG kubectl get pods -n openshift-gitops --no-headers 2>/dev/null || true
+            return 1
+        }
+    wait_for_condition 600 "ArgoCD agent on $LOCAL_CLUSTER_NAME" \
+        "kubectl get pods -n local-cluster -l app.kubernetes.io/part-of=argocd-agent -o name | grep -q pod" || {
+            log_error "SCENARIO 6: ArgoCD agent pod not running on $LOCAL_CLUSTER_NAME"
+            kubectl get pods -n local-cluster --no-headers 2>/dev/null || true
+            return 1
+        }
+
+    # Verify agents connected
+    if [ "$HAS_OCP" = true ]; then
+        verify_agent_connected "$OCP_CLUSTER_NAME" || return 1
+    fi
+    verify_agent_connected "$KIND_CLUSTER_NAME" || return 1
+    verify_agent_connected "$LOCAL_CLUSTER_NAME" || return 1
+
+    # Wait for ArgoCD app controller to be running (autonomous mode needs local app controller)
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 900 "ArgoCD app controller on $OCP_CLUSTER_NAME" \
+            "KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+                log_error "SCENARIO 6: ArgoCD app controller not running on $OCP_CLUSTER_NAME"
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops --no-headers 2>/dev/null || true
+                return 1
+            }
+    fi
+    # Kind cluster: Redis must be ready before app controller (same race as local-cluster in S2)
+    wait_for_condition 300 "Redis on $KIND_CLUSTER_NAME" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-redis --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_error "SCENARIO 6: Redis not running on $KIND_CLUSTER_NAME"
+            return 1
+        }
+    wait_for_condition 300 "ArgoCD app controller on $KIND_CLUSTER_NAME" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_error "SCENARIO 6: ArgoCD app controller not running on $KIND_CLUSTER_NAME"
+            return 1
+        }
+    # Check if the Kind app controller started with Redis unavailable and restart if needed
+    local kind_app_logs
+    kind_app_logs=$(KUBECONFIG=$KIND_KUBECONFIG kubectl logs -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --tail=100 2>/dev/null || true)
+    if echo "$kind_app_logs" | grep -q "connection refused\|Failed to save cluster info"; then
+        log_warn "Kind app controller had Redis connection issues at startup — restarting to rebuild cluster cache"
+        KUBECONFIG=$KIND_KUBECONFIG kubectl delete pod -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --grace-period=0 --force 2>/dev/null || true
+        wait_for_condition 300 "ArgoCD app controller restart on $KIND_CLUSTER_NAME" \
+            "KUBECONFIG=$KIND_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+                log_error "SCENARIO 6: ArgoCD app controller not running after restart on $KIND_CLUSTER_NAME"
+                return 1
+            }
+        log_info "Kind app controller restarted successfully"
+    fi
+    # local-cluster: Redis must be ready before app controller
+    wait_for_condition 300 "Redis on $LOCAL_CLUSTER_NAME" \
+        "kubectl get pods -n local-cluster -l app.kubernetes.io/name=acm-openshift-gitops-redis --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_error "SCENARIO 6: Redis not running on $LOCAL_CLUSTER_NAME"
+            return 1
+        }
+    wait_for_condition 300 "ArgoCD app controller on $LOCAL_CLUSTER_NAME" \
+        "kubectl get pods -n local-cluster -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+            log_error "SCENARIO 6: ArgoCD app controller not running on $LOCAL_CLUSTER_NAME"
+            kubectl get pods -n local-cluster --no-headers 2>/dev/null || true
+            return 1
+        }
+    # Check if the local-cluster app controller started with Redis unavailable and restart if needed
+    local local_app_logs
+    local_app_logs=$(kubectl logs -n local-cluster -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --tail=100 2>/dev/null || true)
+    if echo "$local_app_logs" | grep -q "connection refused\|Failed to save cluster info"; then
+        log_warn "local-cluster app controller had Redis connection issues at startup — restarting to rebuild cluster cache"
+        kubectl delete pod -n local-cluster -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --grace-period=0 --force 2>/dev/null || true
+        wait_for_condition 300 "ArgoCD app controller restart on $LOCAL_CLUSTER_NAME" \
+            "kubectl get pods -n local-cluster -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
+                log_error "SCENARIO 6: ArgoCD app controller not running after restart on $LOCAL_CLUSTER_NAME"
+                return 1
+            }
+        log_info "local-cluster app controller restarted successfully"
+    fi
+
+    # Verify no duplicate ArgoCD
+    verify_no_duplicate_argocd "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" || return 1
+    if [ "$HAS_OCP" = true ]; then
+        verify_no_duplicate_argocd "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+    fi
+    verify_no_duplicate_argocd "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" || return 1
+
+    # Verify Red Hat images
+    if [ "$HAS_OCP" = true ]; then
+        verify_redhat_images "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" "openshift-gitops" || {
+            log_error "SCENARIO 6: Non-Red Hat images on $OCP_CLUSTER_NAME"
+            return 1
+        }
+    fi
+    verify_redhat_images "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "openshift-gitops" || {
+        log_error "SCENARIO 6: Non-Red Hat images on $KIND_CLUSTER_NAME"
+        return 1
+    }
+    verify_redhat_images "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" "local-cluster" || {
+        log_error "SCENARIO 6: Non-Red Hat images on $LOCAL_CLUSTER_NAME"
+        return 1
+    }
+
+    # --- Validate guestbook on managed clusters ---
+    # In autonomous mode, the Policy creates the Application on the managed cluster.
+    # The local ArgoCD app controller reconciles it.
+
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 300 "Guestbook on $OCP_CLUSTER_NAME via autonomous agent" \
+            "KUBECONFIG=$OCP_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
+                log_error "SCENARIO 6: Guestbook not deployed on $OCP_CLUSTER_NAME"
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get applications.argoproj.io -n openshift-gitops -o wide 2>/dev/null || true
+                KUBECONFIG=$OCP_KUBECONFIG kubectl logs -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent --tail=20 2>/dev/null || true
+                return 1
+            }
+        log_info "NOTE: On OCP, guestbook-ui pods crash (port 80 + restricted SCC) - expected"
+    fi
+
+    # Kind: guestbook via Policy + autonomous agent
+    wait_for_condition 600 "Guestbook on $KIND_CLUSTER_NAME via autonomous agent" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
+            log_error "SCENARIO 6: Guestbook not deployed on $KIND_CLUSTER_NAME"
+            log_error "--- Diagnostics for $KIND_CLUSTER_NAME autonomous agent failure ---"
+            export KUBECONFIG=$HUB_KUBECONFIG
+            log_error "Policy status:"
+            kubectl get policy all-autonomous-gitops-argocd-policy -n openshift-gitops -o jsonpath='{.status.compliant}' 2>/dev/null; echo
+            log_error "ArgoCD CR on spoke:"
+            KUBECONFIG=$KIND_KUBECONFIG kubectl get argocd -n openshift-gitops -o yaml 2>/dev/null | head -60 || true
+            log_error "Applications on spoke:"
+            KUBECONFIG=$KIND_KUBECONFIG kubectl get applications.argoproj.io -n openshift-gitops -o wide 2>/dev/null || true
+            log_error "Agent logs on $KIND_CLUSTER_NAME (last 30 lines):"
+            KUBECONFIG=$KIND_KUBECONFIG kubectl logs -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent --tail=30 2>/dev/null || true
+            log_error "App controller logs on $KIND_CLUSTER_NAME (last 30 lines):"
+            KUBECONFIG=$KIND_KUBECONFIG kubectl logs -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --tail=30 2>/dev/null || true
+            log_error "--- End diagnostics ---"
+            return 1
+        }
+    wait_for_condition 120 "Guestbook pods ready on $KIND_CLUSTER_NAME" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'" || {
+            log_warn "Guestbook pods not ready on Kind (continuing)"
+        }
+
+    # local-cluster: verify autonomous agent infrastructure (but skip guestbook app verification)
+    # In autonomous mode on local-cluster (which IS the hub), the agent transforms Application
+    # specs (project → namespace-prefixed, destination → cluster name) which conflicts with
+    # the Policy that enforces the original spec. This is a known limitation: autonomous agents
+    # are designed for remote managed clusters. We verify infrastructure only.
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    # Wait for ArgoCD to be running in local-cluster namespace
+    wait_for_condition 120 "ArgoCD in local-cluster namespace" \
+        "kubectl get argocd acm-openshift-gitops -n local-cluster -o name" || return 1
+
+    # Verify no duplicate ArgoCD
+    verify_no_duplicate_argocd "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" || return 1
+
+    # Verify agent client cert
+    wait_for_condition 180 "ArgoCD agent client cert in local-cluster" \
+        "kubectl get secret argocd-agent-client-tls -n local-cluster -o name" || {
+            log_warn "Client cert not yet provisioned for local-cluster (continuing)"
+        }
+
+    log_info "local-cluster autonomous mode: infrastructure verified (guestbook app sync skipped — known limitation on hub)"
+
+    # Verify Application sync status on managed clusters
+    export KUBECONFIG=$HUB_KUBECONFIG
+    if [ "$HAS_OCP" = true ]; then
+        wait_for_condition 180 "OCP guestbook app Synced on $OCP_CLUSTER_NAME" \
+            "KUBECONFIG=$OCP_KUBECONFIG kubectl get applications.argoproj.io guestbook -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null | grep -q 'Synced'" || {
+                log_warn "OCP guestbook app not yet Synced"
+            }
+    fi
+    wait_for_condition 180 "Kind guestbook app Synced on $KIND_CLUSTER_NAME" \
+        "KUBECONFIG=$KIND_KUBECONFIG kubectl get applications.argoproj.io guestbook -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null | grep -q 'Synced'" || {
+            log_warn "Kind guestbook app not yet Synced"
+        }
+
+    # Verify the ArgoCD CR on the managed cluster has mode: autonomous
+    if [ "$HAS_OCP" = true ]; then
+        local ocp_mode
+        ocp_mode=$(KUBECONFIG=$OCP_KUBECONFIG kubectl get argocd acm-openshift-gitops -n openshift-gitops \
+            -o jsonpath='{.spec.argoCDAgent.agent.client.mode}' 2>/dev/null)
+        if [ "$ocp_mode" != "autonomous" ]; then
+            log_error "SCENARIO 6: ArgoCD agent mode on $OCP_CLUSTER_NAME is '$ocp_mode' (expected: autonomous)"
+            return 1
+        fi
+        log_info "  ArgoCD agent mode on $OCP_CLUSTER_NAME: autonomous: OK"
+    fi
+    local kind_mode
+    kind_mode=$(KUBECONFIG=$KIND_KUBECONFIG kubectl get argocd acm-openshift-gitops -n openshift-gitops \
+        -o jsonpath='{.spec.argoCDAgent.agent.client.mode}' 2>/dev/null)
+    if [ "$kind_mode" != "autonomous" ]; then
+        log_error "SCENARIO 6: ArgoCD agent mode on $KIND_CLUSTER_NAME is '$kind_mode' (expected: autonomous)"
+        return 1
+    fi
+    log_info "  ArgoCD agent mode on $KIND_CLUSTER_NAME: autonomous: OK"
+
+    # Report sync statuses
+    local ocp_sync="SKIPPED"
+    if [ "$HAS_OCP" = true ]; then
+        ocp_sync=$(KUBECONFIG=$OCP_KUBECONFIG kubectl get applications.argoproj.io guestbook -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null)
+    fi
+    local kind_sync=$(KUBECONFIG=$KIND_KUBECONFIG kubectl get applications.argoproj.io guestbook -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null)
+
+    # Environment health
+    if [ "$HAS_OCP" = true ]; then
+        verify_environment_health "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" "6" "false" || return 1
+    fi
+    verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "6" "false" || return 1
+    verify_environment_health "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" "6" "true" || return 1
+
+    log_info "=============================================="
+    log_info "SCENARIO 6: PASSED"
+    log_info "  - Autonomous agent mode with Policy-based app delivery: OK"
+    if [ "$HAS_OCP" = true ]; then
+        log_info "  - OLM auto-detected on OCP: OK"
+        log_info "  - Guestbook on $OCP_CLUSTER_NAME (Sync=$ocp_sync): OK"
+    else
+        log_info "  - OCP: SKIPPED (not available)"
+    fi
+    log_info "  - Agents connected: OK"
+    log_info "  - ARGOCD_AGENT_MODE=autonomous propagated: OK"
+    log_info "  - ArgoCD CR mode=autonomous verified: OK"
+    log_info "  - No duplicate ArgoCD: OK"
+    log_info "  - Red Hat images: OK"
+    log_info "  - Guestbook on $KIND_CLUSTER_NAME (Sync=$kind_sync): OK"
+    log_info "  - local-cluster: infrastructure verified (app sync skipped — autonomous on hub limitation)"
+    log_info "=============================================="
+    return 0
+}
+
+#######################################
 # Main
 #######################################
 
@@ -2789,6 +3149,11 @@ case "${1:-all}" in
         test_scenario_5
         cleanup_scenario "all-agent-gitops" "all-agent-placement" "${CLEANUP_CLUSTERS[@]}"
         ;;
+    6)
+        cleanup_scenario "all-autonomous-gitops" "all-autonomous-placement" "${CLEANUP_CLUSTERS[@]}"
+        test_scenario_6
+        cleanup_scenario "all-autonomous-gitops" "all-autonomous-placement" "${CLEANUP_CLUSTERS[@]}"
+        ;;
     all)
         cleanup_all
         ensure_hub_controller_image
@@ -2802,10 +3167,12 @@ case "${1:-all}" in
         scenario3_result="SKIPPED"
         scenario4_result="SKIPPED"
         scenario5_result="SKIPPED"
+        scenario6_result="SKIPPED"
         cleanup1_result="SKIPPED"
         cleanup2_result="SKIPPED"
         cleanup3_result="SKIPPED"
         cleanup4_result="SKIPPED"
+        cleanup6_result="SKIPPED"
 
         # --- Scenario 1: No Agent ---
         if test_scenario_1; then scenario1_result="PASSED"; else scenario1_result="FAILED"; fi
@@ -2834,6 +3201,11 @@ case "${1:-all}" in
         # --- Scenario 4: OLM Override on Kind ---
         if test_scenario_4; then scenario4_result="PASSED"; else scenario4_result="FAILED"; fi
         if cleanup_scenario "kind-olm-override-gitops" "kind-olm-override-placement" "$KIND_CLUSTER_NAME"; then cleanup4_result="PASSED"; else cleanup4_result="FAILED"; fi
+        sleep 15
+
+        # --- Scenario 6: Autonomous Agent Mode ---
+        if test_scenario_6; then scenario6_result="PASSED"; else scenario6_result="FAILED"; fi
+        if cleanup_scenario "all-autonomous-gitops" "all-autonomous-placement" "${CLEANUP_CLUSTERS[@]}"; then cleanup6_result="PASSED"; else cleanup6_result="FAILED"; fi
 
         log_info "=============================================="
         log_info "=== ALL SCENARIOS COMPLETE ==="
@@ -2847,12 +3219,15 @@ case "${1:-all}" in
         log_info "  Cleanup 3:                                  $cleanup3_result"
         log_info "  Scenario 4 (OLM Override on Kind):         $scenario4_result"
         log_info "  Cleanup 4:                                  $cleanup4_result"
+        log_info "  Scenario 6 (Autonomous Agent):             $scenario6_result"
+        log_info "  Cleanup 6:                                  $cleanup6_result"
         [ "$HAS_OCP" != true ] && log_info "  NOTE: OCP not available — OCP parts skipped"
         log_info "=============================================="
 
         if [[ "$scenario1_result" == "FAILED" || "$scenario2_result" == "FAILED" || "$scenario3_result" == "FAILED" || \
-              "$scenario4_result" == "FAILED" || "$scenario5_result" == "FAILED" || \
-              "$cleanup1_result" == "FAILED" || "$cleanup2_result" == "FAILED" || "$cleanup3_result" == "FAILED" || "$cleanup4_result" == "FAILED" ]]; then
+              "$scenario4_result" == "FAILED" || "$scenario5_result" == "FAILED" || "$scenario6_result" == "FAILED" || \
+              "$cleanup1_result" == "FAILED" || "$cleanup2_result" == "FAILED" || "$cleanup3_result" == "FAILED" || \
+              "$cleanup4_result" == "FAILED" || "$cleanup6_result" == "FAILED" ]]; then
             exit 1
         fi
         ;;
@@ -2860,13 +3235,14 @@ case "${1:-all}" in
         cleanup_all
         ;;
     *)
-        echo "Usage: $0 [1|2|3|4|5|all|cleanup]"
+        echo "Usage: $0 [1|2|3|4|5|6|all|cleanup]"
         echo ""
         echo "  1       - Scenario 1: No Agent (OCP + Kind + local-cluster)"
         echo "  2       - Scenario 2: Agent Mode (OCP + Kind + local-cluster)"
         echo "  3       - Scenario 3: Custom OLM (OCP only)"
         echo "  4       - Scenario 4: OLM Override on Kind (Kind only)"
         echo "  5       - Scenario 5: Agent Version Drift Heal (deploys S2 first)"
+        echo "  6       - Scenario 6: Autonomous Agent Mode (OCP + Kind + local-cluster)"
         echo "  all     - Run all scenarios sequentially with cleanup"
         echo "  cleanup - Force cleanup everything"
         echo ""

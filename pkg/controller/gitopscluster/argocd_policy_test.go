@@ -164,6 +164,45 @@ func TestGenerateArgoCDPolicyYaml_ExcludesAppProjectWhenAgentEnabled(t *testing.
 	assert.Contains(t, yamlString, "principalServerAddress")
 }
 
+func TestGenerateArgoCDPolicyYaml_IncludesAppProjectWhenAgentAutonomous(t *testing.T) {
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+			UID:       "test-uid",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			PlacementRef: &v1.ObjectReference{
+				Name: "test-placement",
+				Kind: "Placement",
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "principal.example.com",
+					ServerPort:    "443",
+					Mode:          "autonomous",
+				},
+			},
+		},
+	}
+
+	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
+
+	// AppProject SHOULD be included when agent is in autonomous mode
+	// (autonomous agents reconcile Applications locally and need AppProject)
+	assert.Contains(t, yamlString, "kind: AppProject")
+	assert.Contains(t, yamlString, "name: default")
+
+	// Should still contain the ArgoCD CR with agent config
+	assert.Contains(t, yamlString, "kind: ArgoCD")
+	assert.Contains(t, yamlString, "mode: \"autonomous\"")
+	assert.Contains(t, yamlString, "principalServerAddress")
+}
+
 func TestGenerateArgoCDSpec_BasicConfig(t *testing.T) {
 	enabled := true
 	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
