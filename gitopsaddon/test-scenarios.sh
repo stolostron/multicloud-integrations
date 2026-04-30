@@ -947,23 +947,27 @@ cleanup_managed_cluster_direct() {
     log_info "$cluster_name: Direct cleanup complete"
 }
 
-# Ensure the GitOps operator allows ArgoCD instances in local-cluster namespace
-# to have cluster-scoped permissions (required for deploying to other namespaces).
+# Ensure ARGOCD_CLUSTER_CONFIG_NAMESPACES includes both openshift-gitops and local-cluster.
+# The GitOps operator uses this env var to decide which namespaces get cluster-scoped RBAC
+# for their ArgoCD instances. Agent/principal informers need cluster-scope list/watch on
+# namespaces. Without this, the operator only creates namespace-scoped Roles and agent pods
+# crash with "namespaces is forbidden" errors.
 # Uses the OLM Subscription config so changes persist through operator upgrades.
-ensure_local_cluster_in_cluster_config() {
+ensure_cluster_config_namespaces() {
     export KUBECONFIG=$HUB_KUBECONFIG
 
+    local expected="openshift-gitops,local-cluster"
     local current=$(kubectl get deployment openshift-gitops-operator-controller-manager \
         -n openshift-gitops-operator \
         -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ARGOCD_CLUSTER_CONFIG_NAMESPACES")].value}' 2>/dev/null)
 
-    if echo "$current" | grep -q "local-cluster"; then
-        log_info "ARGOCD_CLUSTER_CONFIG_NAMESPACES already includes local-cluster: $current"
+    if [ "$current" = "$expected" ]; then
+        log_info "ARGOCD_CLUSTER_CONFIG_NAMESPACES already set to $expected"
     else
-        log_info "Adding local-cluster to ARGOCD_CLUSTER_CONFIG_NAMESPACES via Subscription..."
+        log_info "Setting ARGOCD_CLUSTER_CONFIG_NAMESPACES to $expected via Subscription (was: $current)..."
         kubectl patch subscription.operators.coreos.com openshift-gitops-operator \
             -n openshift-gitops-operator --type=merge \
-            -p '{"spec":{"config":{"env":[{"name":"ARGOCD_CLUSTER_CONFIG_NAMESPACES","value":"openshift-gitops,local-cluster"}]}}}' 2>/dev/null || true
+            -p '{"spec":{"config":{"env":[{"name":"ARGOCD_CLUSTER_CONFIG_NAMESPACES","value":"'"$expected"'"}]}}}' 2>/dev/null || true
         log_info "Waiting for operator pod to restart with new config..."
         kubectl rollout status deployment/openshift-gitops-operator-controller-manager \
             -n openshift-gitops-operator --timeout=120s 2>/dev/null || true
@@ -977,7 +981,7 @@ configure_hub_argocd_non_agent() {
 
     export KUBECONFIG=$HUB_KUBECONFIG
 
-    ensure_local_cluster_in_cluster_config
+    ensure_cluster_config_namespaces
 
     # Delete existing ArgoCD CR
     log_info "Deleting existing hub ArgoCD CR..."
@@ -1015,7 +1019,7 @@ configure_hub_argocd_agent() {
     
     export KUBECONFIG=$HUB_KUBECONFIG
 
-    ensure_local_cluster_in_cluster_config
+    ensure_cluster_config_namespaces
     
     # Apply ArgoCD CR for agent mode (create or update).
     # Uses apply instead of patch to handle the case where the CR was deleted
