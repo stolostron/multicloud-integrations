@@ -11,7 +11,7 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **Cluster Secrets**: For agent mode, the controller creates ArgoCD cluster secrets with proper server URLs including `agentName` query parameter
 - **DISABLE_DEFAULT_ARGOCD_INSTANCE**: On OCP managed clusters, the addon creates an OLM Subscription with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`. On non-OCP clusters, the embedded operator chart is deployed. On the hub (`local-cluster`), the operator is already present so no installation occurs.
 - **OLM Subscription Override**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, the addon agent is **forced** to use OLM subscription mode for operator installation, bypassing OCP auto-detection. This ensures OLM is used even if the cluster detection fails or the cluster is non-OCP (though OLM must be available on the cluster for the installation to succeed). Custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. When absent or disabled, the agent falls back to OCP auto-detection and uses hardcoded defaults (`channel: latest`, `source: redhat-operators`, etc.).
-- **AppProject Propagation (Agent Mode)**: In agent mode, the ArgoCD principal automatically propagates AppProjects from the hub to managed clusters. The `default` AppProject is created on the hub in the managed cluster's namespace alongside the Application.
+- **AppProject Propagation (Agent Mode)**: In managed agent mode, the ArgoCD principal propagates AppProjects from the hub to managed clusters. In autonomous agent mode, AppProjects are created locally on the spoke and synced back to the hub with the agent name prefixed (e.g., `default` becomes `ocp-cluster1-default`). The `default` AppProject is included in the generated Policy for autonomous mode to ensure local reconciliation works before any agent sync occurs.
 - **Destination-Based Mapping (Agent Architecture)**: The principal keeps `destinationBasedMapping: true` for **routing** — it dispatches Applications to agents based on `spec.destination.name`. The **agents** have `destinationBasedMapping` disabled (not set in the ArgoCD CR). This is critical for `local-cluster`: the agent's `getTargetNamespaceForApp()` returns its own namespace (`local-cluster`), so agent-created Application copies go to the `local-cluster` namespace where the app controller watches. For remote clusters (Kind/OCP), the agent's namespace IS `openshift-gitops`, so the behavior is identical whether DBM is enabled or disabled on the agent. If agent DBM were enabled, the agent would keep the original namespace (`openshift-gitops`) from the hub — this fails on `local-cluster` because the app controller runs in `local-cluster`, not `openshift-gitops`, and it conflicts with existing ApplicationSet-generated apps in `openshift-gitops`.
 - **Image Pull Secret Handling**: Two mechanisms work together:
   1. **Secret copying (OCM klusterlet)**: The addon agent labels namespaces it creates (`openshift-gitops-operator`, `openshift-gitops`) with `addon.open-cluster-management.io/namespace: true`. This label tells the OCM klusterlet to automatically copy the `open-cluster-management-image-pull-credentials` secret into those namespaces. No custom propagation code is needed for this step.
@@ -58,6 +58,7 @@ All scenarios target `local-cluster` (hub), `ocp-cluster1` (OCP), and `kind-clus
 | **3** | Custom OLM | OCP only | N/A (validates OLM config) | installPlanApproval=Manual, DISABLE_DEFAULT_ARGOCD_INSTANCE=true, no embedded operator |
 | **4** | OLM Override on Kind | Kind only | N/A (validates OLM override) | olmSubscription.enabled forces OLM mode on Kind (no OCP auto-detect), agent attempts OLM subscription (fails gracefully since no OLM on Kind) |
 | **5** | Agent Version Drift Heal | All (runs after S2) | N/A (validates drift heal) | Simulates principal image drift, verifies controller patches ArgoCD Policy agent image, verifies restore after drift correction |
+| **6** | Autonomous Agent Mode | OCP + Kind + local-cluster | Policy deploys guestbook Application to spokes | Agents in autonomous mode, local reconciliation, status synced back to hub, AppProject included in Policy |
 
 **Notes:**
 - On OCP, guestbook-ui pods **crash** due to OCP's `restricted-v2` SCC (port 80 binding). The test checks that the Deployment resource exists (ArgoCD synced it), not pod health. On Kind, pods run normally.
@@ -468,6 +469,178 @@ KUBECONFIG=/path/to/managed kubectl get pods -n guestbook
 
 ---
 
+## Scenario 6: Autonomous Mode
+
+In autonomous mode, ArgoCD agents run on managed clusters and connect to the hub principal. Both managed and autonomous modes reconcile Applications **locally on the spoke** via the ArgoCD application-controller — the key difference is the **source of truth**. In managed mode, the hub is the source of truth and dispatches Application specs to agents. In autonomous mode, the spoke is the source of truth — Applications are created on the managed cluster (via Policy, Git, or `kubectl`), and the agent syncs both specs and status back to the hub principal, which acts as a **read-only mirror** (cannot modify or delete autonomous apps). This is the recommended pattern for the **App of Apps** bootstrap workflow. See `docs/autonomous-mode-best-practices.md` for a comprehensive guide.
+
+> **Source**: Mode definitions verified against [argocd-agent](https://github.com/argoproj-labs/argocd-agent) docs — `docs/concepts/agent-modes/autonomous.md`, `docs/concepts/agent-modes/managed.md`, `docs/user-guide/applications.md`.
+
+### Key Differences from Managed Mode
+
+| Aspect | Managed Mode | Autonomous Mode |
+|--------|-------------|-----------------|
+| Source of truth | Hub (principal) | Spoke (workload cluster) |
+| Application creation | On the hub; principal dispatches to agents | On the managed cluster (via Policy, Git, or `kubectl`) |
+| Application reconciliation | Local on spoke (same as autonomous) | Local on spoke; agent syncs specs+status to hub |
+| Hub capability | Full control — create, modify, delete apps | Read-only mirror — inspect only, no modifications |
+| Spoke drift | Reverted by agent to match hub spec | N/A — spoke owns the spec |
+| AppProject on hub | Original name | Prefixed with agent name (e.g., `ocp-cluster1-default`) |
+| AppProject in Policy | Not included (principal propagates) | Included (needed for local reconciliation) |
+| Best for | Centralized control | App of Apps, GitOps-first, edge/air-gap |
+
+### Step 1: Create GitOpsCluster with Autonomous Mode
+
+```bash
+export KUBECONFIG=/path/to/hub/kubeconfig
+
+# Create Placement
+cat <<EOF | kubectl apply -f -
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: autonomous-placement
+  namespace: openshift-gitops
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            name: my-managed-cluster
+EOF
+
+# Create GitOpsCluster with autonomous mode
+cat <<EOF | kubectl apply -f -
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: autonomous-gitops
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: autonomous-placement
+  gitopsAddon:
+    enabled: true
+    argoCDAgent:
+      enabled: true
+      mode: autonomous
+EOF
+```
+
+### Step 2: Modify Policy to Add RBAC and Bootstrap Application
+
+In autonomous mode, the Application is deployed to the managed cluster via the Policy. The `default` AppProject is automatically included in the Policy (unlike managed mode where the principal propagates it).
+
+```bash
+# Wait for the Policy to be created
+kubectl get policy autonomous-gitops-argocd-policy -n openshift-gitops
+
+# Add RBAC and a root Application (e.g., for App of Apps pattern)
+kubectl patch policy autonomous-gitops-argocd-policy -n openshift-gitops --type=json -p='[
+  {
+    "op": "add",
+    "path": "/spec/policy-templates/-",
+    "value": {
+      "objectDefinition": {
+        "apiVersion": "policy.open-cluster-management.io/v1",
+        "kind": "ConfigurationPolicy",
+        "metadata": {
+          "name": "autonomous-gitops-argocd-policy-rbac"
+        },
+        "spec": {
+          "remediationAction": "enforce",
+          "severity": "medium",
+          "object-templates": [
+            {
+              "complianceType": "musthave",
+              "objectDefinition": {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {
+                  "name": "acm-openshift-gitops-cluster-admin"
+                },
+                "roleRef": {
+                  "apiGroup": "rbac.authorization.k8s.io",
+                  "kind": "ClusterRole",
+                  "name": "cluster-admin"
+                },
+                "subjects": [
+                  {
+                    "kind": "ServiceAccount",
+                    "name": "acm-openshift-gitops-argocd-application-controller",
+                    "namespace": "openshift-gitops"
+                  }
+                ]
+              }
+            },
+            {
+              "complianceType": "musthave",
+              "objectDefinition": {
+                "apiVersion": "argoproj.io/v1alpha1",
+                "kind": "Application",
+                "metadata": {
+                  "name": "app-of-apps-root",
+                  "namespace": "openshift-gitops"
+                },
+                "spec": {
+                  "project": "default",
+                  "source": {
+                    "repoURL": "https://github.com/YOUR-ORG/YOUR-GITOPS-REPO",
+                    "targetRevision": "HEAD",
+                    "path": "apps"
+                  },
+                  "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": "openshift-gitops"
+                  },
+                  "syncPolicy": {
+                    "automated": {
+                      "prune": true,
+                      "selfHeal": true
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+]'
+```
+
+### Step 3: Verify Autonomous Mode
+
+```bash
+# Verify agent mode is set to autonomous in AddOnDeploymentConfig
+kubectl get addondeploymentconfig gitops-addon-config -n <managed-cluster> \
+  -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_MODE")].value}'
+# Expected: autonomous
+
+# Verify ArgoCD CR on managed cluster has autonomous client mode
+KUBECONFIG=/path/to/managed kubectl get argocd acm-openshift-gitops -n openshift-gitops \
+  -o jsonpath='{.spec.argoCDAgent.agent.client.mode}'
+# Expected: autonomous
+
+# Verify agent pod is running and syncing status back to hub
+KUBECONFIG=/path/to/managed kubectl logs -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent --tail=10
+# Look for: "Updated application status" messages (agent syncing back to principal)
+
+# Verify Applications are reconciled locally on managed cluster
+KUBECONFIG=/path/to/managed kubectl get applications.argoproj.io -n openshift-gitops -o wide
+```
+
+### Known Limitations
+
+- **Local-cluster (hub)**: In autonomous mode on `local-cluster`, the agent transforms Application specs (project name gets namespace-prefixed, destination gets cluster name reference), which can conflict with the Policy that enforces the original spec. Autonomous mode is primarily designed for remote managed clusters, not the hub itself. For hub-local Applications, use non-agent mode or managed agent mode.
+
+---
+
 ## Cleanup
 
 All cleanup operations are performed from the hub cluster. **The order matters** — see `argocd_policy.go` for the canonical reference.
@@ -550,6 +723,7 @@ These tests run against Kind clusters and are used for both GitHub PR CI and loc
 | `test-local-e2e-gitopsaddon-embedded` | `embedded` | Non-agent mode: spoke + local-cluster get ArgoCD via embedded operator, guestbook deploys and syncs on both, skip-argocd-policy annotation |
 | `test-local-e2e-gitopsaddon-embedded-agent` | `embedded-agent` | Agent mode: spoke gets agent pod, ApplicationSet deploys guestbook via principal/agent, local-cluster MCA/ArgoCD verified, agent version drift auto-heal |
 | `test-local-e2e-gitopsaddon-olm-override` | `olm-override` | OLM override: validates `olmSubscription.enabled=true` propagates `OLM_SUBSCRIPTION_ENABLED=true` to AddOnDeploymentConfig |
+| `test-local-e2e-gitopsaddon-embedded-autonomous` | `embedded-autonomous` | Autonomous mode: spoke gets agent in autonomous mode, guestbook deployed via Policy, local reconciliation, status synced to hub, local-cluster infrastructure verified |
 
 **Local development (creates Kind clusters + runs tests):**
 
@@ -604,6 +778,7 @@ make test-e2e-gitopsaddon-all
 - `test/e2e/gitopsaddon/helpers_test.go` — YAML generators, wait helpers, verification, cleanup
 - `test/e2e/gitopsaddon/gitopsaddon_embedded_test.go` — embedded (non-agent) scenario
 - `test/e2e/gitopsaddon/gitopsaddon_embedded_agent_test.go` — embedded + agent scenario
+- `test/e2e/gitopsaddon/gitopsaddon_embedded_autonomous_test.go` — embedded + autonomous agent scenario
 - `test/e2e/gitopsaddon/scripts/setup_env.sh` — environment setup (OCM, ArgoCD, controller)
 - `test/e2e/fixtures/` — ArgoCD operator CRDs and deployment YAML
 - `gitopsaddon/routes-openshift-crd/routes.route.openshift.io.crd.yaml` — Route CRD stub with `served: false`, installed by the gitopsaddon agent on non-OCP managed clusters as part of the embedded chart. NOT applied by `setup_env.sh` — the upstream ArgoCD operator does not need it (gracefully handles absent Route API, reconciles ArgoCD CR to `Available` without it).
@@ -635,6 +810,7 @@ export OCP_CLUSTER_NAME=ocp-cluster1
 ./gitopsaddon/test-scenarios.sh 3  # Custom OLM (OCP only)
 ./gitopsaddon/test-scenarios.sh 4  # OLM Override on Kind (Kind only)
 ./gitopsaddon/test-scenarios.sh 5  # Agent Version Drift Heal (deploys S2 first)
+./gitopsaddon/test-scenarios.sh 6  # Autonomous Agent Mode (OCP + Kind + local-cluster)
 
 # Cleanup only
 ./gitopsaddon/test-scenarios.sh cleanup

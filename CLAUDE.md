@@ -42,11 +42,13 @@ make test-e2e
 make test-local-e2e-gitopsaddon-embedded
 make test-local-e2e-gitopsaddon-embedded-agent
 make test-local-e2e-gitopsaddon-olm-override
+make test-local-e2e-gitopsaddon-embedded-autonomous
 
 # Run gitopsaddon e2e tests on existing kind clusters (CI mode, no cluster creation)
 make test-e2e-gitopsaddon-embedded
 make test-e2e-gitopsaddon-embedded-agent
 make test-e2e-gitopsaddon-olm-override
+make test-e2e-gitopsaddon-embedded-autonomous
 
 # Run integration test scenarios against real ACM hub + managed clusters
 cd gitopsaddon && bash test-scenarios.sh all
@@ -129,6 +131,7 @@ Then run the local e2e tests (these create fresh Kind clusters, so they don't in
 make test-local-e2e-gitopsaddon-embedded
 make test-local-e2e-gitopsaddon-embedded-agent
 make test-local-e2e-gitopsaddon-olm-override
+make test-local-e2e-gitopsaddon-embedded-autonomous
 ```
 
 ## Architecture
@@ -169,6 +172,7 @@ The **gitopsaddon agent** (managed cluster) receives env vars from `AddOnDeploym
   - `test-scenarios.sh`: Integration test script for real ACM clusters
   - `README.md`: Comprehensive feature documentation
 - `deploy/crds/`: CRD definitions (GitOpsCluster, ArgoCD, etc.)
+- `docs/autonomous-mode-best-practices.md`: Best practices for bootstrapping autonomous mode with App of Apps pattern
 - `test/e2e/gitopsaddon/`: Ginkgo-based e2e tests (Kind clusters)
 
 ### Key CRDs
@@ -190,6 +194,7 @@ The **gitopsaddon agent** (managed cluster) receives env vars from `AddOnDeploym
 - **OLM Override**: `olmSubscription.enabled: true` in GitOpsCluster spec forces the addon to use OLM mode regardless of cluster type detection.
 - **Policy Recreation Control**: The controller recreates deleted Policies unless `skip-argocd-policy` annotation is set. When skipped, the `ArgoCDPolicyReady` condition is set to `True` with `Reason=Skipped` (not `Reason=Success`) so operators can distinguish intentional skips from actual readiness.
 - **Routes CRD Stub**: The repo ships a routes CRD at `gitopsaddon/routes-openshift-crd/routes.route.openshift.io.crd.yaml` with `served: false`. The gitopsaddon agent installs this on non-OCP managed clusters as part of the embedded Helm chart deployment. It is NOT installed by the e2e `setup_env.sh` — the upstream ArgoCD operator does not need it at all (it gracefully handles the absence: logs "route.openshift.io/v1 API is not registered" and skips Route creation, reconciling the ArgoCD CR fully to `Available`). The `served: false` flag prevents conflicts with ROSA HCP route API checks on real OCP clusters.
+- **Autonomous Agent Mode**: When `argoCDAgent.mode: "autonomous"` is set in the GitOpsCluster spec, agents run in autonomous mode instead of managed mode. Both modes reconcile Applications **locally** on the spoke via the ArgoCD application-controller — the key difference is the **source of truth**. In managed mode, the hub (principal) is the source of truth and dispatches Application specs to agents. In autonomous mode, the spoke is the source of truth — Applications are created directly on the managed cluster (via Git/Policy/kubectl), and the agent syncs specs and status back to the hub principal, which acts as a **read-only mirror** (users can inspect but cannot modify or delete autonomous apps via the hub UI/CLI/API). Key implementation details: (1) the `default` AppProject is included in the generated Policy (autonomous agents need it for local reconciliation), (2) Applications are typically deployed to the managed cluster via OCM Policy or Git (not via principal dispatch), (3) the `ARGOCD_AGENT_MODE=autonomous` env var is propagated to the addon agent via `AddOnDeploymentConfig`, which sets `spec.argoCDAgent.agent.client.mode: autonomous` in the ArgoCD CR, (4) AppProjects synced from autonomous agents are prefixed with the agent name on the hub (e.g., `default` becomes `ocp-cluster1-default`). Autonomous mode is the recommended pattern for App of Apps workflows where all ongoing changes flow through Git after initial bootstrap. See `docs/autonomous-mode-best-practices.md` for a comprehensive guide. Known limitation: autonomous mode on `local-cluster` (hub) has conflicts because the agent transforms Application specs (project name, destination) which fights with Policy enforcement. Reference: [argocd-agent docs](https://github.com/argoproj-labs/argocd-agent) — `docs/concepts/agent-modes/autonomous.md`, `docs/user-guide/applications.md`.
 
 ## Development Workflow
 
@@ -211,7 +216,7 @@ Runs against a real ACM hub + OCP managed cluster + Kind managed cluster. Enviro
 - `KIND_KUBECONFIG` — Kind cluster kubeconfig (default: `~/Desktop/kind-cluster1`)
 - `OCP_KUBECONFIG` — OCP cluster kubeconfig (default: `~/Desktop/ocp-cluster1`)
 
-Scenarios run sequentially: cleanup → S1 (no agent) → cleanup → S2 (agent) → S5 (drift heal, after S2) → cleanup → S3 (OLM, OCP only) → cleanup → S4 (OLM override, Kind)
+Scenarios run sequentially: cleanup → S1 (no agent) → cleanup → S2 (agent) → S5 (drift heal, after S2) → cleanup → S3 (OLM, OCP only) → cleanup → S4 (OLM override, Kind) → cleanup → S6 (autonomous agent)
 
 ### E2E Tests (Kind Clusters)
 The `make test-local-e2e-gitopsaddon-*` targets create fresh Kind clusters (`hub` + `cluster1`), install OCM, deploy the controller, and run Ginkgo tests. These use the upstream `argocd-operator` (not Red Hat/OLM) and test the embedded operator path. The e2e Kind clusters (`kind-hub`, `kind-cluster1`) are separate from any real managed clusters.
@@ -301,6 +306,7 @@ The GitHub Actions CI (`.github/workflows/e2e.yml`) runs on PRs to main/release 
 - **e2e-gitopsaddon (embedded)**: `make test-e2e-gitopsaddon-embedded` — tests non-agent addon flow + skip-argocd-policy annotation
 - **e2e-gitopsaddon (embedded-agent)**: `make test-e2e-gitopsaddon-embedded-agent` — tests agent mode flow + drift auto-heal + env var propagation
 - **e2e-gitopsaddon (olm-override)**: `make test-e2e-gitopsaddon-olm-override` — tests OLM override hub-side propagation
+- **e2e-gitopsaddon (embedded-autonomous)**: `make test-e2e-gitopsaddon-embedded-autonomous` — tests autonomous agent mode flow + Policy-based app deployment + local-cluster infrastructure verification
 
 To run locally what CI runs: `make test-local-e2e-gitopsaddon-embedded` (creates kind clusters, builds image, runs tests).
 
