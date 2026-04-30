@@ -82,6 +82,8 @@ jobs:
             make_target: test-e2e-gitopsaddon-embedded-agent
           - scenario: olm-override
             make_target: test-e2e-gitopsaddon-olm-override
+          - scenario: embedded-autonomous
+            make_target: test-e2e-gitopsaddon-embedded-autonomous
     steps:
       - name: Free up disk space
         run: |
