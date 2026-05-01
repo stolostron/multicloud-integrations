@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,32 +115,6 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrent
 		For(applicationGVK).
 		WithEventFilter(ApplicationPredicateFunctions).
 		Complete(r)
-}
-
-func (r *ApplicationReconciler) isLocalCluster(clusterName string) bool {
-	managedCluster := &clusterv1.ManagedCluster{}
-	managedClusterKey := types.NamespacedName{
-		Name: clusterName,
-	}
-	err := r.Get(context.TODO(), managedClusterKey, managedCluster)
-
-	if err != nil {
-		klog.Errorf("Failed to find managed cluster: %v, error: %v ", clusterName, err)
-		return false
-	}
-
-	labels := managedCluster.GetLabels()
-
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-
-	if strings.EqualFold(labels["local-cluster"], "true") {
-		klog.Infof("This is local-cluster: %v", clusterName)
-		return true
-	}
-
-	return false
 }
 
 // discoverAndFetchAppProject discovers the ArgoCD instance namespace and fetches the AppProject by:
@@ -423,12 +396,6 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	managedClusterName := application.GetAnnotations()[AnnotationKeyOCMManagedCluster]
-
-	if r.isLocalCluster(managedClusterName) {
-		log.Info("skipping Application with the local-cluster as Managed Cluster")
-
-		return ctrl.Result{}, nil
-	}
 
 	mwName := generateManifestWorkName(application.GetName(), application.GetUID())
 

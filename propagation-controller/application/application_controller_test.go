@@ -206,7 +206,7 @@ var _ = Describe("Application Pull controller", func() {
 	})
 
 	Context("When Application with OCM pull label is created for local-cluster", func() {
-		It("Should not create ManifestWork", func() {
+		It("Should create ManifestWork for local-cluster", func() {
 			By("Creating the OCM ManagedCluster")
 			managedCluster := clusterv1.ManagedCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -245,14 +245,11 @@ var _ = Describe("Application Pull controller", func() {
 			Expect(k8sClient.Create(ctx, app3)).Should(Succeed())
 			Expect(k8sClient.Get(ctx, appKey3, app3)).Should(Succeed())
 
-			mwKey := types.NamespacedName{Name: generateManifestWorkName(app3.GetName(), app3.GetUID()), Namespace: clusterName}
+			mwKey := types.NamespacedName{Name: generateManifestWorkName(app3.GetName(), app3.GetUID()), Namespace: localClusterName}
 			mw := workv1.ManifestWork{}
-			Consistently(func() bool {
-				if err := k8sClient.Get(ctx, mwKey, &mw); err != nil {
-					return true
-				}
-				return false
-			}).Should(BeTrue())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, mwKey, &mw)
+			}).Should(Succeed())
 		})
 	})
 
