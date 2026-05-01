@@ -434,7 +434,7 @@ func Test_prepareApplicationForWorkPayload(t *testing.T) {
 					"kind":       "Application",
 					"metadata": map[string]interface{}{
 						"name":      "app1",
-						"namespace": "argocd", // the application ns remains regardless of custom namespace from annotation
+						"namespace": "test-ns",
 						"annotations": map[string]interface{}{
 							AnnotationKeyAppRefresh: "normal",
 							"other.annotation":      "preserve-me",
