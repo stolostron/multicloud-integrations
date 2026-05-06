@@ -1,0 +1,46 @@
+FROM registry-proxy.engineering.redhat.com/rh-osbs/openshift-golang-builder:v1.25.8 AS plugin-builder
+
+WORKDIR /go/src/github.com/stolostron/multicloud-integrations
+COPY . .
+RUN rm -fr vendor && \
+        go mod vendor && \
+        CGO_ENABLED=1 GOEXPERIMENT=strictfipsruntime make -f Makefile.prow build
+
+
+FROM registry-proxy.engineering.redhat.com/ubi9/ubi-minimal:latest
+
+RUN microdnf update -y && \
+     microdnf clean all
+
+ENV OPERATOR=/usr/local/bin/multicloud-integrations \
+    USER_UID=1001 \
+    USER_NAME=multicloud-integrations
+
+LABEL \
+    name="rhacm2/multicloud-integrations-rhel9" \
+    cpe="cpe:/a:redhat:acm:2.16::el9" \
+    com.redhat.component="multicloud-integrations" \
+    description="Multicloud integrations" \
+    maintainer="acm-contact@redhat.com" \
+    io.k8s.description="Multicloud integrations" \
+    org.label-schema.license="Red Hat Advanced Cluster Management for Kubernetes EULA" \
+    org.label-schema.schema-version="1.0" \
+    summary="Multicloud integrations" \
+    io.k8s.display-name="Multicloud integrations" \
+    io.openshift.tags="mce acm multicloud-integrations"
+
+# install operator binary
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopscluster /usr/local/bin/gitopscluster
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopssyncresc /usr/local/bin/gitopssyncresc
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/multiclusterstatusaggregation /usr/local/bin/multiclusterstatusaggregation
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/propagation /usr/local/bin/propagation
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/gitopsaddon /usr/local/bin/gitopsaddon
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/maestroPropagation /usr/local/bin/maestroPropagation
+COPY --from=plugin-builder /go/src/github.com/stolostron/multicloud-integrations/build/_output/bin/maestroAggregation /usr/local/bin/maestroAggregation
+
+COPY build/bin /usr/local/bin
+RUN  /usr/local/bin/user_setup
+
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
+
+USER ${USER_UID}
