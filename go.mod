@@ -81,4 +81,4 @@ require (
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
 
-replace github.com/moby/spdystream v0.2.0 => github.com/moby/spdystream v0.5.1
+replace github.com/moby/spdystream => github.com/moby/spdystream v0.5.1
