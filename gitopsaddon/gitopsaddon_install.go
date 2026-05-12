@@ -109,9 +109,10 @@ func (r *GitopsAddonReconciler) installViaOLMSubscription(ctx context.Context) e
 		return fmt.Errorf("failed to ensure OLM subscription namespace %s: %w", subNamespace, err)
 	}
 
-	// Create an OwnNamespace OperatorGroup so OLM knows to deploy the operator
-	// (and its services) inside subNamespace. Without an OperatorGroup in the
-	// subscription namespace OLM will refuse to install.
+	// Create an AllNamespaces OperatorGroup so OLM knows to deploy the operator.
+	// The openshift-gitops-operator does not support OwnNamespace install mode;
+	// it requires AllNamespaces. Without an OperatorGroup in the subscription
+	// namespace OLM will refuse to install.
 	if err := r.createOrUpdateOperatorGroup(ctx, subNamespace); err != nil {
 		return fmt.Errorf("failed to ensure OperatorGroup in %s: %w", subNamespace, err)
 	}
@@ -553,7 +554,7 @@ func (r *GitopsAddonReconciler) createOrUpdateOLMSubscription(ctx context.Contex
 	return nil
 }
 
-// createOrUpdateOperatorGroup ensures an OwnNamespace OperatorGroup exists in the
+// createOrUpdateOperatorGroup ensures an AllNamespaces OperatorGroup exists in the
 // given namespace so that OLM can install a Subscription there. If an OperatorGroup
 // already exists in the namespace (pre-existing or from a previous install), it is
 // left unchanged to avoid conflicts.
@@ -587,14 +588,13 @@ func (r *GitopsAddonReconciler) createOrUpdateOperatorGroup(ctx context.Context,
 				},
 			},
 			"spec": map[string]interface{}{
-				// OwnNamespace mode: the operator and its services are deployed
-				// inside `namespace`, matching where the CRD's conversion webhook
-				// service is expected (openshift-gitops-operator).
-				"targetNamespaces": []interface{}{namespace},
+				// AllNamespaces mode: the openshift-gitops-operator does not
+				// support OwnNamespace; omitting targetNamespaces tells OLM
+				// to use AllNamespaces install mode.
 			},
 		},
 	}
-	klog.Infof("Creating OwnNamespace OperatorGroup in %s", namespace)
+	klog.Infof("Creating AllNamespaces OperatorGroup in %s", namespace)
 	if err := r.Create(ctx, og); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create OperatorGroup in %s: %w", namespace, err)
 	}

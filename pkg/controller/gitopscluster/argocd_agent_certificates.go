@@ -69,7 +69,7 @@ var (
 // EnsureArgoCDAgentCASecret ensures the ArgoCD agent CA secret exists
 // This creates only the CA certificate and CA bundle ConfigMap
 func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentCASecret(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
-	namespace := gitOpsCluster.Namespace
+	namespace := GetEffectiveArgoNamespace(gitOpsCluster)
 
 	klog.V(2).Infof("Ensuring ArgoCD agent CA certificate in namespace %s", namespace)
 
@@ -139,7 +139,7 @@ func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentCASecret(ctx context.Context, 
 
 // EnsureArgoCDAgentPrincipalTLSCert ensures the principal TLS certificate is generated from the CA
 func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentPrincipalTLSCert(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
-	namespace := gitOpsCluster.Namespace
+	namespace := GetEffectiveArgoNamespace(gitOpsCluster)
 
 	klog.V(2).Infof("Ensuring principal TLS certificate in namespace %s", namespace)
 
@@ -191,7 +191,7 @@ func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentPrincipalTLSCert(ctx context.C
 
 // EnsureArgoCDAgentResourceProxyTLSCert ensures the resource proxy TLS certificate is generated from the CA
 func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentResourceProxyTLSCert(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
-	namespace := gitOpsCluster.Namespace
+	namespace := GetEffectiveArgoNamespace(gitOpsCluster)
 
 	klog.V(2).Infof("Ensuring resource proxy TLS certificate in namespace %s", namespace)
 

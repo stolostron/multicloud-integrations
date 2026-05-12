@@ -147,10 +147,10 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 						// system:open-cluster-management:cluster:<cluster-name>:addon:gitops-addon:agent:gitops-addon-agent
 						// The ArgoCD principal is configured with a custom auth regex to extract
 						// just the cluster name from this full path.
-						SigningCA: addonv1alpha1.SigningCARef{
-							Name:      "argocd-agent-ca",
-							Namespace: gitOpsCluster.Namespace,
-						},
+					SigningCA: addonv1alpha1.SigningCARef{
+						Name:      "argocd-agent-ca",
+						Namespace: GetEffectiveArgoNamespace(gitOpsCluster),
+					},
 					},
 				},
 			},
@@ -188,6 +188,8 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 		buildCleanupJobManifest(addonImage, "open-cluster-management-agent-addon"),
 		// ServiceAccount
 		buildServiceAccountManifest("open-cluster-management-agent-addon"),
+		// ClusterRole (fine-grained permissions for the addon agent)
+		buildClusterRoleManifest(),
 		// ClusterRoleBinding
 		buildClusterRoleBindingManifest("open-cluster-management-agent-addon"),
 		// Deployment
@@ -281,6 +283,69 @@ func buildServiceAccountManifest(namespace string) workv1.Manifest {
 	})
 }
 
+// buildClusterRoleManifest creates the fine-grained ClusterRole for the addon agent.
+// This replaces the previous cluster-admin binding with least-privilege permissions.
+func buildClusterRoleManifest() workv1.Manifest {
+	return newManifestWithoutStatus(&rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRole",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gitops-addon",
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		Rules: gitopsAddonClusterRoleRules(),
+	})
+}
+
+// gitopsAddonClusterRoleRules returns the RBAC rules for the gitops-addon ClusterRole.
+func gitopsAddonClusterRoleRules() []rbacv1.PolicyRule {
+	return []rbacv1.PolicyRule{
+		// Namespace management (create ArgoCD/operator namespaces, label them)
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// Secret management (image pull secrets, TLS certs, ArgoCD secrets)
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		// ServiceAccount management (patch imagePullSecrets on ArgoCD SAs; watch needed by controller-runtime cache)
+		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// Pod management (delete pods with image pull errors; watch needed by controller-runtime cache)
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		// ConfigMap management (operator config, pause marker; watch needed by controller-runtime cache)
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		// Service management (operator metrics/webhook services via Helm chart)
+		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// Event recording (leader election events)
+		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
+		// Deployment management (operator deployment, addon deployment status)
+		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		// Deployment finalizers (needed for blockOwnerDeletion in pause marker ownerReference)
+		{APIGroups: []string{"apps"}, Resources: []string{"deployments/finalizers"}, Verbs: []string{"update"}},
+		// RBAC management (operator roles/bindings created by Helm chart, cleanup)
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"roles", "rolebindings"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		// "escalate" and "bind" allow the addon to create ClusterRoles that grant
+		// permissions the addon itself does not hold (needed for the ArgoCD operator's RBAC)
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"clusterroles", "clusterrolebindings"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"}},
+		// CRD management (install ArgoCD CRDs, Route CRD stub, patch conversion webhook; watch needed by controller-runtime cache)
+		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// ArgoCD CR management (cleanup deletes addon-created ArgoCD CRs)
+		{APIGroups: []string{"argoproj.io"}, Resources: []string{"argocds"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		// OLM subscription management (OCP clusters use OLM for operator install)
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"subscriptions"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"clusterserviceversions"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"operatorgroups"}, Verbs: []string{"get", "list", "create"}},
+		// GitOpsService CR cleanup (OLM mode)
+		{APIGroups: []string{"pipelines.openshift.io"}, Resources: []string{"gitopsservices"}, Verbs: []string{"get", "delete"}},
+		// OCM cluster detection (is this OCP? is this a hub?)
+		{APIGroups: []string{"cluster.open-cluster-management.io"}, Resources: []string{"managedclusters"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"cluster.open-cluster-management.io"}, Resources: []string{"clusterclaims"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"operator.open-cluster-management.io"}, Resources: []string{"clustermanagers"}, Verbs: []string{"list"}},
+		// Leader election
+		{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update"}},
+	}
+}
+
 // buildClusterRoleBindingManifest creates the cluster role binding manifest
 func buildClusterRoleBindingManifest(namespace string) workv1.Manifest {
 	return newManifestWithoutStatus(&rbacv1.ClusterRoleBinding{
@@ -297,7 +362,7 @@ func buildClusterRoleBindingManifest(namespace string) workv1.Manifest {
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "ClusterRole",
-			Name:     "cluster-admin",
+			Name:     "gitops-addon",
 		},
 		Subjects: []rbacv1.Subject{
 			{
