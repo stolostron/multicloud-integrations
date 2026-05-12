@@ -83,7 +83,8 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 				Namespace: namespace,
 			},
 			Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
-				CustomizedVariables: customizedVariables,
+				CustomizedVariables:   customizedVariables,
+				AgentInstallNamespace: utils.AddonAgentNamespace,
 			},
 		}
 
@@ -96,9 +97,6 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		klog.Errorf("Failed to get AddOnDeploymentConfig: %v", err)
 		return err
 	} else {
-		// Update existing AddOnDeploymentConfig - merge managed variables with existing ones
-		klog.Infof("Updating AddOnDeploymentConfig gitops-addon-config in namespace %s", namespace)
-
 		// Create a map of existing variables for easy lookup
 		existingVars := make(map[string]addonv1alpha1.CustomizedVariable)
 		for _, variable := range existing.Spec.CustomizedVariables {
@@ -154,12 +152,29 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 			}
 		}
 
-		existing.Spec.CustomizedVariables = updatedVariables
+		// Detect whether agentInstallNamespace needs correction.
+		if existing.Spec.AgentInstallNamespace != utils.AddonAgentNamespace {
+			klog.Infof("Correcting AddOnDeploymentConfig agentInstallNamespace from %q to %q in namespace %s",
+				existing.Spec.AgentInstallNamespace, utils.AddonAgentNamespace, namespace)
+		}
 
-		err = r.Update(context.Background(), existing)
-		if err != nil {
-			klog.Errorf("Failed to update AddOnDeploymentConfig: %v", err)
-			return err
+		// Only call Update when something actually changed. An unconditional Update
+		// bumps resourceVersion on every hub reconcile; the OCM addon framework
+		// detects the change and triggers a rolling restart of the addon Deployment
+		// on the managed cluster, causing continuous SIGTERM/restart cycles.
+		if !customizedVariablesEqual(updatedVariables, existing.Spec.CustomizedVariables) ||
+			existing.Spec.AgentInstallNamespace != utils.AddonAgentNamespace {
+			klog.Infof("Updating AddOnDeploymentConfig gitops-addon-config in namespace %s", namespace)
+			existing.Spec.CustomizedVariables = updatedVariables
+			existing.Spec.AgentInstallNamespace = utils.AddonAgentNamespace
+
+			err = r.Update(context.Background(), existing)
+			if err != nil {
+				klog.Errorf("Failed to update AddOnDeploymentConfig: %v", err)
+				return err
+			}
+		} else {
+			klog.Infof("AddOnDeploymentConfig gitops-addon-config in namespace %s is up to date, skipping update", namespace)
 		}
 	}
 
@@ -311,7 +326,11 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 				},
 			},
 			Spec: addonv1alpha1.ManagedClusterAddOnSpec{
-				Configs: expectedConfigs,
+				// Explicitly set the install namespace so the OCM addon framework always
+				// places the gitopsaddon agent in the standard ACM addon namespace,
+				// regardless of OLM or non-OLM operator installation mode.
+				InstallNamespace: utils.AddonAgentNamespace,
+				Configs:          expectedConfigs,
 			},
 		}
 
@@ -330,6 +349,16 @@ func (r *ReconcileGitOpsCluster) EnsureManagedClusterAddon(namespace string, git
 
 	// ManagedClusterAddOn exists, ensure it has all correct config references
 	needsUpdate := false
+
+	// Ensure the install namespace is always the standard ACM addon namespace.
+	// This corrects any existing resource that has a wrong or missing InstallNamespace
+	// (e.g., set to openshift-operators from an older version).
+	if existing.Spec.InstallNamespace != utils.AddonAgentNamespace {
+		klog.Infof("Correcting ManagedClusterAddOn gitops-addon installNamespace from %q to %q in namespace %s",
+			existing.Spec.InstallNamespace, utils.AddonAgentNamespace, namespace)
+		existing.Spec.InstallNamespace = utils.AddonAgentNamespace
+		needsUpdate = true
+	}
 
 	// Add missing configs
 	for _, expectedConfig := range expectedConfigs {
@@ -507,3 +536,20 @@ func (r *ReconcileGitOpsCluster) extractArgoCDAgentVariables(argoCDAgent *gitops
 	}
 }
 
+// customizedVariablesEqual returns true when both slices contain the same name/value
+// pairs regardless of order.
+func customizedVariablesEqual(a, b []addonv1alpha1.CustomizedVariable) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ma := make(map[string]string, len(a))
+	for _, v := range a {
+		ma[v.Name] = v.Value
+	}
+	for _, v := range b {
+		if val, ok := ma[v.Name]; !ok || val != v.Value {
+			return false
+		}
+	}
+	return true
+}

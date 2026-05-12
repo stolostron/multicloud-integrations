@@ -104,19 +104,18 @@ func (r *GitopsAddonReconciler) Start(ctx context.Context) error {
 
 	// Clear any stale pause marker from a previous cleanup cycle.
 	// The cleanup Job creates a pause marker ConfigMap to prevent reconciliation during cleanup.
-	// On OCP (OLM mode), the Deployment runs in openshift-operators but the marker is in
-	// open-cluster-management-agent-addon, so the owner reference can't be set and
-	// the marker is never garbage collected. Since the controller is starting fresh,
-	// any existing marker is stale and should be removed.
+	// The gitopsaddon agent always runs in open-cluster-management-agent-addon (via the
+	// AddOnTemplate), but the marker ConfigMap's owner reference cannot be set across
+	// namespaces and is therefore never automatically garbage collected. Since the
+	// controller is starting fresh, any existing marker is stale and should be removed.
 	// We use the uncached APIReader here because the controller-runtime informer cache
 	// may not have synced ConfigMaps yet at startup, causing the cached Get to miss
 	// markers that actually exist.
 	ClearStalePauseMarker(ctx, r.Client, r.APIReader)
 
-	// Perform initial reconciliation
-	r.reconcile(ctx)
-
-	// Run periodic reconciliation until context is cancelled
+	// Run periodic reconciliation until context is cancelled.
+	// wait.UntilWithContext fires immediately on entry (initial reconcile) and then
+	// every Interval seconds — no separate r.reconcile(ctx) call needed here.
 	wait.UntilWithContext(ctx, r.reconcile, time.Duration(r.Interval)*time.Second)
 
 	klog.Info("Gitops Addon controller stopped")
