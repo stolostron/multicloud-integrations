@@ -8,6 +8,7 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **Placement**: Selects which managed clusters are targeted (including `local-cluster` / hub). Requires a `ManagedClusterSetBinding` for the `default` ManagedClusterSet in the `openshift-gitops` namespace — without it, Placement cannot find any ManagedClusters.
 - **Policy**: The GitOpsCluster controller creates a Policy that deploys the ArgoCD CR to managed clusters. **This Policy is user-owned** — users can modify it to add RBAC, Applications, or customize ArgoCD settings. The controller will recreate the Policy if it is deleted (unless `skip-argocd-policy` annotation is set) and may patch the `argoCDAgent.agent.image` field during agent version drift heal, but will not overwrite other user customizations. For `local-cluster`, the ArgoCD CR is deployed to the `local-cluster` namespace (not `openshift-gitops`) using a hub template.
 - **ManagedClusterAddOn**: Created automatically for ALL managed clusters including `local-cluster`. Manages addon lifecycle.
+- **Addon RBAC**: The `gitops-addon` ServiceAccount uses a fine-grained `ClusterRole` named `gitops-addon` (not `cluster-admin`). Defined in `addonTemplates/addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic, for agent mode). Includes `escalate`/`bind` on RBAC resources (needed because the addon deploys the ArgoCD operator which creates its own Roles/ClusterRoles).
 - **Cluster Secrets**: For agent mode, the controller creates ArgoCD cluster secrets with proper server URLs including `agentName` query parameter
 - **DISABLE_DEFAULT_ARGOCD_INSTANCE**: On OCP managed clusters, the addon creates an OLM Subscription with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`. On non-OCP clusters, the embedded operator chart is deployed. On the hub (`local-cluster`), the operator is already present so no installation occurs.
 - **OLM Subscription Override**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, the addon agent is **forced** to use OLM subscription mode for operator installation, bypassing OCP auto-detection. This ensures OLM is used even if the cluster detection fails or the cluster is non-OCP (though OLM must be available on the cluster for the installation to succeed). Custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. When absent or disabled, the agent falls back to OCP auto-detection and uses hardcoded defaults (`channel: latest`, `source: redhat-operators`, etc.).
@@ -24,6 +25,8 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **ARGOCD_CLUSTER_CONFIG_NAMESPACES**: Environment variable on the `openshift-gitops-operator` Deployment (set via OLM Subscription). Controls which namespaces get cluster-scoped RBAC for their ArgoCD instances. When a namespace is listed, the operator creates ClusterRoles/ClusterRoleBindings granting cluster-scope `list`/`watch` on `namespaces` and other resources to the ArgoCD application-controller, agent, and principal ServiceAccounts. **Must be set to `openshift-gitops,local-cluster`** for agent mode — `openshift-gitops` for the principal and remote agents, `local-cluster` for the hub-local agent. Without this, agent/principal pods crash with `"namespaces is forbidden"` errors because only namespace-scoped Roles are created. The `test-scenarios.sh` helper `ensure_cluster_config_namespaces` patches the Subscription to set this. On a fresh ACM hub, the default is typically `openshift-gitops` only.
 - **Agent Version Drift Heal**: In agent mode, the hub controller **watches** the ArgoCD principal Deployment for container image changes. When the OpenShift GitOps Operator upgrades the principal (changing the image), the controller is automatically triggered and patches the ArgoCD Policy to enforce the correct `spec.argoCDAgent.agent.image` on managed clusters, ensuring spoke agents stay compatible with the hub principal without waiting for another reconciliation event. Only the addon-managed ArgoCD template named `acm-openshift-gitops` is patched; user-added ArgoCD templates in the Policy are left untouched. This is disabled with the `apps.open-cluster-management.io/skip-agent-version-heal: "true"` annotation on the GitOpsCluster CR.
 - **Policy Recreation Control**: The ArgoCD Policy is created once and left for users to customize. If a user deletes the Policy intentionally, the controller will recreate it on the next reconcile. To prevent this, set `apps.open-cluster-management.io/skip-argocd-policy: "true"` on the GitOpsCluster CR. When skipped, the `ArgoCDPolicyReady` condition is set to `True` with `Reason=Skipped`.
+- **Custom ArgoCD Namespace**: The `GitOpsCluster` CR supports `spec.argoServer.argoNamespace` to specify a custom namespace for the hub ArgoCD instance. The hub controller uses `GetEffectiveArgoNamespace()` to resolve the correct namespace for cert generation, CA propagation, AddOnTemplate signing CA, and service discovery. A `ManagedClusterSetBinding` for `default` must also exist in the custom namespace. Scenario 7 in `test-scenarios.sh` validates this.
+- **Cert Rotation & Autorefresh**: The `argocd-agent-client-tls` cert has a 24-hour validity. The OCM `ClientCertController` (klusterlet-agent) rotates the cert at ~80% of lifetime by creating a new CSR, and updates the source secret in the addon namespace. The `SecretReconciler` (`secret_controller.go`) propagates this to the ArgoCD namespace via: (1) source secret update watch (immediate copy), (2) target secret deletion watch (instant re-copy if deleted), (3) **periodic requeue every 5 minutes** (`SecretResyncInterval`) as a safety net against missed watch events. The `secretDataEqual()` helper avoids unnecessary API calls during periodic checks. **When cert data actually changes**, the reconciler automatically **rolling-restarts** all ArgoCD agent Deployments (`app.kubernetes.io/part-of=argocd-agent`) in the target namespace by annotating the pod template. This is required because the argocd-agent binary reads TLS certs at startup and does not hot-reload — without the restart, the agent keeps the expired cert in memory and loses connection. The restart is only triggered on actual cert changes, not on periodic resyncs where data is already in sync. No manual `kubectl rollout restart` is needed.
 
 ## Architecture
 
@@ -36,7 +39,7 @@ The system uses 2 addon template modes:
 | **Static** | `gitops-addon` | `gitopsAddon.enabled=true`, `argoCDAgent.enabled=false` |
 | **Dynamic** | `gitops-addon-{ns}-{name}` | `gitopsAddon.enabled=true`, `argoCDAgent.enabled=true` (includes `RegistrationSpec` for client cert provisioning) |
 
-OLM vs. embedded operator installation is determined at runtime by the addon agent. When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, OLM mode is forced (bypassing auto-detection). Otherwise, the agent auto-detects OCP clusters for OLM and falls back to embedded manifests for non-OCP clusters.
+OLM vs. embedded operator installation is determined at runtime by the addon agent. When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, OLM mode is forced (bypassing auto-detection). Otherwise, the agent auto-detects OCP clusters for OLM and falls back to embedded manifests for non-OCP clusters. **OperatorGroup**: Before creating the OLM Subscription, the addon agent creates an **AllNamespaces** OperatorGroup (`gitops-addon-operator-group`) in the subscription namespace. It must NOT use `OwnNamespace` mode (no `targetNamespaces`) because the openshift-gitops-operator CSV does not support `OwnNamespace` InstallModeType — using it causes the CSV to fail immediately with `"OwnNamespace InstallModeType not supported"`. If an OperatorGroup already exists in the namespace, it is left unchanged.
 
 ### Local-Cluster (Hub) Support
 
@@ -61,13 +64,16 @@ All scenarios target `local-cluster` (hub), `ocp-cluster1` (OCP), and `kind-clus
 | **4** | OLM Override on Kind | Kind only | N/A (validates OLM override) | olmSubscription.enabled forces OLM mode on Kind (no OCP auto-detect), agent attempts OLM subscription (fails gracefully since no OLM on Kind) |
 | **5** | Agent Version Drift Heal | All (runs after S2) | N/A (validates drift heal) | Simulates principal image drift, verifies controller patches ArgoCD Policy agent image, verifies restore after drift correction |
 | **6** | Autonomous Agent Mode | OCP + Kind + local-cluster | Policy deploys guestbook Application to spokes | Agents in autonomous mode, local reconciliation, status synced back to hub, AppProject included in Policy |
+| **7** | Custom Hub ArgoCD Namespace | Kind + local-cluster | N/A (validates cert placement) | ArgoCD in `custom-gitops` namespace, CA cert in custom namespace, certs generated correctly |
 
 **Notes:**
 - On OCP, guestbook-ui pods **crash** due to OCP's `restricted-v2` SCC (port 80 binding). The test checks that the Deployment resource exists (ArgoCD synced it), not pod health. On Kind, pods run normally.
 - Agent mode requires Red Hat registry access for agent images on non-OCP clusters (handled by OCM pull secret propagation).
 - OLM customization (Scenario 3) is OCP-only. Non-OCP clusters always use embedded operator unless `olmSubscription.enabled: true` forces OLM mode (Scenario 4).
 - `local-cluster` behaves as a fully managed cluster: gets its own ManagedClusterAddOn, client certs (agent mode), and ArgoCD instance in `local-cluster` namespace.
-- Initial cleanup is forceful (direct spoke access OK). Between-scenario cleanup is hub-triggered only.
+- `local-cluster` guestbook app may not fully reconcile due to agent timing — treated as a warning, not a failure.
+- A full `cleanup_all` runs before each scenario to guarantee pristine state. It force-deletes hub resources, runs `cleanup_managed_cluster_direct` on each managed cluster (removes ArgoCD CRs, OLM artifacts, orphaned deployments/statefulsets, stale cleanup Jobs), deletes stale pre-delete ManifestWorks, and **restarts the hub controller** to clear informer cache UID mismatch errors. Between-scenario cleanup is also performed. OCP-specific wait timeouts use 600s (OLM catalog resolution is slow); non-OCP operations use 300s; cleanup timeouts are 120-180s with force-delete fallback (finalizer stripping).
+- Scenario 2 includes cert rotation verification: deletes `argocd-agent-client-tls` on each managed cluster and verifies it is recreated within 120s.
 
 ## Prerequisites
 
@@ -90,6 +96,18 @@ To use a Kind cluster as a managed cluster for `test-scenarios.sh`:
 6. **Critical**: Create `governance-policy-framework` and `config-policy-controller` ManagedClusterAddOns in the `kind-cluster1` namespace on the hub. Without these, the OCM Policy framework cannot enforce Policies on the Kind cluster, and `test-scenarios.sh` will fail with Policy compliance timeouts.
 
 See `CLAUDE.md` for the full step-by-step commands.
+
+### Running Test Scenarios
+
+**WARNING: Scenarios must run sequentially, NEVER in parallel.** Each scenario modifies shared hub state (GitOpsCluster, Policy, ManagedClusterAddOn, ArgoCD CRs). Parallel execution causes resource conflicts, duplicate ArgoCD CRs, and unpredictable failures.
+
+```bash
+# Run all scenarios sequentially
+bash test-scenarios.sh all
+
+# Run a single scenario
+bash test-scenarios.sh 2
+```
 
 ---
 
@@ -726,7 +744,7 @@ These tests run against Kind clusters and are used for both GitHub PR CI and loc
 | Make Target | Label Filter | What it Tests |
 |---|---|---|
 | `test-local-e2e-gitopsaddon-embedded` | `embedded` | Non-agent mode: spoke + local-cluster get ArgoCD via embedded operator, guestbook deploys and syncs on both, skip-argocd-policy annotation |
-| `test-local-e2e-gitopsaddon-embedded-agent` | `embedded-agent` | Agent mode: spoke gets agent pod, ApplicationSet deploys guestbook via principal/agent, local-cluster MCA/ArgoCD verified, agent version drift auto-heal |
+| `test-local-e2e-gitopsaddon-embedded-agent` | `embedded-agent` | Agent mode: spoke gets agent pod, ApplicationSet deploys guestbook via principal/agent, local-cluster MCA/ArgoCD verified, agent version drift auto-heal, cert rotation resilience |
 | `test-local-e2e-gitopsaddon-olm-override` | `olm-override` | OLM override: validates `olmSubscription.enabled=true` propagates `OLM_SUBSCRIPTION_ENABLED=true` to AddOnDeploymentConfig |
 | `test-local-e2e-gitopsaddon-embedded-autonomous` | `embedded-autonomous` | Autonomous mode: spoke gets agent in autonomous mode, guestbook deployed via Policy, local reconciliation, status synced to hub, local-cluster infrastructure verified |
 
@@ -816,6 +834,7 @@ export OCP_CLUSTER_NAME=ocp-cluster1
 ./gitopsaddon/test-scenarios.sh 4  # OLM Override on Kind (Kind only)
 ./gitopsaddon/test-scenarios.sh 5  # Agent Version Drift Heal (deploys S2 first)
 ./gitopsaddon/test-scenarios.sh 6  # Autonomous Agent Mode (OCP + Kind + local-cluster)
+./gitopsaddon/test-scenarios.sh 7  # Custom Hub ArgoCD Namespace (Kind + local-cluster)
 
 # Cleanup only
 ./gitopsaddon/test-scenarios.sh cleanup
@@ -904,6 +923,10 @@ Creates: Placement `kind-olm-override-placement`, GitOpsCluster `kind-olm-overri
 | 2 | AddOnDeploymentConfig has `OLM_SUBSCRIPTION_ENABLED=true` | Hub: `kind-cluster1` namespace | `kubectl get addondeploymentconfig -o jsonpath` |
 | 3 | Addon agent attempts OLM subscription mode (expected failure — no OLM on Kind) | Spoke: kind-cluster1 | Agent logs show OLM path attempted |
 
+#### Scenario 2 Cert Rotation Verification
+
+After the main Scenario 2 checks pass, the test deletes the `argocd-agent-client-tls` secret on each managed cluster (OCP, Kind, local-cluster) and verifies it is recreated within 120 seconds. This validates the `SecretReconciler`'s target-deletion watch and the 5-minute periodic requeue safety net.
+
 #### Scenario 5: Agent Version Drift Heal — All clusters (after S2)
 
 Runs after Scenario 2 (requires agent mode deployment). Tests the hub controller's ability to detect principal image drift and auto-patch the ArgoCD Policy.
@@ -918,6 +941,19 @@ Runs after Scenario 2 (requires agent mode deployment). Tests the hub controller
 | 4 | After restoring original principal image and re-triggering, controller restores Policy | Hub | Poll Policy for original image restored |
 | 5 | OpenShift GitOps operator restored (was scaled down during test) | Hub: `openshift-gitops-operator` | `kubectl scale --replicas=1` |
 
+#### Scenario 7: Custom Hub ArgoCD Namespace — Kind + local-cluster
+
+Creates: ArgoCD instance in `custom-gitops` namespace, Placement `custom-ns-placement`, GitOpsCluster `custom-ns-gitops` with `argoServer.argoNamespace: custom-gitops`, ManagedClusterSetBinding in `custom-gitops`.
+
+**Verification checks (all must pass):**
+
+| # | What is checked | Where | How |
+|---|----------------|-------|-----|
+| 1 | ArgoCD server is Ready in `custom-gitops` namespace | Hub | `kubectl wait pod -l app.kubernetes.io/name=custom-argocd-server` |
+| 2 | CA cert `argocd-agent-ca` exists in `custom-gitops` namespace | Hub | `kubectl get secret argocd-agent-ca -n custom-gitops` |
+| 3 | GitOpsCluster conditions are True | Hub | `kubectl get gitopscluster -o jsonpath` |
+| 4 | ManagedClusterAddOns created for selected clusters | Hub | `kubectl get managedclusteraddon` |
+
 ### Cleanup Verification After Each Scenario
 
 After each scenario, `cleanup_scenario` performs hub-triggered deletion, then **read-only verification**. If any check fails, the cleanup returns failure (indicating a code bug).
@@ -927,7 +963,7 @@ After each scenario, `cleanup_scenario` performs hub-triggered deletion, then **
 2. (Agent mode) Delete ApplicationSet, wait up to 60s for generated Applications to be deleted
 3. Delete GitOpsCluster (stops controller from recreating Policy/addons during cleanup)
 4. Delete PlacementBinding + Policy with `--wait=false` (stops enforcement on managed clusters)
-5. Delete ManagedClusterAddOn for each target cluster (triggers pre-delete cleanup Job — waits up to 600s for the Job to complete naturally, NO finalizer stripping)
+5. Delete ManagedClusterAddOn for each target cluster (triggers pre-delete cleanup Job — waits up to 180s for the Job to complete naturally; if it does not finish in time, falls back to finalizer removal and force-delete of the ManagedClusterAddOn)
 6. Re-delete Policy/PlacementBinding (race fix: controller may recreate during step 3-5)
 
 **Read-only verification checks (all must pass):**
@@ -1044,6 +1080,44 @@ The addon relies on the OCM klusterlet to propagate the `open-cluster-management
 
 5. If the secret exists but doesn't contain the required registry credentials, verify the hub's `open-cluster-management-image-pull-credentials` secret has the correct registries configured.
 
+### OLM Operator Not Installing on OCP
+
+If the OLM operator deployment never appears in `openshift-gitops-operator` after the addon creates the Subscription:
+
+1. Check the CSV status:
+   ```bash
+   KUBECONFIG=/path/to/ocp kubectl get csv -n openshift-gitops-operator
+   ```
+   If it shows `Failed` with `"OwnNamespace InstallModeType not supported"`, the OperatorGroup is misconfigured. Delete it and let the addon recreate it:
+   ```bash
+   KUBECONFIG=/path/to/ocp kubectl delete operatorgroup gitops-addon-operator-group -n openshift-gitops-operator
+   ```
+
+2. Check the OperatorGroup mode — it must be **AllNamespaces** (no `targetNamespaces`):
+   ```bash
+   KUBECONFIG=/path/to/ocp kubectl get operatorgroup -n openshift-gitops-operator -o yaml
+   ```
+   If `spec.targetNamespaces` is set, this is the bug. The addon code (`createOrUpdateOperatorGroup`) should create it without `targetNamespaces`.
+
+3. Check the CatalogSource is healthy:
+   ```bash
+   KUBECONFIG=/path/to/ocp kubectl get catalogsource redhat-operators -n openshift-marketplace -o jsonpath='{.status.connectionState}'
+   ```
+
+4. Check for failed InstallPlans:
+   ```bash
+   KUBECONFIG=/path/to/ocp kubectl get installplan -n openshift-gitops-operator
+   ```
+
+### Hub Controller Stuck / UID Mismatch
+
+If the hub controller logs show `StorageError: invalid object, UID mismatch`, the informer cache is stale. Fix by restarting the controller:
+```bash
+export KUBECONFIG=~/Desktop/hub
+kubectl delete lease multicloud-operators-gitopscluster-leader.open-cluster-management.io -n kube-system --ignore-not-found
+kubectl -n open-cluster-management rollout restart deployment/multicluster-operators-application
+```
+
 ### Policy Not Compliant
 
 1. Check Policy status:
@@ -1072,4 +1146,12 @@ The addon relies on the OCM klusterlet to propagate the `open-cluster-management
 
 6. **Local-Cluster Agent Namespace**: The `local-cluster` agent creates Application copies in the `local-cluster` namespace (its own namespace), not in `openshift-gitops`. This is because the hub's `openshift-gitops` namespace is occupied by the principal's ArgoCD, and the ArgoCD operator uses hardcoded ConfigMap names (`argocd-cm`) that would collide if two ArgoCD CRs were in the same namespace. The agent-side `destinationBasedMapping` must be disabled so `getTargetNamespaceForApp()` returns the agent's own namespace rather than the hub's `openshift-gitops`. For remote clusters, this distinction doesn't matter because both the agent namespace and the hub app namespace are `openshift-gitops`.
 
-7. **Policy Deletion Timing**: OCM governance framework finalizers on Policy objects can take several minutes (up to 10 minutes) to process. The cleanup verification waits up to 600s for Policy deletion.
+7. **Policy Deletion Timing**: OCM governance framework finalizers on Policy objects can take several minutes (up to 10 minutes) to process. The cleanup verification waits up to 120s for Policy deletion, with force-delete fallback.
+
+8. **Custom Namespace Cleanup**: When using a custom ArgoCD namespace (Scenario 7), cleanup must specify `CLEANUP_NS=<namespace>` so that `cleanup_scenario` targets the correct namespace. Without this, ArgoCD CRs and Policies in the custom namespace are not cleaned up.
+
+9. **OCP OLM Timing**: On real OCP clusters, OLM catalog resolution + InstallPlan + CSV installation can take 30-120 seconds even when the catalog is healthy. After a full cleanup that removes the CSV and operator, OLM must re-resolve the package from the catalog via gRPC. The test script uses 600s timeouts for all OCP OLM operations.
+
+10. **Orphaned ArgoCD Resources After Cleanup**: When the OLM operator is deleted (via CSV/Subscription removal), the ArgoCD deployments/statefulsets it created (e.g., `acm-openshift-gitops-redis`, `acm-openshift-gitops-repo-server`) survive because the operator can't process their owner references if it's already gone. `cleanup_managed_cluster_direct` explicitly deletes these orphans.
+
+11. **Pre-delete ManifestWork Race**: When a MCA is deleted, OCM creates a pre-delete ManifestWork that runs a cleanup Job. If the Job is slow and a new MCA is created before it finishes, the old pre-delete MW may interfere (e.g., deleting resources the new MW just applied, causing the ClusterRole to vanish). `cleanup_all` deletes stale pre-delete ManifestWorks to prevent this.

@@ -37,6 +37,67 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+func TestGetEffectiveArgoNamespace(t *testing.T) {
+	tests := []struct {
+		name          string
+		gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster
+		expected      string
+	}{
+		{
+			name: "uses argoNamespace when set",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "openshift-gitops",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "custom-argo-ns",
+					},
+				},
+			},
+			expected: "custom-argo-ns",
+		},
+		{
+			name: "falls back to CR namespace when argoNamespace empty",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "openshift-gitops",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "",
+					},
+				},
+			},
+			expected: "openshift-gitops",
+		},
+		{
+			name: "works with CR in different namespace than ArgoCD",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "open-cluster-management",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "agent-gitops",
+					},
+				},
+			},
+			expected: "agent-gitops",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetEffectiveArgoNamespace(tt.gitOpsCluster)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestValidateArgoCDAgentSpec(t *testing.T) {
 	reconciler := &ReconcileGitOpsCluster{}
 

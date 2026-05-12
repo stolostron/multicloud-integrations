@@ -141,7 +141,16 @@ func uninstallOnHub(ctx context.Context, c client.Client) error {
 		klog.Warningf("Failed to delete pause marker (continuing): %v", err)
 	}
 
-	klog.Info("Final Step: Deleting gitops-addon ClusterRoleBinding")
+	klog.Info("Final Step: Deleting gitops-addon ClusterRole and ClusterRoleBinding")
+	addonCR := &unstructured.Unstructured{}
+	addonCR.SetAPIVersion("rbac.authorization.k8s.io/v1")
+	addonCR.SetKind("ClusterRole")
+	addonCR.SetName(AddonDeploymentName)
+	if delErr := c.Delete(ctx, addonCR); delErr != nil && !apierrors.IsNotFound(delErr) {
+		klog.Warningf("Failed to delete gitops-addon ClusterRole: %v", delErr)
+		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRole: %w", delErr))
+	}
+
 	addonCRB := &unstructured.Unstructured{}
 	addonCRB.SetAPIVersion("rbac.authorization.k8s.io/v1")
 	addonCRB.SetKind("ClusterRoleBinding")
@@ -220,7 +229,16 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 		klog.Warningf("Failed to check/delete orphaned pause marker: %v", err)
 	}
 
-	klog.Info("Final Step: Deleting gitops-addon ClusterRoleBinding (self-referencing RBAC)")
+	klog.Info("Final Step: Deleting gitops-addon ClusterRole and ClusterRoleBinding (self-referencing RBAC)")
+	addonCR := &unstructured.Unstructured{}
+	addonCR.SetAPIVersion("rbac.authorization.k8s.io/v1")
+	addonCR.SetKind("ClusterRole")
+	addonCR.SetName(AddonDeploymentName)
+	if delErr := c.Delete(ctx, addonCR); delErr != nil && !apierrors.IsNotFound(delErr) {
+		klog.Warningf("Failed to delete gitops-addon ClusterRole: %v", delErr)
+		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRole: %w", delErr))
+	}
+
 	addonCRB := &unstructured.Unstructured{}
 	addonCRB.SetAPIVersion("rbac.authorization.k8s.io/v1")
 	addonCRB.SetKind("ClusterRoleBinding")
@@ -719,12 +737,11 @@ func deleteResourcesByType(ctx context.Context, c client.Client, resourceTypes [
 					continue
 				}
 
-				// IMPORTANT: Skip the gitops-addon ClusterRoleBinding during operator resource cleanup.
-				// This is the service account's own RBAC - deleting it would remove the cleanup Job's
-				// permissions and prevent it from cleaning up remaining resources.
-				// The gitops-addon ClusterRoleBinding is deleted as the very last step in
-				// uninstallGitopsAgentInternal after all other resources are cleaned up.
-				if rt.kind == "ClusterRoleBinding" && item.GetName() == AddonDeploymentName {
+				// IMPORTANT: Skip the gitops-addon ClusterRole and ClusterRoleBinding during
+				// operator resource cleanup. These are the addon's own RBAC — deleting them
+				// would remove the cleanup Job's permissions. They are deleted as the very
+				// last step in uninstallGitopsAgentInternal after all other resources are gone.
+				if (rt.kind == "ClusterRoleBinding" || rt.kind == "ClusterRole") && item.GetName() == AddonDeploymentName {
 					klog.Infof("Skipping %s %s (self-referencing RBAC, will be deleted last)", rt.kind, item.GetName())
 					continue
 				}
