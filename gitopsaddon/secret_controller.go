@@ -51,9 +51,10 @@ func getTargetNamespace() string {
 }
 
 // getSourceNamespace returns the source namespace for the agent client cert secret.
-// For OLM mode, this is the namespace where gitops-addon runs (e.g., openshift-operators).
-// For non-OLM mode, this is open-cluster-management-agent-addon.
-// It can be overridden via GITOPS_ADDON_NAMESPACE environment variable.
+// The gitopsaddon agent always runs in open-cluster-management-agent-addon (the standard
+// ACM addon namespace, set via ManagedClusterAddOn.spec.installNamespace). The POD_NAMESPACE
+// env var is injected by OCM and reflects the actual running namespace. It can be overridden
+// via GITOPS_ADDON_NAMESPACE for testing or special deployments.
 func getSourceNamespace() string {
 	if ns := strings.TrimSpace(os.Getenv("GITOPS_ADDON_NAMESPACE")); ns != "" {
 		return ns

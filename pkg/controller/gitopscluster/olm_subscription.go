@@ -21,7 +21,7 @@ import (
 const (
 	// Default values for OLM Subscription
 	DefaultOLMSubscriptionName            = "openshift-gitops-operator"
-	DefaultOLMSubscriptionNamespace       = "openshift-operators"
+	DefaultOLMSubscriptionNamespace       = "openshift-gitops-operator"
 	DefaultOLMSubscriptionChannel         = "latest"
 	DefaultOLMSubscriptionSource          = "redhat-operators"
 	DefaultOLMSubscriptionSourceNamespace = "openshift-marketplace"

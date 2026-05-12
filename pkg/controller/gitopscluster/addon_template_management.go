@@ -90,10 +90,28 @@ func getAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) str
 	return fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 }
 
+// getLegacyOLMAddOnTemplateName returns the old-style AddOnTemplate name used by earlier versions
+// of the hub controller. These templates embedded the OLM Subscription directly and placed all
+// resources in openshift-operators. They are no longer created but may still exist on clusters
+// that were upgraded from an older version.
+func getLegacyOLMAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
+	return fmt.Sprintf("gitops-addon-olm-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
+}
+
 // EnsureAddOnTemplate creates or updates the AddOnTemplate for a GitOpsCluster with ArgoCD agent enabled
 // This is the dynamic template for argocd-agent WITHOUT OLM subscription
 func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	templateName := getAddOnTemplateName(gitOpsCluster)
+
+	// Delete any legacy OLM-style AddOnTemplate created by older versions of this controller.
+	// Old templates (gitops-addon-olm-{ns}-{name}) embedded the OLM Subscription directly and
+	// placed all resources (Job, SA, Deployment) in openshift-operators. The new approach uses
+	// open-cluster-management-agent-addon for the addon agent, so these stale templates must be
+	// removed to avoid the ManagedClusterAddOn referencing the wrong namespace.
+	legacyName := getLegacyOLMAddOnTemplateName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(legacyName); err != nil {
+		klog.Warningf("Failed to delete legacy OLM AddOnTemplate %s: %v", legacyName, err)
+	}
 
 	// Get the controller image - error out if not available
 	addonImage, err := r.getControllerImage()
@@ -427,13 +445,19 @@ func buildAddonEnvVars() []corev1.EnvVar {
 	return envVars
 }
 
-// CleanupDynamicAddOnTemplates deletes all dynamic AddOnTemplates created for a GitOpsCluster
-// This should be called when a GitOpsCluster is deleted
+// CleanupDynamicAddOnTemplates deletes all dynamic AddOnTemplates created for a GitOpsCluster.
+// This should be called when a GitOpsCluster is deleted.
 func (r *ReconcileGitOpsCluster) CleanupDynamicAddOnTemplates(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) {
-	// Try to delete the argocd-agent template
+	// Delete the current argocd-agent template
 	templateName := getAddOnTemplateName(gitOpsCluster)
 	if err := r.deleteAddOnTemplateByName(templateName); err != nil {
 		klog.Warningf("Failed to delete AddOnTemplate %s: %v", templateName, err)
+	}
+
+	// Also delete any legacy OLM-style template from older versions of the controller
+	legacyName := getLegacyOLMAddOnTemplateName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(legacyName); err != nil {
+		klog.Warningf("Failed to delete legacy OLM AddOnTemplate %s: %v", legacyName, err)
 	}
 }
 

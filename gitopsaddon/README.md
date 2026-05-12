@@ -841,7 +841,7 @@ Creates: Placement `all-placement`, GitOpsCluster `all-gitops` (addon, no agent)
 |---|----------------|-------|-----|
 | 1 | ManagedClusterAddOn `gitops-addon` exists | Hub: `ocp-cluster1`, `kind-cluster1`, `local-cluster` namespaces | `kubectl get managedclusteraddon` |
 | 2 | Policy `all-gitops-argocd-policy` is Compliant | Hub: `openshift-gitops` namespace | `kubectl get policy -o jsonpath='{.status.compliant}'` |
-| 3 | OLM auto-detected on OCP: subscription exists with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true` | Spoke: ocp-cluster1, `openshift-operators` namespace | `kubectl get subscription.operators.coreos.com` |
+| 3 | OLM auto-detected on OCP: subscription exists with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true` | Spoke: ocp-cluster1, `openshift-gitops-operator` namespace | `kubectl get subscription.operators.coreos.com` |
 | 4 | No embedded operator on OCP (OLM-only mode) | Spoke: ocp-cluster1, `openshift-gitops-operator` namespace | Verify deployment does NOT exist |
 | 5 | ArgoCD CR `acm-openshift-gitops` exists on OCP | Spoke: ocp-cluster1, `openshift-gitops` namespace | `kubectl get argocd` |
 | 6 | ArgoCD CR `acm-openshift-gitops` exists on Kind | Spoke: kind-cluster1, `openshift-gitops` namespace | `kubectl get argocd` |
@@ -888,8 +888,8 @@ Creates: Placement `ocp-olm-placement`, GitOpsCluster `ocp-olm-gitops` with `olm
 | 1 | ManagedClusterAddOn `gitops-addon` exists in `ocp-cluster1` | Hub | `kubectl get managedclusteraddon` |
 | 2 | AddOnDeploymentConfig has `OLM_SUBSCRIPTION_ENABLED=true` | Hub: `ocp-cluster1` namespace | `kubectl get addondeploymentconfig -o jsonpath` |
 | 3 | AddOnDeploymentConfig has `OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL=Manual` | Hub: `ocp-cluster1` namespace | `kubectl get addondeploymentconfig -o jsonpath` |
-| 4 | OLM subscription exists on OCP with `installPlanApproval=Manual` | Spoke: ocp-cluster1, `openshift-operators` | `kubectl get subscription.operators.coreos.com -o jsonpath` |
-| 5 | OLM subscription has `DISABLE_DEFAULT_ARGOCD_INSTANCE=true` | Spoke: ocp-cluster1, `openshift-operators` | `kubectl get subscription.operators.coreos.com -o jsonpath` |
+| 4 | OLM subscription exists on OCP with `installPlanApproval=Manual` | Spoke: ocp-cluster1, `openshift-gitops-operator` | `kubectl get subscription.operators.coreos.com -o jsonpath` |
+| 5 | OLM subscription has `DISABLE_DEFAULT_ARGOCD_INSTANCE=true` | Spoke: ocp-cluster1, `openshift-gitops-operator` | `kubectl get subscription.operators.coreos.com -o jsonpath` |
 | 6 | No embedded operator deployment (OLM-only mode) | Spoke: ocp-cluster1, `openshift-gitops-operator` | Verify deployment does NOT exist |
 
 #### Scenario 4: OLM Override on Kind — Kind only

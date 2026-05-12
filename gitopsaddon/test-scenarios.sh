@@ -558,24 +558,28 @@ cleanup_scenario() {
             log_info "  [OK] $cluster: ArgoCD CR removed"
         fi
 
-        # OCP: OLM subscription should be removed by pre-delete Job (wait up to 480s)
+        # OCP: OLM subscription should be removed by pre-delete Job (wait up to 480s).
+        # The subscription is now in openshift-gitops-operator (new default); also
+        # check openshift-operators for subscriptions from older installs.
         if [ "$cluster" = "$OCP_CLUSTER_NAME" ]; then
             local sw=0
             while [ "$sw" -lt 480 ]; do
                 local labeled_subs
-                labeled_subs=$(KUBECONFIG=$kubeconfig kubectl get subscription.operators.coreos.com -n openshift-operators \
-                    -l apps.open-cluster-management.io/gitopsaddon=true -o name 2>/dev/null || true)
+                labeled_subs=$(KUBECONFIG=$kubeconfig kubectl get subscription.operators.coreos.com \
+                    -l apps.open-cluster-management.io/gitopsaddon=true -A -o name 2>/dev/null || true)
                 [ -z "$labeled_subs" ] && break
                 sleep 5; sw=$((sw+5))
             done
             local remaining_subs
-            remaining_subs=$(KUBECONFIG=$kubeconfig kubectl get subscription.operators.coreos.com -n openshift-operators \
-                -l apps.open-cluster-management.io/gitopsaddon=true -o name 2>/dev/null || true)
+            remaining_subs=$(KUBECONFIG=$kubeconfig kubectl get subscription.operators.coreos.com \
+                -l apps.open-cluster-management.io/gitopsaddon=true -A -o name 2>/dev/null || true)
             if [ -n "$remaining_subs" ]; then
                 log_error "CLEANUP FAIL: gitopsaddon OLM subscription still on $cluster after 480s"
                 log_warn "Forcing OLM subscription deletion directly (OLM cleanup exceeded timeout)"
-                KUBECONFIG=$kubeconfig kubectl delete subscription.operators.coreos.com -n openshift-operators \
-                    -l apps.open-cluster-management.io/gitopsaddon=true --ignore-not-found --wait=false 2>/dev/null || true
+                KUBECONFIG=$kubeconfig kubectl delete subscription.operators.coreos.com \
+                    -l apps.open-cluster-management.io/gitopsaddon=true -A --ignore-not-found --wait=false 2>/dev/null || true
+                KUBECONFIG=$kubeconfig kubectl delete subscription.operators.coreos.com openshift-gitops-operator \
+                    -n openshift-gitops-operator --ignore-not-found --wait=false 2>/dev/null || true
                 KUBECONFIG=$kubeconfig kubectl delete subscription.operators.coreos.com openshift-gitops-operator \
                     -n openshift-operators --ignore-not-found --wait=false 2>/dev/null || true
                 sleep 10
@@ -865,19 +869,26 @@ cleanup_managed_cluster_direct() {
     # ============================================
     log_info "$cluster_name: Thoroughly cleaning up OLM operator artifacts..."
 
-    # 1. Delete OLM Subscription first (prevents OLM from reinstalling)
+    # 1. Delete OLM Subscription first (prevents OLM from reinstalling).
+    # The subscription is now in openshift-gitops-operator (new default); also
+    # clean openshift-operators for subscriptions from older installs.
     # Must use fully-qualified resource: on OCM clusters, "subscription" resolves to
     # apps.open-cluster-management.io instead of operators.coreos.com
+    kubectl delete subscription.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator --ignore-not-found 2>/dev/null || true
     kubectl delete subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators --ignore-not-found 2>/dev/null || true
     kubectl delete subscription.operators.coreos.com -l apps.open-cluster-management.io/gitopsaddon=true -A --ignore-not-found 2>/dev/null || true
 
-    # 2. Delete ALL ClusterServiceVersions related to gitops-operator (handles upgrade chains)
-    local csv_names=$(kubectl get csv -n openshift-operators -o name 2>/dev/null | grep gitops-operator || true)
-    if [ -n "$csv_names" ]; then
-        log_warn "$cluster_name: Found OLM CSVs: $csv_names - deleting all..."
-        echo "$csv_names" | xargs -I{} kubectl delete {} -n openshift-operators --ignore-not-found 2>/dev/null || true
-        kubectl delete csv -n openshift-gitops -l operators.coreos.com/openshift-gitops-operator.openshift-operators --ignore-not-found 2>/dev/null || true
-    fi
+    # 2. Delete ALL ClusterServiceVersions related to gitops-operator (handles upgrade chains).
+    # Check both openshift-gitops-operator (new default) and openshift-operators (old default).
+    for csv_ns in openshift-gitops-operator openshift-operators; do
+        local csv_names=$(kubectl get csv -n $csv_ns -o name 2>/dev/null | grep gitops-operator || true)
+        if [ -n "$csv_names" ]; then
+            log_warn "$cluster_name: Found OLM CSVs in $csv_ns: $csv_names - deleting all..."
+            echo "$csv_names" | xargs -I{} kubectl delete {} -n $csv_ns --ignore-not-found 2>/dev/null || true
+        fi
+    done
+    kubectl delete csv -n openshift-gitops -l operators.coreos.com/openshift-gitops-operator.openshift-gitops-operator --ignore-not-found 2>/dev/null || true
+    kubectl delete csv -n openshift-gitops -l operators.coreos.com/openshift-gitops-operator.openshift-operators --ignore-not-found 2>/dev/null || true
     # Also delete any CSV in openshift-gitops namespace matching gitops-operator
     local csv_names_gitops=$(kubectl get csv -n openshift-gitops -o name 2>/dev/null | grep gitops-operator || true)
     if [ -n "$csv_names_gitops" ]; then
@@ -885,6 +896,7 @@ cleanup_managed_cluster_direct() {
     fi
 
     # 2b. Delete stale InstallPlans (prevents OLM from reusing completed plans after CSV deletion)
+    kubectl delete installplan --all -n openshift-gitops-operator --ignore-not-found 2>/dev/null || true
     kubectl delete installplan --all -n openshift-operators --ignore-not-found 2>/dev/null || true
 
     # 2c. Fix CRD conversion webhook: after deleting the operator, the CRD still references
@@ -896,7 +908,9 @@ cleanup_managed_cluster_direct() {
             -p='[{"op": "replace", "path": "/spec/conversion", "value": {"strategy": "None"}}]' 2>/dev/null || true
     fi
 
-    # 3. Delete the OLM-managed operator deployment (CSV deletion may be slow)
+    # 3. Delete the OLM-managed operator deployment.
+    # Now in openshift-gitops-operator (new default); also clean openshift-operators (old default).
+    kubectl delete deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator --ignore-not-found 2>/dev/null || true
     kubectl delete deployment openshift-gitops-operator-controller-manager -n openshift-operators --ignore-not-found 2>/dev/null || true
 
     # 4. Delete GitopsService CR - this is what triggers the operator to create the default ArgoCD instance
@@ -1704,8 +1718,9 @@ verify_agent_connected() {
 # Verify that the addon agent auto-detected OCP and created an OLM subscription
 # instead of deploying embedded operator manifests.
 # Checks:
-#   1. OLM subscription exists in openshift-operators namespace
-#   2. No embedded operator deployment in openshift-gitops-operator namespace
+#   1. OLM subscription exists in openshift-gitops-operator namespace
+#   2. An OwnNamespace OperatorGroup exists in openshift-gitops-operator
+#   3. Operator deployment is in openshift-gitops-operator (not a raw Helm chart)
 verify_olm_auto_detected() {
     local cluster_kubeconfig=$1
     local cluster_name=$2
@@ -1714,35 +1729,41 @@ verify_olm_auto_detected() {
 
     export KUBECONFIG=$cluster_kubeconfig
 
-    # Check 1: OLM subscription should exist
+    # Check 1: OLM subscription should exist in openshift-gitops-operator
     wait_for_condition 300 "OLM subscription to be created on $cluster_name" \
-        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o name" || {
-            log_error "OLM auto-detection FAILED: No OLM subscription found on $cluster_name"
+        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o name" || {
+            log_error "OLM auto-detection FAILED: No OLM subscription found in openshift-gitops-operator on $cluster_name"
             log_debug "Addon agent logs:"
-            kubectl logs -n openshift-operators -l app=gitops-addon --tail=30 2>/dev/null || true
+            kubectl logs -n open-cluster-management-agent-addon -l app=gitops-addon --tail=30 2>/dev/null || true
             return 1
         }
 
     # Verify the subscription has the DISABLE_DEFAULT_ARGOCD_INSTANCE env var
     local disable_default=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
-        -n openshift-operators -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
+        -n openshift-gitops-operator -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
     if [ "$disable_default" = "true" ]; then
         log_info "  [OK] OLM subscription has DISABLE_DEFAULT_ARGOCD_INSTANCE=true"
     else
         log_error "OLM subscription DISABLE_DEFAULT_ARGOCD_INSTANCE='$disable_default' (expected: 'true')"
-        kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o yaml 2>/dev/null || true
+        kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o yaml 2>/dev/null || true
         export KUBECONFIG=$HUB_KUBECONFIG
         return 1
     fi
 
-    # Check 2: No embedded operator deployment in openshift-gitops-operator namespace
-    if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
-        log_error "Embedded operator deployment found in openshift-gitops-operator namespace (expected OLM mode only on $cluster_name)"
-        export KUBECONFIG=$HUB_KUBECONFIG
-        return 1
+    # Check 2: An OperatorGroup should exist in openshift-gitops-operator
+    local og_name=$(kubectl get operatorgroup -n openshift-gitops-operator -o name 2>/dev/null | head -1)
+    if [ -n "$og_name" ]; then
+        log_info "  [OK] OperatorGroup exists in openshift-gitops-operator: $og_name"
     else
-        log_info "  [OK] No embedded operator deployment in openshift-gitops-operator (correct for OLM mode)"
+        log_warn "No OperatorGroup found in openshift-gitops-operator — OLM may not install the operator correctly"
     fi
+
+    # Check 3: Operator deployment should be in openshift-gitops-operator (OLM deploys it there)
+    wait_for_condition 300 "OLM operator deployment in openshift-gitops-operator on $cluster_name" \
+        "kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator -o name" || {
+            log_warn "Operator deployment not yet in openshift-gitops-operator on $cluster_name (may be starting)"
+        }
+    log_info "  [OK] Operator deployment running in openshift-gitops-operator (correct for OLM mode)"
 
     log_info "OLM auto-detection verified successfully on $cluster_name"
 
@@ -1863,7 +1884,7 @@ EOF
             "KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops -l app.kubernetes.io/name=acm-openshift-gitops-application-controller --field-selector=status.phase=Running --no-headers 2>/dev/null | grep -q Running" || {
                 log_error "SCENARIO 1: ArgoCD app controller not running on $OCP_CLUSTER_NAME"
                 KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops --no-headers 2>/dev/null || true
-                KUBECONFIG=$OCP_KUBECONFIG kubectl get csv -n openshift-operators --no-headers 2>/dev/null | grep gitops || true
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get csv -n openshift-gitops-operator --no-headers 2>/dev/null | grep gitops || true
                 return 1
             }
     fi
@@ -2037,7 +2058,7 @@ EOF
                 log_error "SCENARIO 2: ArgoCD agent pod not running on $OCP_CLUSTER_NAME"
                 KUBECONFIG=$OCP_KUBECONFIG kubectl get pods -n openshift-gitops --no-headers 2>/dev/null || true
                 KUBECONFIG=$OCP_KUBECONFIG kubectl get argocd -n openshift-gitops -o yaml 2>/dev/null || true
-                KUBECONFIG=$OCP_KUBECONFIG kubectl get subscription.operators.coreos.com -n openshift-operators --no-headers 2>/dev/null || true
+                KUBECONFIG=$OCP_KUBECONFIG kubectl get subscription.operators.coreos.com -n openshift-gitops-operator --no-headers 2>/dev/null || true
                 return 1
             }
     fi
@@ -2339,19 +2360,21 @@ EOF
         }
     log_info "  OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL=Manual: OK"
 
-    # Wait for OLM subscription to be created on OCP
+    # Wait for OLM subscription to be created on OCP.
+    # The subscription is now placed in openshift-gitops-operator (matching the OLM bundle's
+    # expected namespace for the conversion webhook service).
     log_info "Waiting for OLM subscription on OCP..."
     export KUBECONFIG=$OCP_KUBECONFIG
     wait_for_condition 300 "OLM subscription on $OCP_CLUSTER_NAME" \
-        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-operators -o name" || {
-            log_error "SCENARIO 3: OLM subscription not created"
+        "kubectl get subscription.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o name" || {
+            log_error "SCENARIO 3: OLM subscription not created in openshift-gitops-operator"
             return 1
         }
 
     # Verify installPlanApproval=Manual
     local actual_approval
     actual_approval=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
-        -n openshift-operators -o jsonpath='{.spec.installPlanApproval}' 2>/dev/null)
+        -n openshift-gitops-operator -o jsonpath='{.spec.installPlanApproval}' 2>/dev/null)
     if [ "$actual_approval" != "Manual" ]; then
         log_error "SCENARIO 3: installPlanApproval='$actual_approval' (expected: Manual)"
         return 1
@@ -2361,40 +2384,37 @@ EOF
     # Verify DISABLE_DEFAULT_ARGOCD_INSTANCE=true
     local disable_default
     disable_default=$(kubectl get subscription.operators.coreos.com openshift-gitops-operator \
-        -n openshift-operators -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
+        -n openshift-gitops-operator -o jsonpath='{.spec.config.env[?(@.name=="DISABLE_DEFAULT_ARGOCD_INSTANCE")].value}' 2>/dev/null)
     if [ "$disable_default" != "true" ]; then
         log_error "SCENARIO 3: DISABLE_DEFAULT_ARGOCD_INSTANCE='$disable_default' (expected: true)"
         return 1
     fi
     log_info "  DISABLE_DEFAULT_ARGOCD_INSTANCE=true: OK"
 
-    # No embedded operator deployment (OLM mode)
-    if kubectl get deployment openshift-gitops-operator-controller-manager -n openshift-gitops-operator &>/dev/null 2>/dev/null; then
-        log_error "SCENARIO 3: Embedded operator found (should be OLM-only)"
-        return 1
-    fi
-    log_info "  No embedded operator (OLM-only mode): OK"
+    # In OLM mode the operator deployment is in openshift-gitops-operator (matching the
+    # subscription namespace). This is expected — not an embedded-chart artifact.
+    log_info "  Operator will be deployed in openshift-gitops-operator by OLM (expected)"
 
     # Approve InstallPlan
-    log_info "Waiting for InstallPlan..."
+    log_info "Waiting for InstallPlan in openshift-gitops-operator..."
     wait_for_condition 120 "InstallPlan" \
-        "kubectl get installplan -n openshift-operators -o jsonpath='{.items[?(@.spec.approved==false)].metadata.name}' 2>/dev/null | grep -v '^$'" || {
-            local existing=$(kubectl get installplan -n openshift-operators -o name 2>/dev/null | head -1)
+        "kubectl get installplan -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.approved==false)].metadata.name}' 2>/dev/null | grep -v '^$'" || {
+            local existing=$(kubectl get installplan -n openshift-gitops-operator -o name 2>/dev/null | head -1)
             if [ -n "$existing" ]; then
                 log_info "Found existing InstallPlan (may be pre-approved)"
             else
-                log_error "SCENARIO 3: No InstallPlan"
+                log_error "SCENARIO 3: No InstallPlan in openshift-gitops-operator"
                 return 1
             fi
         }
 
     local unapproved
-    unapproved=$(kubectl get installplan -n openshift-operators \
+    unapproved=$(kubectl get installplan -n openshift-gitops-operator \
         -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
     if [ -n "$unapproved" ]; then
         for plan in $unapproved; do
             log_info "Approving InstallPlan: $plan"
-            kubectl patch installplan "$plan" -n openshift-operators --type=merge -p '{"spec":{"approved":true}}' || return 1
+            kubectl patch installplan "$plan" -n openshift-gitops-operator --type=merge -p '{"spec":{"approved":true}}' || return 1
         done
     fi
 

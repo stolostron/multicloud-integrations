@@ -443,6 +443,144 @@ func TestPatchArgoCDCRDConversionWebhook(t *testing.T) {
 	})
 }
 
+// TestPatchArgoCDCRDConversionWebhookIfNotReady tests the service-aware
+// CRD conversion webhook patching used during the OLM install path.
+func TestPatchArgoCDCRDConversionWebhookIfNotReady(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	webhookCRD := func() *unstructured.Unstructured {
+		return &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata": map[string]interface{}{
+					"name": "argocds.argoproj.io",
+				},
+				"spec": map[string]interface{}{
+					"group": "argoproj.io",
+					"conversion": map[string]interface{}{
+						"strategy": "Webhook",
+						"webhook": map[string]interface{}{
+							"clientConfig": map[string]interface{}{
+								"service": map[string]interface{}{
+									"name":      "openshift-gitops-operator-controller-manager-service",
+									"namespace": "openshift-gitops-operator",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("no_crd_exists_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		err := patchArgoCDCRDConversionWebhookIfNotReady(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+
+	t.Run("crd_strategy_none_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+		crd := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata":   map[string]interface{}{"name": "argocds.argoproj.io"},
+				"spec": map[string]interface{}{
+					"conversion": map[string]interface{}{"strategy": "None"},
+				},
+			},
+		}
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crd).Build()
+		err := patchArgoCDCRDConversionWebhookIfNotReady(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		result := &unstructured.Unstructured{}
+		result.SetAPIVersion("apiextensions.k8s.io/v1")
+		result.SetKind("CustomResourceDefinition")
+		g.Expect(testClient.Get(context.TODO(), types.NamespacedName{Name: "argocds.argoproj.io"}, result)).To(gomega.Succeed())
+		strategy, _, _ := unstructured.NestedString(result.Object, "spec", "conversion", "strategy")
+		g.Expect(strategy).To(gomega.Equal("None"), "strategy should remain None")
+	})
+
+	t.Run("service_based_webhook_always_patches_to_none", func(t *testing.T) {
+		// Endpoint readiness is not a reliable proxy for webhook port readiness: the
+		// readiness probe may pass while port 9443 is still closed. We always patch to
+		// None before the OLM subscription; OLM restores Webhook via the InstallPlan.
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(webhookCRD()).Build()
+		err := patchArgoCDCRDConversionWebhookIfNotReady(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		result := &unstructured.Unstructured{}
+		result.SetAPIVersion("apiextensions.k8s.io/v1")
+		result.SetKind("CustomResourceDefinition")
+		g.Expect(testClient.Get(context.TODO(), types.NamespacedName{Name: "argocds.argoproj.io"}, result)).To(gomega.Succeed())
+		strategy, _, _ := unstructured.NestedString(result.Object, "spec", "conversion", "strategy")
+		g.Expect(strategy).To(gomega.Equal("None"), "strategy should always be patched to None for service-based webhooks")
+	})
+
+	t.Run("service_missing_patches_to_none", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(webhookCRD()).Build()
+		err := patchArgoCDCRDConversionWebhookIfNotReady(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		result := &unstructured.Unstructured{}
+		result.SetAPIVersion("apiextensions.k8s.io/v1")
+		result.SetKind("CustomResourceDefinition")
+		g.Expect(testClient.Get(context.TODO(), types.NamespacedName{Name: "argocds.argoproj.io"}, result)).To(gomega.Succeed())
+		strategy, _, _ := unstructured.NestedString(result.Object, "spec", "conversion", "strategy")
+		g.Expect(strategy).To(gomega.Equal("None"), "strategy should be patched to None when service is missing")
+		_, webhookExists, _ := unstructured.NestedMap(result.Object, "spec", "conversion", "webhook")
+		g.Expect(webhookExists).To(gomega.BeFalse(), "webhook config should be removed after patch")
+	})
+
+	t.Run("crd_no_service_fields_noop", func(t *testing.T) {
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+		// Webhook strategy but no clientConfig.service fields — should not crash.
+		crd := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "apiextensions.k8s.io/v1",
+				"kind":       "CustomResourceDefinition",
+				"metadata":   map[string]interface{}{"name": "argocds.argoproj.io"},
+				"spec": map[string]interface{}{
+					"conversion": map[string]interface{}{
+						"strategy": "Webhook",
+						"webhook": map[string]interface{}{
+							"clientConfig": map[string]interface{}{
+								"url": "https://some-url/convert",
+							},
+						},
+					},
+				},
+			},
+		}
+		testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crd).Build()
+		err := patchArgoCDCRDConversionWebhookIfNotReady(context.TODO(), testClient)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		result := &unstructured.Unstructured{}
+		result.SetAPIVersion("apiextensions.k8s.io/v1")
+		result.SetKind("CustomResourceDefinition")
+		g.Expect(testClient.Get(context.TODO(), types.NamespacedName{Name: "argocds.argoproj.io"}, result)).To(gomega.Succeed())
+		strategy, _, _ := unstructured.NestedString(result.Object, "spec", "conversion", "strategy")
+		g.Expect(strategy).To(gomega.Equal("Webhook"), "strategy should remain Webhook when no service ref present")
+	})
+}
+
 // TestClearStalePauseMarker tests the ClearStalePauseMarker function
 func TestClearStalePauseMarker(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -1180,23 +1318,23 @@ func TestDeleteOLMResourcesOnlyDeletesOwnedCSVs(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 
-	// Our subscription with gitopsaddon label and an installedCSV
+	// Our subscription with gitopsaddon label and an installedCSV (in the default namespace)
 	ourSub := &unstructured.Unstructured{}
 	ourSub.SetAPIVersion("operators.coreos.com/v1alpha1")
 	ourSub.SetKind("Subscription")
 	ourSub.SetName("openshift-gitops-operator")
-	ourSub.SetNamespace("openshift-operators")
+	ourSub.SetNamespace(GitOpsOperatorNamespace)
 	ourSub.SetLabels(map[string]string{
 		"apps.open-cluster-management.io/gitopsaddon": "true",
 	})
 	_ = unstructured.SetNestedField(ourSub.Object, "openshift-gitops-operator.v1.14.0", "status", "installedCSV")
 
-	// Pre-existing subscription WITHOUT gitopsaddon label
+	// Pre-existing subscription WITHOUT gitopsaddon label (same namespace)
 	adminSub := &unstructured.Unstructured{}
 	adminSub.SetAPIVersion("operators.coreos.com/v1alpha1")
 	adminSub.SetKind("Subscription")
 	adminSub.SetName("admin-argocd")
-	adminSub.SetNamespace("openshift-operators")
+	adminSub.SetNamespace(GitOpsOperatorNamespace)
 	_ = unstructured.SetNestedField(adminSub.Object, "admin-argocd.v2.0.0", "status", "installedCSV")
 
 	// Our CSV (should be deleted)
@@ -1204,14 +1342,14 @@ func TestDeleteOLMResourcesOnlyDeletesOwnedCSVs(t *testing.T) {
 	ourCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
 	ourCSV.SetKind("ClusterServiceVersion")
 	ourCSV.SetName("openshift-gitops-operator.v1.14.0")
-	ourCSV.SetNamespace("openshift-operators")
+	ourCSV.SetNamespace(GitOpsOperatorNamespace)
 
 	// Admin CSV (should NOT be deleted)
 	adminCSV := &unstructured.Unstructured{}
 	adminCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
 	adminCSV.SetKind("ClusterServiceVersion")
 	adminCSV.SetName("admin-argocd.v2.0.0")
-	adminCSV.SetNamespace("openshift-operators")
+	adminCSV.SetNamespace(GitOpsOperatorNamespace)
 
 	testClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithRuntimeObjects(ourSub, adminSub, ourCSV, adminCSV).Build()
@@ -1223,27 +1361,27 @@ func TestDeleteOLMResourcesOnlyDeletesOwnedCSVs(t *testing.T) {
 	checkSub := &unstructured.Unstructured{}
 	checkSub.SetAPIVersion("operators.coreos.com/v1alpha1")
 	checkSub.SetKind("Subscription")
-	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator", Namespace: "openshift-operators"}, checkSub)
+	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator", Namespace: GitOpsOperatorNamespace}, checkSub)
 	g.Expect(err).To(gomega.HaveOccurred(), "Our subscription should have been deleted")
 
 	// Verify admin subscription was NOT deleted (no label)
 	checkAdminSub := &unstructured.Unstructured{}
 	checkAdminSub.SetAPIVersion("operators.coreos.com/v1alpha1")
 	checkAdminSub.SetKind("Subscription")
-	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd", Namespace: "openshift-operators"}, checkAdminSub)
+	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd", Namespace: GitOpsOperatorNamespace}, checkAdminSub)
 	g.Expect(err).NotTo(gomega.HaveOccurred(), "Admin subscription should still exist")
 
 	// Verify our CSV was deleted
 	checkCSV := &unstructured.Unstructured{}
 	checkCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
 	checkCSV.SetKind("ClusterServiceVersion")
-	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator.v1.14.0", Namespace: "openshift-operators"}, checkCSV)
+	err = testClient.Get(ctx, types.NamespacedName{Name: "openshift-gitops-operator.v1.14.0", Namespace: GitOpsOperatorNamespace}, checkCSV)
 	g.Expect(err).To(gomega.HaveOccurred(), "Our CSV should have been deleted")
 
 	// Verify admin CSV was NOT deleted
 	checkAdminCSV := &unstructured.Unstructured{}
 	checkAdminCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
 	checkAdminCSV.SetKind("ClusterServiceVersion")
-	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd.v2.0.0", Namespace: "openshift-operators"}, checkAdminCSV)
+	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd.v2.0.0", Namespace: GitOpsOperatorNamespace}, checkAdminCSV)
 	g.Expect(err).NotTo(gomega.HaveOccurred(), "Admin CSV should still exist")
 }
