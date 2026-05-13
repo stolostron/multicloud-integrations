@@ -111,6 +111,9 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				for expectedKey, expectedValue := range expectedVars {
 					assert.Equal(t, expectedValue, varMap[expectedKey], "Variable %s should have value %s", expectedKey, expectedValue)
 				}
+
+				assert.Equal(t, utils.AddonAgentNamespace, config.Spec.AgentInstallNamespace,
+					"AgentInstallNamespace should be set to the standard ACM addon namespace on create")
 			},
 		},
 		{
@@ -391,7 +394,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				assert.Equal(t, "custom-marketplace", varMap["OLM_SUBSCRIPTION_SOURCE_NAMESPACE"])
 				// Defaults should be filled in for unspecified fields
 				assert.Equal(t, "openshift-gitops-operator", varMap["OLM_SUBSCRIPTION_NAME"])
-				assert.Equal(t, "openshift-operators", varMap["OLM_SUBSCRIPTION_NAMESPACE"])
+				assert.Equal(t, "openshift-gitops-operator", varMap["OLM_SUBSCRIPTION_NAMESPACE"])
 				assert.Equal(t, "Automatic", varMap["OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL"])
 			},
 		},
@@ -518,6 +521,47 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				assert.Equal(t, "false", varMap["ARGOCD_AGENT_ENABLED"], "ARGOCD_AGENT_ENABLED should be updated")
 				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"], "User custom variable should be preserved")
 				assert.Equal(t, "operator-image:latest", varMap["GITOPS_OPERATOR_IMAGE"], "Managed variable should be updated")
+			},
+		},
+		{
+			name: "migrate: correct wrong agentInstallNamespace from openshift-operators to standard namespace",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "operator-image:latest",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						AgentInstallNamespace: "openshift-operators",
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-image:latest"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+				assert.Equal(t, utils.AddonAgentNamespace, config.Spec.AgentInstallNamespace,
+					"Wrong agentInstallNamespace should be corrected to the standard ACM addon namespace on update")
 			},
 		},
 	}
@@ -716,6 +760,9 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
+				// InstallNamespace must always be the standard ACM addon namespace
+				assert.Equal(t, utils.AddonAgentNamespace, addon.Spec.InstallNamespace)
+
 				// Only AddonDeploymentConfig when ArgoCD agent is disabled
 				assert.Len(t, addon.Spec.Configs, 1)
 
@@ -759,6 +806,9 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}, addon)
 				require.NoError(t, err)
 
+				// InstallNamespace must always be the standard ACM addon namespace
+				assert.Equal(t, utils.AddonAgentNamespace, addon.Spec.InstallNamespace)
+
 				// Both AddOnTemplate and AddonDeploymentConfig when ArgoCD agent is enabled
 				assert.Len(t, addon.Spec.Configs, 2)
 
@@ -776,6 +826,46 @@ func TestEnsureManagedClusterAddon(t *testing.T) {
 				}
 				assert.True(t, foundTemplate, "Should have AddOnTemplate config when ArgoCD agent is enabled")
 				assert.True(t, foundDeploymentConfig, "Should have AddonDeploymentConfig")
+			},
+		},
+		{
+			name:      "correct wrong installNamespace on existing ManagedClusterAddOn",
+			namespace: "test-cluster",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitopscluster",
+					Namespace: "test-namespace",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						Enabled: func(b bool) *bool { return &b }(true),
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							Enabled: func(b bool) *bool { return &b }(false),
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.ManagedClusterAddOn{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon",
+						Namespace: "test-cluster",
+					},
+					// Simulate an old resource with wrong installNamespace
+					Spec: addonv1alpha1.ManagedClusterAddOnSpec{
+						InstallNamespace: "openshift-operators",
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				addon := &addonv1alpha1.ManagedClusterAddOn{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon",
+					Namespace: namespace,
+				}, addon)
+				require.NoError(t, err)
+				// Wrong namespace should be corrected to the standard ACM addon namespace
+				assert.Equal(t, utils.AddonAgentNamespace, addon.Spec.InstallNamespace)
 			},
 		},
 		{

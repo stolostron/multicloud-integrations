@@ -49,6 +49,9 @@ const (
 
 	// GitOpsOperatorNamespace is the fixed namespace for GitOps operator (no longer configurable)
 	GitOpsOperatorNamespace = "openshift-gitops-operator"
+
+	// AddonAgentNamespace is the standard namespace where all ACM addon agents run on managed clusters.
+	AddonAgentNamespace = "open-cluster-management-agent-addon"
 )
 
 // ClusterPredicateFunc defines predicate function for cluster related watch, main purpose is to ignore heartbeat without change
