@@ -30,7 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -1003,9 +1005,9 @@ func TestCreateOrUpdateOLMSubscriptionWithDefaults(t *testing.T) {
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
 
-	// Create namespace
+	// Create namespace (default subscription namespace is now openshift-gitops-operator)
 	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops-operator"},
 	}
 	err := reconciler.Create(context.TODO(), ns)
 	if err != nil && !errors.IsAlreadyExists(err) {
@@ -1021,7 +1023,7 @@ func TestCreateOrUpdateOLMSubscriptionWithDefaults(t *testing.T) {
 	sub.SetKind("Subscription")
 	err = reconciler.Get(context.Background(), types.NamespacedName{
 		Name:      "openshift-gitops-operator",
-		Namespace: "openshift-operators",
+		Namespace: "openshift-gitops-operator",
 	}, sub)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
@@ -1049,7 +1051,7 @@ func TestCreateOrUpdateOLMSubscriptionUpdatesOwnedExisting(t *testing.T) {
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
 
 	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops-operator"},
 	}
 	err := reconciler.Create(context.TODO(), ns)
 	if err != nil && !errors.IsAlreadyExists(err) {
@@ -1065,7 +1067,7 @@ func TestCreateOrUpdateOLMSubscriptionUpdatesOwnedExisting(t *testing.T) {
 	sub.SetKind("Subscription")
 	err = reconciler.Get(context.Background(), types.NamespacedName{
 		Name:      "openshift-gitops-operator",
-		Namespace: "openshift-operators",
+		Namespace: "openshift-gitops-operator",
 	}, sub)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
@@ -1084,7 +1086,7 @@ func TestCreateOrUpdateOLMSubscriptionUpdatesOwnedExisting(t *testing.T) {
 	sub2.SetKind("Subscription")
 	err = reconciler.Get(context.Background(), types.NamespacedName{
 		Name:      "openshift-gitops-operator",
-		Namespace: "openshift-operators",
+		Namespace: "openshift-gitops-operator",
 	}, sub2)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
@@ -1109,8 +1111,10 @@ func TestCreateOrUpdateOLMSubscriptionSkipsPreExisting(t *testing.T) {
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_SOURCE_NAMESPACE")
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
 
+	// Use the default namespace (openshift-gitops-operator) so the pre-existing
+	// subscription is visible to createOrUpdateOLMSubscription.
 	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops-operator"},
 	}
 	err := reconciler.Create(context.TODO(), ns)
 	if err != nil && !errors.IsAlreadyExists(err) {
@@ -1124,7 +1128,7 @@ func TestCreateOrUpdateOLMSubscriptionSkipsPreExisting(t *testing.T) {
 			"kind":       "Subscription",
 			"metadata": map[string]interface{}{
 				"name":      "openshift-gitops-operator",
-				"namespace": "openshift-operators",
+				"namespace": "openshift-gitops-operator",
 			},
 			"spec": map[string]interface{}{
 				"channel":         "stable",
@@ -1147,7 +1151,7 @@ func TestCreateOrUpdateOLMSubscriptionSkipsPreExisting(t *testing.T) {
 	sub.SetKind("Subscription")
 	err = reconciler.Get(context.Background(), types.NamespacedName{
 		Name:      "openshift-gitops-operator",
-		Namespace: "openshift-operators",
+		Namespace: "openshift-gitops-operator",
 	}, sub)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
@@ -1223,7 +1227,7 @@ func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
 	unsetEnvForTest(t, "OLM_SUBSCRIPTION_INSTALL_PLAN_APPROVAL")
 
 	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators"},
+		ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops-operator"},
 	}
 	err := reconciler.Create(context.TODO(), ns)
 	if err != nil && !errors.IsAlreadyExists(err) {
@@ -1237,7 +1241,7 @@ func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
 			"kind":       "Subscription",
 			"metadata": map[string]interface{}{
 				"name":      "openshift-gitops-operator",
-				"namespace": "openshift-operators",
+				"namespace": "openshift-gitops-operator",
 				"labels": map[string]interface{}{
 					"apps.open-cluster-management.io/gitopsaddon": "true",
 				},
@@ -1270,7 +1274,7 @@ func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
 		sub2.SetAPIVersion("operators.coreos.com/v1alpha1")
 		sub2.SetKind("Subscription")
 		sub2.SetName("openshift-gitops-operator")
-		sub2.SetNamespace("openshift-operators")
+		sub2.SetNamespace("openshift-gitops-operator")
 		_ = reconciler.Delete(context.TODO(), sub2)
 	})
 
@@ -1284,10 +1288,258 @@ func TestCreateOrUpdateOLMSubscriptionInstallPlanMissing(t *testing.T) {
 	newSub.SetKind("Subscription")
 	err = reconciler.Get(context.Background(), types.NamespacedName{
 		Name:      "openshift-gitops-operator",
-		Namespace: "openshift-operators",
+		Namespace: "openshift-gitops-operator",
 	}, newSub)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 	g.Expect(newSub.GetLabels()["apps.open-cluster-management.io/gitopsaddon"]).To(gomega.Equal("true"))
+}
+
+func TestRecoverFromFailedWebhookInstallPlan(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+	makeReconciler := func(objs ...client.Object) *GitopsAddonReconciler {
+		return &GitopsAddonReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
+		}
+	}
+
+	t.Run("no-op when subscription not found", func(t *testing.T) {
+		r := makeReconciler()
+		err := r.recoverFromFailedWebhookInstallPlan(context.TODO())
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+
+	t.Run("no-op when subscription not owned by gitopsaddon", func(t *testing.T) {
+		sub := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata":   map[string]interface{}{"name": "openshift-gitops-operator", "namespace": GitOpsOperatorNamespace},
+		}}
+		r := makeReconciler()
+		g.Expect(r.Create(context.TODO(), sub)).To(gomega.Succeed())
+		g.Expect(r.recoverFromFailedWebhookInstallPlan(context.TODO())).To(gomega.Succeed())
+	})
+
+	t.Run("no-op when InstallPlanFailed is not webhook-related", func(t *testing.T) {
+		sub := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name": "openshift-gitops-operator", "namespace": GitOpsOperatorNamespace,
+				"labels": map[string]interface{}{"apps.open-cluster-management.io/gitopsaddon": "true"},
+			},
+			"status": map[string]interface{}{
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "InstallPlanFailed", "status": "True", "message": "some other error"},
+				},
+			},
+		}}
+		r := makeReconciler()
+		g.Expect(r.Create(context.TODO(), sub)).To(gomega.Succeed())
+		g.Expect(r.recoverFromFailedWebhookInstallPlan(context.TODO())).To(gomega.Succeed())
+	})
+
+	t.Run("deletes failed InstallPlan when condition is webhook-related", func(t *testing.T) {
+		ip := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "InstallPlan",
+			"metadata":   map[string]interface{}{"name": "install-lr2qq", "namespace": GitOpsOperatorNamespace},
+		}}
+		sub := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name": "openshift-gitops-operator", "namespace": GitOpsOperatorNamespace,
+				"labels": map[string]interface{}{"apps.open-cluster-management.io/gitopsaddon": "true"},
+			},
+			"status": map[string]interface{}{
+				"conditions": []interface{}{
+					map[string]interface{}{
+						"type":    "InstallPlanFailed",
+						"status":  "True",
+						"reason":  "InstallComponentFailed",
+						"message": "error validating existing CRs: conversion webhook for argoproj.io/v1beta1, Kind=ArgoCD failed: Post https://...: connect: connection refused",
+					},
+				},
+				"installPlanRef": map[string]interface{}{
+					"name":      "install-lr2qq",
+					"namespace": GitOpsOperatorNamespace,
+				},
+			},
+		}}
+		r := makeReconciler(ip)
+		g.Expect(r.Create(context.TODO(), sub)).To(gomega.Succeed())
+
+		g.Expect(r.recoverFromFailedWebhookInstallPlan(context.TODO())).To(gomega.Succeed())
+
+		// InstallPlan should be deleted
+		deleted := &unstructured.Unstructured{}
+		deleted.SetAPIVersion("operators.coreos.com/v1alpha1")
+		deleted.SetKind("InstallPlan")
+		err := r.Get(context.TODO(), types.NamespacedName{Name: "install-lr2qq", Namespace: GitOpsOperatorNamespace}, deleted)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "InstallPlan should have been deleted")
+	})
+
+	t.Run("idempotent: no-op when InstallPlan already gone", func(t *testing.T) {
+		sub := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "operators.coreos.com/v1alpha1",
+			"kind":       "Subscription",
+			"metadata": map[string]interface{}{
+				"name": "openshift-gitops-operator", "namespace": GitOpsOperatorNamespace,
+				"labels": map[string]interface{}{"apps.open-cluster-management.io/gitopsaddon": "true"},
+			},
+			"status": map[string]interface{}{
+				"conditions": []interface{}{
+					map[string]interface{}{
+						"type": "InstallPlanFailed", "status": "True",
+						"message": "conversion webhook failed: connection refused",
+					},
+				},
+				"installPlanRef": map[string]interface{}{"name": "already-gone", "namespace": GitOpsOperatorNamespace},
+			},
+		}}
+		r := makeReconciler()
+		g.Expect(r.Create(context.TODO(), sub)).To(gomega.Succeed())
+		// Should not error even though InstallPlan doesn't exist
+		g.Expect(r.recoverFromFailedWebhookInstallPlan(context.TODO())).To(gomega.Succeed())
+	})
+}
+
+func TestOLMSubscriptionIdempotency(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	makeReconciler := func(objs ...client.Object) *GitopsAddonReconciler {
+		scheme := runtime.NewScheme()
+		g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+		return &GitopsAddonReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
+		}
+	}
+
+	gitopsaddonLabel := map[string]interface{}{
+		"apps.open-cluster-management.io/gitopsaddon": "true",
+	}
+
+	makeGitopsaddonSub := func(channel, source, sourceNS, approval string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": "openshift-gitops-operator",
+					"labels":    gitopsaddonLabel,
+				},
+				"spec": map[string]interface{}{
+					"channel":             channel,
+					"source":              source,
+					"sourceNamespace":     sourceNS,
+					"installPlanApproval": approval,
+				},
+			},
+		}
+	}
+
+	t.Run("olmSubscriptionSpecChanged_no_diff", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := makeGitopsaddonSub("latest", "redhat-operators", "openshift-marketplace", "Automatic")
+		g.Expect(olmSubscriptionSpecChanged(sub, "latest", "redhat-operators", "openshift-marketplace", "Automatic")).
+			To(gomega.BeFalse())
+	})
+
+	t.Run("olmSubscriptionSpecChanged_channel_diff", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := makeGitopsaddonSub("latest", "redhat-operators", "openshift-marketplace", "Automatic")
+		g.Expect(olmSubscriptionSpecChanged(sub, "stable", "redhat-operators", "openshift-marketplace", "Automatic")).
+			To(gomega.BeTrue())
+	})
+
+	t.Run("olmSubscriptionNeedsUpdate_not_found", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		r := makeReconciler()
+		g.Expect(r.olmSubscriptionNeedsUpdate(context.TODO())).To(gomega.BeTrue(),
+			"missing subscription should require create")
+	})
+
+	t.Run("olmSubscriptionNeedsUpdate_spec_unchanged", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := makeGitopsaddonSub("latest", "redhat-operators", "openshift-marketplace", "Automatic")
+		r := makeReconciler(sub)
+		g.Expect(r.olmSubscriptionNeedsUpdate(context.TODO())).To(gomega.BeFalse(),
+			"matching spec should be a no-op")
+	})
+
+	t.Run("olmSubscriptionNeedsUpdate_spec_changed", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := makeGitopsaddonSub("stable", "redhat-operators", "openshift-marketplace", "Automatic")
+		r := makeReconciler(sub)
+		// default channel env is "latest", installed is "stable" → needs update
+		g.Expect(r.olmSubscriptionNeedsUpdate(context.TODO())).To(gomega.BeTrue())
+	})
+
+	t.Run("olmSubscriptionNeedsUpdate_preexisting_no_label_noop", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": "openshift-gitops-operator",
+					// No gitopsaddon label — pre-existing, user-managed
+				},
+				"spec": map[string]interface{}{
+					"channel": "latest",
+				},
+			},
+		}
+		r := makeReconciler(sub)
+		g.Expect(r.olmSubscriptionNeedsUpdate(context.TODO())).To(gomega.BeFalse())
+	})
+
+	t.Run("createOrUpdateOLMSubscription_spec_unchanged_no_update", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		sub := makeGitopsaddonSub("latest", "redhat-operators", "openshift-marketplace", "Automatic")
+		r := makeReconciler(sub)
+		rv0 := sub.GetResourceVersion()
+		err := r.createOrUpdateOLMSubscription(context.TODO())
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		got := &unstructured.Unstructured{}
+		got.SetAPIVersion("operators.coreos.com/v1alpha1")
+		got.SetKind("Subscription")
+		g.Expect(r.Get(context.TODO(), types.NamespacedName{
+			Name:      "openshift-gitops-operator",
+			Namespace: "openshift-gitops-operator",
+		}, got)).To(gomega.Succeed())
+		g.Expect(got.GetResourceVersion()).To(gomega.Equal(rv0),
+			"resourceVersion must not change when spec is unchanged")
+	})
+
+	t.Run("createOrUpdateOLMSubscription_spec_changed_does_update", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		// Installed with "stable"; desired is "latest" (default env)
+		sub := makeGitopsaddonSub("stable", "redhat-operators", "openshift-marketplace", "Automatic")
+		r := makeReconciler(sub)
+		rv0 := sub.GetResourceVersion()
+		err := r.createOrUpdateOLMSubscription(context.TODO())
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		got := &unstructured.Unstructured{}
+		got.SetAPIVersion("operators.coreos.com/v1alpha1")
+		got.SetKind("Subscription")
+		g.Expect(r.Get(context.TODO(), types.NamespacedName{
+			Name:      "openshift-gitops-operator",
+			Namespace: "openshift-gitops-operator",
+		}, got)).To(gomega.Succeed())
+		g.Expect(got.GetResourceVersion()).ToNot(gomega.Equal(rv0),
+			"resourceVersion must change after spec update")
+		updatedChannel, _, _ := unstructured.NestedString(got.Object, "spec", "channel")
+		g.Expect(updatedChannel).To(gomega.Equal("latest"))
+	})
 }
 
 func TestInstallOrUpdateOpenshiftGitopsOLMOverride(t *testing.T) {

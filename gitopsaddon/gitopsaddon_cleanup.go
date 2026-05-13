@@ -274,7 +274,7 @@ type olmCSVRef struct {
 func deleteOLMResources(ctx context.Context, c client.Client) error {
 	klog.Info("Deleting OLM resources (Subscription and CSV)")
 
-	subscriptionNamespaces := []string{"openshift-operators", "operators"}
+	subscriptionNamespaces := []string{"openshift-operators", "operators", GitOpsOperatorNamespace}
 
 	// Include the namespace from env var if set and not already in the list
 	if envNs := os.Getenv("OLM_SUBSCRIPTION_NAMESPACE"); envNs != "" {
@@ -385,6 +385,73 @@ func patchArgoCDCRDConversionWebhook(ctx context.Context, c client.Client) error
 		return fmt.Errorf("failed to patch ArgoCD CRD conversion: %w", err)
 	}
 	klog.Info("Successfully patched ArgoCD CRD conversion to None")
+	return nil
+}
+
+// patchArgoCDCRDConversionWebhookIfNotReady unconditionally patches the ArgoCD CRD
+// conversion strategy to "None" when the CRD has a service-based webhook configured.
+//
+// This must be called BEFORE creating the OLM Subscription so that OLM's InstallPlan
+// can validate existing ArgoCD CRs without hitting the webhook. Two failure modes are
+// prevented:
+//
+//  1. "service not found" — the webhook service does not exist yet.
+//
+//  2. "connection refused" — the service and its endpoints appear ready to k8s (the
+//     readiness probe passed), but the webhook server on port 9443 has not yet opened
+//     the socket. Endpoint readiness is not a reliable proxy for port-level readiness,
+//     so checking endpoints is insufficient to prevent this race.
+//
+// Patching to "None" unconditionally is safe: OLM restores the "Webhook" strategy when
+// it processes the new InstallPlan, and the running operator re-establishes the full
+// webhook config once its pod is serving.
+//
+// URL-based webhooks (clientConfig.url rather than clientConfig.service) are left
+// untouched since they are not managed by OLM and are not our concern.
+func patchArgoCDCRDConversionWebhookIfNotReady(ctx context.Context, c client.Client) error {
+	crd := &unstructured.Unstructured{}
+	crd.SetAPIVersion("apiextensions.k8s.io/v1")
+	crd.SetKind("CustomResourceDefinition")
+
+	err := c.Get(ctx, types.NamespacedName{Name: "argocds.argoproj.io"}, crd)
+	if err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get ArgoCD CRD: %w", err)
+	}
+
+	conversion, found, _ := unstructured.NestedMap(crd.Object, "spec", "conversion")
+	if !found {
+		return nil
+	}
+
+	strategy, _, _ := unstructured.NestedString(conversion, "strategy")
+	if strategy != "Webhook" {
+		return nil
+	}
+
+	// Only patch when the webhook is service-based (OLM-managed). URL-based webhooks
+	// (clientConfig.url) are not managed by OLM and should not be touched.
+	svcName, _, _ := unstructured.NestedString(conversion, "webhook", "clientConfig", "service", "name")
+	svcNamespace, _, _ := unstructured.NestedString(conversion, "webhook", "clientConfig", "service", "namespace")
+	if svcName == "" || svcNamespace == "" {
+		return nil
+	}
+
+	klog.Infof("ArgoCD CRD conversion webhook references service %s/%s; patching strategy to None before OLM subscription",
+		svcNamespace, svcName)
+	return patchCRDConversionToNone(ctx, c, crd, "pre-emptive patch before OLM subscription")
+}
+
+// patchCRDConversionToNone patches the given CRD's conversion strategy to "None".
+func patchCRDConversionToNone(ctx context.Context, c client.Client, crd *unstructured.Unstructured, reason string) error {
+	patch := client.RawPatch(types.JSONPatchType,
+		[]byte(`[{"op": "replace", "path": "/spec/conversion", "value": {"strategy": "None"}}]`))
+	if err := c.Patch(ctx, crd, patch); err != nil {
+		return fmt.Errorf("failed to patch ArgoCD CRD conversion: %w", err)
+	}
+	klog.Infof("Successfully patched ArgoCD CRD conversion webhook to None (%s)", reason)
 	return nil
 }
 
