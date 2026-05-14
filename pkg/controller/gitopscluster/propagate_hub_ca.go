@@ -38,8 +38,8 @@ import (
 // The ManifestWorks are never deleted - they persist even if the secret changes or is removed.
 func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
-	// Hub namespace - where we read the CA cert from (use GitOpsCluster's namespace)
-	hubNamespace := gitOpsCluster.Namespace
+	// Hub namespace - where we read the CA cert from (use the effective ArgoCD namespace)
+	hubNamespace := GetEffectiveArgoNamespace(gitOpsCluster)
 
 	// Get the CA certificate from the argocd-agent-ca secret on the hub
 	caCert, err := r.getArgoCDAgentCACert(hubNamespace)

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -96,7 +97,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 
 		result, err := reconciler.Reconcile(context.TODO(), req)
 		g.Expect(err).ToNot(HaveOccurred())
-		g.Expect(result).To(Equal(reconcile.Result{}))
+		g.Expect(result).To(Equal(requeueResult()))
 	})
 
 	// Test case 3: Create target secret when it doesn't exist
@@ -146,7 +147,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 
 		result, err := reconciler.Reconcile(context.TODO(), req)
 		g.Expect(err).ToNot(HaveOccurred())
-		g.Expect(result).To(Equal(reconcile.Result{}))
+		g.Expect(result).To(Equal(requeueResult()))
 
 		// Verify target secret was created
 		targetSecret := &corev1.Secret{}
@@ -220,7 +221,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 
 		result, err := reconciler.Reconcile(context.TODO(), req)
 		g.Expect(err).ToNot(HaveOccurred())
-		g.Expect(result).To(Equal(reconcile.Result{}))
+		g.Expect(result).To(Equal(requeueResult()))
 
 		// Verify target secret was updated
 		updatedTargetSecret := &corev1.Secret{}
@@ -280,7 +281,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 
 		result, err := reconciler.Reconcile(context.TODO(), req)
 		g.Expect(err).ToNot(HaveOccurred())
-		g.Expect(result).To(Equal(reconcile.Result{}))
+		g.Expect(result).To(Equal(requeueResult()))
 
 		// Verify target secret was created with TLS type
 		targetSecret := &corev1.Secret{}
@@ -317,7 +318,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 
 		result, err = reconciler.Reconcile(context.TODO(), req)
 		g.Expect(err).ToNot(HaveOccurred())
-		g.Expect(result).To(Equal(reconcile.Result{}))
+		g.Expect(result).To(Equal(requeueResult()))
 
 		// Verify target secret remains Opaque
 		targetSecretOpaque := &corev1.Secret{}
@@ -569,6 +570,408 @@ func TestPredicateFunctions(t *testing.T) {
 		deleteEventOther := event.TypedDeleteEvent[*corev1.Namespace]{Object: otherNs}
 		g.Expect(targetNamespacePredicateFunc.DeleteFunc(deleteEventOther)).To(BeFalse())
 	})
+}
+
+func TestTargetSecretPredicate(t *testing.T) {
+	g := NewWithT(t)
+
+	// Pin env vars so getTargetNamespace() resolves deterministically
+	t.Setenv("ARGOCD_NAMESPACE", GitOpsNamespace)
+
+	// Target secret (argocd-agent-client-tls in openshift-gitops)
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+	}
+
+	// DeleteFunc should return true for the target secret
+	deleteEvent := event.TypedDeleteEvent[*corev1.Secret]{Object: targetSecret}
+	g.Expect(targetSecretPredicateFunc.DeleteFunc(deleteEvent)).To(BeTrue())
+
+	// CreateFunc should return false (we only care about deletions)
+	createEvent := event.TypedCreateEvent[*corev1.Secret]{Object: targetSecret}
+	g.Expect(targetSecretPredicateFunc.CreateFunc(createEvent)).To(BeFalse())
+
+	// UpdateFunc should return false
+	updateEvent := event.TypedUpdateEvent[*corev1.Secret]{ObjectNew: targetSecret}
+	g.Expect(targetSecretPredicateFunc.UpdateFunc(updateEvent)).To(BeFalse())
+
+	// Wrong secret name should not match
+	wrongSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "wrong-name",
+			Namespace: GitOpsNamespace,
+		},
+	}
+	deleteEventWrong := event.TypedDeleteEvent[*corev1.Secret]{Object: wrongSecret}
+	g.Expect(targetSecretPredicateFunc.DeleteFunc(deleteEventWrong)).To(BeFalse())
+
+	// Wrong namespace should not match
+	wrongNs := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: "wrong-namespace",
+		},
+	}
+	deleteEventWrongNs := event.TypedDeleteEvent[*corev1.Secret]{Object: wrongNs}
+	g.Expect(targetSecretPredicateFunc.DeleteFunc(deleteEventWrongNs)).To(BeFalse())
+}
+
+func TestTargetSecretToSourceMapper(t *testing.T) {
+	g := NewWithT(t)
+
+	// Pin env vars so getTargetNamespace() and getSourceNamespace() resolve deterministically
+	t.Setenv("ARGOCD_NAMESPACE", GitOpsNamespace)
+	t.Setenv("POD_NAMESPACE", DefaultSourceNamespace)
+
+	// Target secret deletion should map back to source secret
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+	}
+	requests := targetSecretToSourceMapper(context.TODO(), targetSecret)
+	g.Expect(requests).To(HaveLen(1))
+	g.Expect(requests[0].Name).To(Equal(getSourceSecretName()))
+	g.Expect(requests[0].Namespace).To(Equal(DefaultSourceNamespace))
+
+	// Wrong secret should not generate any requests
+	wrongSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "wrong-name",
+			Namespace: GitOpsNamespace,
+		},
+	}
+	requests = targetSecretToSourceMapper(context.TODO(), wrongSecret)
+	g.Expect(requests).To(HaveLen(0))
+}
+
+func TestTargetSecretDeletionTriggersRecreation(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	// Create source secret and target namespace
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": []byte("test-cert-data"),
+			"tls.key": []byte("test-key-data"),
+		},
+	}
+	targetNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: GitOpsNamespace,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(sourceSecret, targetNs).Build()
+	reconciler := &SecretReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+	}
+
+	// First reconcile creates the target secret
+	result, err := reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
+
+	// Verify target secret was created
+	createdSecret := &corev1.Secret{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      TargetSecretName,
+		Namespace: GitOpsNamespace,
+	}, createdSecret)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(createdSecret.Data["tls.crt"]).To(Equal([]byte("test-cert-data")))
+
+	// Delete the target secret (simulating external deletion)
+	err = fakeClient.Delete(context.TODO(), createdSecret)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	// Re-reconcile (as if triggered by the target secret deletion watch)
+	result, err = reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
+
+	// Verify target secret was recreated
+	recreatedSecret := &corev1.Secret{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      TargetSecretName,
+		Namespace: GitOpsNamespace,
+	}, recreatedSecret)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(recreatedSecret.Data["tls.crt"]).To(Equal([]byte("test-cert-data")))
+}
+
+func TestSecretDataEqual(t *testing.T) {
+	g := NewWithT(t)
+
+	g.Expect(secretDataEqual(nil, nil)).To(BeTrue())
+	g.Expect(secretDataEqual(map[string][]byte{}, map[string][]byte{})).To(BeTrue())
+	g.Expect(secretDataEqual(
+		map[string][]byte{"a": []byte("1")},
+		map[string][]byte{"a": []byte("1")},
+	)).To(BeTrue())
+	g.Expect(secretDataEqual(
+		map[string][]byte{"a": []byte("1")},
+		map[string][]byte{"a": []byte("2")},
+	)).To(BeFalse())
+	g.Expect(secretDataEqual(
+		map[string][]byte{"a": []byte("1")},
+		map[string][]byte{"b": []byte("1")},
+	)).To(BeFalse())
+	g.Expect(secretDataEqual(
+		map[string][]byte{"a": []byte("1")},
+		map[string][]byte{"a": []byte("1"), "b": []byte("2")},
+	)).To(BeFalse())
+}
+
+func TestResyncSkipsWhenUpToDate(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("cert"), "tls.key": []byte("key")},
+	}
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("cert"), "tls.key": []byte("key")},
+	}
+	targetNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: GitOpsNamespace},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(sourceSecret, targetSecret, targetNs).Build()
+	reconciler := &SecretReconciler{Client: fakeClient, Scheme: scheme}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
+}
+
+func TestCertRotationRestartsAgentDeployments(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	replicas := int32(1)
+	agentDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "acm-openshift-gitops-agent",
+			Namespace: GitOpsNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of": "argocd-agent",
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "agent"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "agent"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent", Image: "test:latest"}},
+				},
+			},
+		},
+	}
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("new-cert"), "tls.key": []byte("new-key")},
+	}
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("old-cert"), "tls.key": []byte("old-key")},
+	}
+	targetNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: GitOpsNamespace},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(sourceSecret, targetSecret, targetNs, agentDeploy).Build()
+	reconciler := &SecretReconciler{Client: fakeClient, Scheme: scheme}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
+
+	// Verify the agent deployment was annotated with cert-rotated-at
+	updatedDeploy := &appsv1.Deployment{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "acm-openshift-gitops-agent",
+		Namespace: GitOpsNamespace,
+	}, updatedDeploy)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(updatedDeploy.Spec.Template.Annotations).To(HaveKey("apps.open-cluster-management.io/cert-rotated-at"))
+}
+
+func TestNoRestartWhenCertUnchanged(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	replicas := int32(1)
+	agentDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "acm-openshift-gitops-agent",
+			Namespace: GitOpsNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of": "argocd-agent",
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "agent"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "agent"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent", Image: "test:latest"}},
+				},
+			},
+		},
+	}
+
+	// Source and target have SAME data — no rotation happened
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("same-cert"), "tls.key": []byte("same-key")},
+	}
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("same-cert"), "tls.key": []byte("same-key")},
+	}
+	targetNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: GitOpsNamespace},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(sourceSecret, targetSecret, targetNs, agentDeploy).Build()
+	reconciler := &SecretReconciler{Client: fakeClient, Scheme: scheme}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
+
+	// Verify the agent deployment was NOT annotated (no restart)
+	updatedDeploy := &appsv1.Deployment{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name:      "acm-openshift-gitops-agent",
+		Namespace: GitOpsNamespace,
+	}, updatedDeploy)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(updatedDeploy.Spec.Template.Annotations).ToNot(HaveKey("apps.open-cluster-management.io/cert-rotated-at"))
+}
+
+func TestRestartNoAgentDeployments(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+
+	// No agent deployments exist (non-agent mode)
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("new-cert"), "tls.key": []byte("new-key")},
+	}
+	targetSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TargetSecretName,
+			Namespace: GitOpsNamespace,
+		},
+		Data: map[string][]byte{"tls.crt": []byte("old-cert"), "tls.key": []byte("old-key")},
+	}
+	targetNs := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: GitOpsNamespace},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(sourceSecret, targetSecret, targetNs).Build()
+	reconciler := &SecretReconciler{Client: fakeClient, Scheme: scheme}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      getSourceSecretName(),
+			Namespace: DefaultSourceNamespace,
+		},
+	}
+
+	// Should succeed without error even with no agent deployments
+	result, err := reconciler.Reconcile(context.TODO(), req)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(result).To(Equal(requeueResult()))
 }
 
 func TestGetSourceSecretName(t *testing.T) {

@@ -198,37 +198,69 @@ func TestBuildAddonManifests(t *testing.T) {
 		t.Error("buildAddonManifests() returned empty manifests")
 	}
 
-	// Verify the number of manifests (should include Job, ServiceAccount, ClusterRoleBinding, Deployment)
-	expectedCount := 4
+	// Verify the number of manifests (should include Job, ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment)
+	expectedCount := 5
 	if len(manifests) != expectedCount {
 		t.Errorf("buildAddonManifests() manifest count = %v, want %v", len(manifests), expectedCount)
 	}
 
-	// Verify that all manifests use Raw bytes (not Object) and don't contain status fields
+	// Verify that all manifests use Raw bytes, have correct kinds, and no status fields
+	expectedKinds := map[string]bool{
+		"Job":                false,
+		"ServiceAccount":     false,
+		"ClusterRole":        false,
+		"ClusterRoleBinding": false,
+		"Deployment":         false,
+	}
+
 	for i, manifest := range manifests {
-		// Check that Raw is populated (our new implementation uses Raw instead of Object)
 		if len(manifest.Raw) == 0 {
 			t.Errorf("Manifest %d has empty Raw field, expected populated Raw bytes", i)
 		}
 
-		// Unmarshal the Raw bytes to verify no status field exists
 		var objMap map[string]interface{}
 		if err := json.Unmarshal(manifest.Raw, &objMap); err != nil {
 			t.Errorf("Manifest %d failed to unmarshal: %v", i, err)
 			continue
 		}
 
-		// Verify status field is not present
 		if _, hasStatus := objMap["status"]; hasStatus {
 			t.Errorf("Manifest %d contains unwanted 'status' field", i)
 		}
 
-		// Verify the manifest has basic required fields
-		if _, hasKind := objMap["kind"]; !hasKind {
+		kind, hasKind := objMap["kind"].(string)
+		if !hasKind {
 			t.Errorf("Manifest %d missing 'kind' field", i)
+			continue
 		}
 		if _, hasApiVersion := objMap["apiVersion"]; !hasApiVersion {
 			t.Errorf("Manifest %d missing 'apiVersion' field", i)
+		}
+
+		if _, expected := expectedKinds[kind]; expected {
+			expectedKinds[kind] = true
+		} else {
+			t.Errorf("Manifest %d has unexpected kind %q", i, kind)
+		}
+
+		if kind == "ClusterRoleBinding" {
+			roleRef, ok := objMap["roleRef"].(map[string]interface{})
+			if !ok {
+				t.Error("ClusterRoleBinding manifest missing roleRef")
+				continue
+			}
+			if roleRef["name"] != "gitops-addon" {
+				t.Errorf("ClusterRoleBinding roleRef.name = %q, want %q", roleRef["name"], "gitops-addon")
+			}
+			if roleRef["kind"] != "ClusterRole" {
+				t.Errorf("ClusterRoleBinding roleRef.kind = %q, want %q", roleRef["kind"], "ClusterRole")
+			}
+		}
+	}
+
+	for kind, found := range expectedKinds {
+		if !found {
+			t.Errorf("Expected manifest kind %q not found in buildAddonManifests output", kind)
 		}
 	}
 }
