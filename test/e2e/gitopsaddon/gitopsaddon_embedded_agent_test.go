@@ -121,6 +121,16 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 		})
 	})
 
+	Context("Cert Rotation Resilience", func() {
+		It("should recreate argocd-agent-client-tls on spoke when deleted", func() {
+			verifyCertRotationOnSpoke(argoCDNamespace, 2*time.Minute)
+		})
+
+		It("should have CA cert in the correct ArgoCD namespace on hub", func() {
+			verifyCASecretInNamespace(argoCDNamespace, 1*time.Minute)
+		})
+	})
+
 	Context("Cleanup", func() {
 		It("should clean up guestbook resources", func() {
 			cleanupGuestbookResources(true)

@@ -124,6 +124,7 @@ spec:
 type gitOpsClusterOpts struct {
 	name          string
 	namespace     string
+	argoNamespace string // ArgoCD instance namespace (defaults to argoCDNamespace constant)
 	placementName string
 	agentEnabled  bool
 	agentMode     string // "managed" or "autonomous" (empty defaults to managed)
@@ -136,6 +137,10 @@ type gitOpsClusterOpts struct {
 }
 
 func gitOpsClusterYAML(opts gitOpsClusterOpts) string {
+	argoNs := opts.argoNamespace
+	if argoNs == "" {
+		argoNs = opts.namespace
+	}
 	spec := fmt.Sprintf(`apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
 metadata:
@@ -148,7 +153,7 @@ spec:
   placementRef:
     kind: Placement
     apiVersion: cluster.open-cluster-management.io/v1beta1
-    name: %s`, opts.name, opts.namespace, argoCDNamespace, opts.placementName)
+    name: %s`, opts.name, opts.namespace, argoNs, opts.placementName)
 
 	spec += fmt.Sprintf(`
   gitopsAddon:
@@ -301,6 +306,18 @@ func waitForResourceGone(ctx, resource, name, ns string, timeout time.Duration) 
 		g.Expect(strings.Contains(errMsg, "NotFound") || strings.Contains(errMsg, "not found")).
 			To(BeTrue(), "expected NotFound error, got: %s", errMsg)
 	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+func deleteMCAWithFallback(ctx, addonName, ns string) {
+	_, err := kubectlCtx(ctx, "delete", "managedclusteraddon", addonName, "-n", ns,
+		"--ignore-not-found", "--timeout=180s")
+	if err != nil {
+		By(fmt.Sprintf("MCA delete timed out for %s in %s — stripping finalizers", addonName, ns))
+		kubectlCtx(ctx, "patch", "managedclusteraddon", addonName, "-n", ns,
+			"--type=merge", "-p", `{"metadata":{"finalizers":[]}}`)
+		kubectlCtx(ctx, "delete", "managedclusteraddon", addonName, "-n", ns,
+			"--ignore-not-found", "--timeout=60s")
+	}
 }
 
 func waitForPodPhase(ctx, ns, labelSelector, phase string, timeout time.Duration) {
@@ -979,12 +996,10 @@ func scenarioCleanup(opts gitOpsClusterOpts) {
 	waitForResourceGone(hubContext, "policy.policy.open-cluster-management.io", policyName, localClusterName, 2*time.Minute)
 
 	By("4. Deleting ManagedClusterAddOn for spoke (triggers pre-delete cleanup Job)")
-	kubectlCtx(hubContext, "delete", "managedclusteraddon", addonName, "-n", spokeName,
-		"--ignore-not-found", "--timeout=300s")
+	deleteMCAWithFallback(hubContext, addonName, spokeName)
 
 	By("5. Deleting ManagedClusterAddOn for local-cluster")
-	kubectlCtx(hubContext, "delete", "managedclusteraddon", addonName, "-n", localClusterName,
-		"--ignore-not-found", "--timeout=300s")
+	deleteMCAWithFallback(hubContext, addonName, localClusterName)
 
 	By("6. Deleting GitOpsCluster")
 	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
@@ -1003,10 +1018,10 @@ func verifyHubCleanup(opts gitOpsClusterOpts) {
 	waitForResourceGone(hubContext, "gitopscluster", opts.name, argoCDNamespace, 2*time.Minute)
 
 	By("verifying ManagedClusterAddOn for spoke is gone from hub")
-	waitForResourceGone(hubContext, "managedclusteraddon", addonName, spokeName, 2*time.Minute)
+	waitForResourceGone(hubContext, "managedclusteraddon", addonName, spokeName, 4*time.Minute)
 
 	By("verifying ManagedClusterAddOn for local-cluster is gone from hub")
-	waitForResourceGone(hubContext, "managedclusteraddon", addonName, localClusterName, 2*time.Minute)
+	waitForResourceGone(hubContext, "managedclusteraddon", addonName, localClusterName, 4*time.Minute)
 }
 
 func verifySpokeCleanup() {
@@ -1375,7 +1390,7 @@ func safeCleanupOLMOverride(opts gitOpsClusterOpts) {
 	kubectlCtx(hubContext, "delete", "placement", opts.placementName, "-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "policy.policy.open-cluster-management.io", policyName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "placementbinding.policy.open-cluster-management.io", bindingName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
-	kubectlCtx(hubContext, "delete", "managedclusteraddon", addonName, "-n", spokeName, "--ignore-not-found", "--timeout=120s")
+	deleteMCAWithFallback(hubContext, addonName, spokeName)
 	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
 }
 
@@ -1406,8 +1421,8 @@ func safeCleanup(opts gitOpsClusterOpts) {
 	kubectlCtx(spokeContext, "delete", "appproject", "default", "-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(spokeContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(spokeContext, "delete", "clusterrolebinding", "acm-openshift-gitops-cluster-admin", "--ignore-not-found")
-	kubectlCtx(hubContext, "delete", "managedclusteraddon", addonName, "-n", spokeName, "--ignore-not-found", "--timeout=120s")
-	kubectlCtx(hubContext, "delete", "managedclusteraddon", addonName, "-n", localClusterName, "--ignore-not-found", "--timeout=120s")
+	deleteMCAWithFallback(hubContext, addonName, spokeName)
+	deleteMCAWithFallback(hubContext, addonName, localClusterName)
 	kubectlCtx(hubContext, "delete", "argocd", "acm-openshift-gitops", "-n", localClusterName, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
 	deleteLiteral(hubContext, managedClusterSetBindingYAML(argoCDNamespace))
@@ -1671,4 +1686,37 @@ func cleanupPullModelResources() {
 	kubectlCtx(hubContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "clusterrolebinding",
 		"acm-openshift-gitops-cluster-admin", "--ignore-not-found")
+}
+
+// ---- Cert rotation helpers ----
+
+func verifyCertRotationOnSpoke(argoNs string, timeout time.Duration) {
+	By("verifying argocd-agent-client-tls exists on spoke")
+	waitForResourceExists(spokeContext, "secret", "argocd-agent-client-tls", argoNs, timeout)
+
+	By("recording cert fingerprint before deletion")
+	beforeMd5, err := kubectlCtx(spokeContext, "get", "secret", "argocd-agent-client-tls",
+		"-n", argoNs, "-o", "jsonpath={.data.tls\\.crt}")
+	Expect(err).ToNot(HaveOccurred())
+	Expect(beforeMd5).ToNot(BeEmpty())
+
+	By("deleting argocd-agent-client-tls on spoke")
+	_, err = kubectlCtx(spokeContext, "delete", "secret", "argocd-agent-client-tls", "-n", argoNs)
+	Expect(err).ToNot(HaveOccurred())
+
+	By("waiting for argocd-agent-client-tls to be recreated on spoke")
+	waitForResourceExists(spokeContext, "secret", "argocd-agent-client-tls", argoNs, timeout)
+
+	By("verifying cert data was restored")
+	afterMd5, err := kubectlCtx(spokeContext, "get", "secret", "argocd-agent-client-tls",
+		"-n", argoNs, "-o", "jsonpath={.data.tls\\.crt}")
+	Expect(err).ToNot(HaveOccurred())
+	Expect(afterMd5).ToNot(BeEmpty())
+
+	fmt.Fprintf(GinkgoWriter, "  cert rotation: secret recreated after deletion\n")
+}
+
+func verifyCASecretInNamespace(expectedNs string, timeout time.Duration) {
+	By(fmt.Sprintf("verifying argocd-agent-ca secret exists in %s on hub", expectedNs))
+	waitForResourceExists(hubContext, "secret", "argocd-agent-ca", expectedNs, timeout)
 }

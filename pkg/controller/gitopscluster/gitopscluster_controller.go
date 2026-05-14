@@ -59,6 +59,17 @@ type ReconcileGitOpsCluster struct {
 	apiReader client.Reader
 }
 
+// GetEffectiveArgoNamespace returns the namespace where the ArgoCD instance actually lives.
+// This is spec.argoServer.argoNamespace if set, otherwise falls back to the GitOpsCluster
+// CR's own namespace. This must be used instead of gitOpsCluster.Namespace for any
+// operation that targets the ArgoCD instance (certs, secrets, service discovery, etc.).
+func GetEffectiveArgoNamespace(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
+	if gitOpsCluster.Spec.ArgoServer.ArgoNamespace != "" {
+		return gitOpsCluster.Spec.ArgoServer.ArgoNamespace
+	}
+	return gitOpsCluster.Namespace
+}
+
 // TokenConfig defines a token configuration used in ArgoCD cluster secret
 type TokenConfig struct {
 	BearerToken     string `json:"bearerToken"`
@@ -448,6 +459,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	gitOpsCluster gitopsclusterV1beta1.GitOpsCluster,
 	orphanSecretsList map[types.NamespacedName]string) (int, error) {
 	instance := gitOpsCluster.DeepCopy()
+	argoNamespace := GetEffectiveArgoNamespace(instance)
 
 	// Initialize all applicable conditions at the start
 	r.initializeConditions(instance)
@@ -521,7 +533,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// 1. Verify that spec.argoServer.argoNamespace is a valid ArgoCD namespace
 	// skipArgoNamespaceVerify annotation just in case the service labels we use for verification change in future
-	if !r.VerifyArgocdNamespace(gitOpsCluster.Spec.ArgoServer.ArgoNamespace) &&
+	if !r.VerifyArgocdNamespace(argoNamespace) &&
 		annotations["skipArgoNamespaceVerify"] != "true" {
 		klog.Info("invalid argocd namespace because argo server pod was not found")
 
@@ -561,13 +573,13 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	}
 
 	// 1a. Add configMaps to be used by ArgoCD ApplicationSets
-	configMapErr := r.CreateApplicationSetConfigMaps(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
+	configMapErr := r.CreateApplicationSetConfigMaps(argoNamespace)
 	if configMapErr != nil {
 		klog.Warningf("there was a problem creating the configMaps: %v", configMapErr.Error())
 	}
 
 	// 1b. Add roles so applicationset-controller can read placementRules and placementDecisions
-	rbacErr := r.CreateApplicationSetRbac(gitOpsCluster.Spec.ArgoServer.ArgoNamespace)
+	rbacErr := r.CreateApplicationSetRbac(argoNamespace)
 	if rbacErr != nil {
 		klog.Warningf("there was a problem creating the role or binding: %v", rbacErr.Error())
 	}
@@ -645,7 +657,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		managedClusterNames = append(managedClusterNames, managedCluster.Name)
 	}
 
-	klog.V(1).Infof("adding managed clusters %v into argo namespace %s", managedClusterNames, instance.Spec.ArgoServer.ArgoNamespace)
+	klog.V(1).Infof("adding managed clusters %v into argo namespace %s", managedClusterNames, argoNamespace)
 
 	// 3. Check if GitOps addon and ArgoCD agent are enabled
 	gitopsAddonEnabled, argoCDAgentEnabled := r.GetGitOpsAddonStatus(instance)
@@ -653,7 +665,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	// 3a. Ensure secrets exists if ArgoCD agent is enabled
 	if argoCDAgentEnabled {
 		// Ensure argocd-redis secret exists if ArgoCD agent is enabled
-		err = r.ensureArgoCDRedisSecret(instance.Spec.ArgoServer.ArgoNamespace)
+		err = r.ensureArgoCDRedisSecret(argoNamespace)
 		if err != nil {
 			klog.Errorf("failed to ensure argocd-redis secret: %v", err)
 
@@ -681,7 +693,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 
 		// Ensure argocd-agent-jwt secret exists if ArgoCD agent is enabled
-		err = r.ensureArgoCDAgentJWTSecret(instance.Spec.ArgoServer.ArgoNamespace)
+		err = r.ensureArgoCDAgentJWTSecret(argoNamespace)
 		if err != nil {
 			klog.Errorf("failed to ensure argocd-agent-jwt secret: %v", err)
 
@@ -857,11 +869,6 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 		if argoCDAgentEnabled {
 			// ArgoCD agent is enabled - need dynamic template with custom signer registration
-			argoNamespace := instance.Spec.ArgoServer.ArgoNamespace
-			if argoNamespace == "" {
-				argoNamespace = utils.GitOpsNamespace
-			}
-
 			// Ensure addon-manager-controller RBAC resources exist in ArgoCD namespace
 			if err := r.ensureAddonManagerRBAC(argoNamespace); err != nil {
 				klog.Errorf("failed to ensure addon-manager-controller RBAC resources in namespace %s: %v", argoNamespace, err)
@@ -1320,7 +1327,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		managedClustersStr = fmt.Sprintf("%.4096v", managedClustersStr) + "..."
 	}
 
-	successMessage := fmt.Sprintf("Added managed clusters [%v] to gitops namespace %s", managedClustersStr, instance.Spec.ArgoServer.ArgoNamespace)
+	successMessage := fmt.Sprintf("Added managed clusters [%v] to gitops namespace %s", managedClustersStr, argoNamespace)
 
 	// Build condition updates for successful case
 	conditionUpdates := map[string]ConditionUpdate{

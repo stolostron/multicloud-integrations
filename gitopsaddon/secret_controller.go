@@ -16,12 +16,16 @@ package gitopsaddon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
@@ -38,6 +42,13 @@ import (
 const (
 	TargetSecretName       = "argocd-agent-client-tls" // #nosec G101
 	DefaultSourceNamespace = "open-cluster-management-agent-addon"
+
+	// SecretResyncInterval is the periodic interval at which the reconciler re-checks
+	// that the target secret is in sync with the source. This catches missed watch events
+	// (e.g., from network blips or pod restarts) and ensures the target cert stays fresh.
+	// The OCM ClientCertController rotates at ~80% of cert lifetime (e.g., ~19.2h for a 24h cert),
+	// so a 5-minute resync ensures rapid propagation of rotated certs.
+	SecretResyncInterval = 5 * time.Minute
 )
 
 // getTargetNamespace returns the namespace where the ArgoCD CR lives.
@@ -111,6 +122,19 @@ func SetupSecretControllerWithManager(mgr manager.Manager) error {
 		return err
 	}
 
+	// Watch for target secret deletion so we can re-copy from source
+	err = c.Watch(
+		source.Kind(
+			mgr.GetCache(),
+			&corev1.Secret{},
+			handler.TypedEnqueueRequestsFromMapFunc[*corev1.Secret](targetSecretToSourceMapper),
+			targetSecretPredicateFunc,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
 	// Watch for namespace creation/deletion to handle target namespace availability
 	err = c.Watch(
 		source.Kind(
@@ -138,6 +162,41 @@ var argoCDAgentSecretPredicateFunc = predicate.TypedFuncs[*corev1.Secret]{
 	DeleteFunc: func(e event.TypedDeleteEvent[*corev1.Secret]) bool {
 		return isTargetSecret(e.Object)
 	},
+}
+
+// targetSecretPredicateFunc filters events for the target secret (argocd-agent-client-tls)
+// so we can re-copy it from the source if it gets deleted
+var targetSecretPredicateFunc = predicate.TypedFuncs[*corev1.Secret]{
+	CreateFunc: func(e event.TypedCreateEvent[*corev1.Secret]) bool {
+		return false // We don't need to handle create events for the target
+	},
+	UpdateFunc: func(e event.TypedUpdateEvent[*corev1.Secret]) bool {
+		return false // We don't need to handle update events for the target
+	},
+	DeleteFunc: func(e event.TypedDeleteEvent[*corev1.Secret]) bool {
+		return isTargetSecretInTargetNamespace(e.Object)
+	},
+}
+
+// isTargetSecretInTargetNamespace checks if the deleted secret is our target secret
+func isTargetSecretInTargetNamespace(secret *corev1.Secret) bool {
+	return secret.Name == TargetSecretName && secret.Namespace == getTargetNamespace()
+}
+
+// targetSecretToSourceMapper maps target secret deletion events back to the source secret
+// so the reconciler re-copies the cert from source to target
+func targetSecretToSourceMapper(ctx context.Context, obj *corev1.Secret) []reconcile.Request {
+	if isTargetSecretInTargetNamespace(obj) {
+		return []reconcile.Request{
+			{
+				NamespacedName: types.NamespacedName{
+					Name:      getSourceSecretName(),
+					Namespace: getSourceNamespace(),
+				},
+			},
+		}
+	}
+	return []reconcile.Request{}
 }
 
 // targetNamespacePredicateFunc filters events for the target namespace
@@ -172,6 +231,12 @@ func namespaceToSecretMapper(ctx context.Context, obj *corev1.Namespace) []recon
 	return []reconcile.Request{}
 }
 
+// requeueResult returns a reconcile result that schedules a periodic re-check.
+// This ensures the target stays in sync even if watch events are missed.
+func requeueResult() reconcile.Result {
+	return reconcile.Result{RequeueAfter: SecretResyncInterval}
+}
+
 // Reconcile handles secret events
 func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	klog.Infof("Reconciling ArgoCD agent client cert secret: %s", request.NamespacedName)
@@ -191,7 +256,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 	if err != nil {
 		if errors.IsNotFound(err) {
 			klog.Infof("Target namespace %s does not exist, skipping secret copy", targetNamespace)
-			return reconcile.Result{}, nil
+			return requeueResult(), nil
 		}
 
 		klog.Errorf("Failed to check target namespace %s: %v", targetNamespace, err)
@@ -214,15 +279,88 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, request reconcile.Requ
 		return reconcile.Result{}, err
 	}
 
-	// Always create or update the target secret since reconciliation was triggered
+	// Check if target already exists and is up-to-date
 	targetSecretKey := types.NamespacedName{
 		Name:      TargetSecretName,
 		Namespace: targetNamespace,
 	}
 
-	klog.Infof("Creating/updating target secret %s", targetSecretKey)
+	existingTarget := &corev1.Secret{}
+	err = r.Get(ctx, targetSecretKey, existingTarget)
 
-	return r.createOrUpdateSecretCopy(ctx, sourceSecret)
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("Failed to get target secret %s: %v", targetSecretKey, err)
+		return reconcile.Result{}, err
+	}
+
+	if err == nil && secretDataEqual(sourceSecret.Data, existingTarget.Data) {
+		klog.V(4).Infof("Target secret %s is already up-to-date, requeueing periodic check", targetSecretKey)
+		return requeueResult(), nil
+	}
+
+	klog.Infof("Creating/updating target secret %s (cert data changed)", targetSecretKey)
+
+	result, err := r.createOrUpdateSecretCopy(ctx, sourceSecret)
+	if err != nil {
+		return result, err
+	}
+
+	// Cert data changed — restart agent pods so they pick up the new certificate.
+	// The argocd-agent process reads TLS certs at startup and does not hot-reload,
+	// so a rolling restart is required for the renewed cert to take effect.
+	if err := r.restartAgentDeployments(ctx, targetNamespace); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	return requeueResult(), nil
+}
+
+// secretDataEqual is defined in gitopsaddon_install.go (shared within the package)
+
+// restartAgentDeployments performs a rolling restart of ArgoCD agent Deployments
+// in the target namespace so they pick up the renewed TLS certificate.
+// This is equivalent to `kubectl rollout restart` — it patches the pod template
+// annotation to trigger a new rollout. Only Deployments labeled
+// app.kubernetes.io/part-of=argocd-agent are restarted. If no agent deployments
+// exist (e.g., non-agent mode), this is a no-op.
+func (r *SecretReconciler) restartAgentDeployments(ctx context.Context, namespace string) error {
+	agentSelector := labels.SelectorFromSet(labels.Set{
+		"app.kubernetes.io/part-of": "argocd-agent",
+	})
+
+	deployList := &appsv1.DeploymentList{}
+	if err := r.List(ctx, deployList, &client.ListOptions{
+		Namespace:     namespace,
+		LabelSelector: agentSelector,
+	}); err != nil {
+		return fmt.Errorf("failed to list agent deployments in %s: %w", namespace, err)
+	}
+
+	if len(deployList.Items) == 0 {
+		klog.V(4).Infof("No argocd-agent deployments found in %s, skipping restart", namespace)
+		return nil
+	}
+
+	restartTimestamp := fmt.Sprintf("%d", time.Now().Unix())
+
+	for i := range deployList.Items {
+		deploy := &deployList.Items[i]
+		klog.Infof("Restarting agent deployment %s/%s after cert rotation", deploy.Namespace, deploy.Name)
+
+		if deploy.Spec.Template.Annotations == nil {
+			deploy.Spec.Template.Annotations = make(map[string]string)
+		}
+
+		deploy.Spec.Template.Annotations["apps.open-cluster-management.io/cert-rotated-at"] = restartTimestamp
+
+		if err := r.Update(ctx, deploy); err != nil {
+			return fmt.Errorf("failed to restart agent deployment %s/%s: %w", deploy.Namespace, deploy.Name, err)
+		}
+
+		klog.Infof("Successfully triggered rolling restart of %s/%s", deploy.Namespace, deploy.Name)
+	}
+
+	return nil
 }
 
 // handleSourceSecretDeletion handles the case when the source secret is deleted
