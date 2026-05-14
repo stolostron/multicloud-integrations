@@ -180,7 +180,11 @@ The GitOpsCluster controller creates a Policy but does NOT include RBAC or Appli
 kubectl get policy my-gitops-argocd-policy -n openshift-gitops
 
 # Add RBAC and Application to the Policy
-# NOTE: The ServiceAccount namespace below must match the ArgoCD namespace on each
+# NOTE: The ClusterRoleBinding below grants cluster-admin to the ArgoCD *application-controller*
+# ServiceAccount — NOT the gitops-addon agent. The application-controller needs cluster-admin
+# (or equivalent) to deploy arbitrary resources across all namespaces on managed clusters.
+# This is separate from the fine-grained "gitops-addon" ClusterRole used by the addon agent.
+# The ServiceAccount namespace below must match the ArgoCD namespace on each
 # target cluster. Use "openshift-gitops" for remote/spoke clusters, or "local-cluster"
 # for hub-local deployments where ArgoCD is in the local-cluster namespace.
 kubectl patch policy my-gitops-argocd-policy -n openshift-gitops --type=json -p='[
@@ -925,7 +929,7 @@ Creates: Placement `kind-olm-override-placement`, GitOpsCluster `kind-olm-overri
 
 #### Scenario 2 Cert Rotation Verification
 
-After the main Scenario 2 checks pass, the test deletes the `argocd-agent-client-tls` secret on each managed cluster (OCP, Kind, local-cluster) and verifies it is recreated within 120 seconds. This validates the `SecretReconciler`'s target-deletion watch and the 5-minute periodic requeue safety net.
+After the main Scenario 2 checks pass, the test deletes the `argocd-agent-client-tls` secret on each managed cluster (OCP, Kind, local-cluster) and verifies it is recreated within 120 seconds. The `SecretReconciler`'s target-deletion watch triggers near-instant re-copy from the source secret, so recreation is typically < 5 seconds. The 120s timeout is a generous test tolerance for API server latency, watch propagation delays, and the 5-minute periodic requeue safety net (which catches missed watch events). The test also verifies that the recreated secret has a different `resourceVersion` to confirm it was actually recreated (not just found in cache).
 
 #### Scenario 5: Agent Version Drift Heal — All clusters (after S2)
 
@@ -1146,7 +1150,7 @@ kubectl -n open-cluster-management rollout restart deployment/multicluster-opera
 
 6. **Local-Cluster Agent Namespace**: The `local-cluster` agent creates Application copies in the `local-cluster` namespace (its own namespace), not in `openshift-gitops`. This is because the hub's `openshift-gitops` namespace is occupied by the principal's ArgoCD, and the ArgoCD operator uses hardcoded ConfigMap names (`argocd-cm`) that would collide if two ArgoCD CRs were in the same namespace. The agent-side `destinationBasedMapping` must be disabled so `getTargetNamespaceForApp()` returns the agent's own namespace rather than the hub's `openshift-gitops`. For remote clusters, this distinction doesn't matter because both the agent namespace and the hub app namespace are `openshift-gitops`.
 
-7. **Policy Deletion Timing**: OCM governance framework finalizers on Policy objects can take several minutes (up to 10 minutes) to process. The cleanup verification waits up to 120s for Policy deletion, with force-delete fallback.
+7. **Policy Deletion Timing**: OCM governance framework finalizers on Policy objects typically take 30-60 seconds to process but can take up to 10 minutes under heavy load or when many Policy objects are being finalized simultaneously. The cleanup verification waits up to 120s for Policy deletion; if the Policy is still present after 120s, a force-delete fallback (finalizer stripping + `--force --grace-period=0`) is attempted for stuck Policy objects.
 
 8. **Custom Namespace Cleanup**: When using a custom ArgoCD namespace (Scenario 7), cleanup must specify `CLEANUP_NS=<namespace>` so that `cleanup_scenario` targets the correct namespace. Without this, ArgoCD CRs and Policies in the custom namespace are not cleaned up.
 

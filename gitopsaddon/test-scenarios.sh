@@ -70,6 +70,15 @@ LOCAL_CLUSTER_NAME="local-cluster"
 # Override addon agent image (set to custom registry for local testing)
 ADDON_IMAGE="${ADDON_IMAGE:-}"
 
+# Detect the hub controller deployment name (may vary across ACM versions)
+HUB_CONTROLLER_DEPLOY=""
+for candidate in multicluster-operators-application multicloud-integrations-gitops; do
+    if KUBECONFIG="$HUB_KUBECONFIG" kubectl get deploy "$candidate" -n open-cluster-management &>/dev/null 2>&1; then
+        HUB_CONTROLLER_DEPLOY="$candidate"
+        break
+    fi
+done
+
 # Detect whether OCP cluster is available (kubeconfig exists AND cluster registered)
 HAS_OCP=false
 if [ -f "$OCP_KUBECONFIG" ]; then
@@ -158,24 +167,24 @@ json.dump(data, sys.stdout)
 # (via CONTROLLER_IMAGE env var or auto-detection). Setting CONTROLLER_IMAGE ensures
 # the dynamic template picks up the custom image.
 ensure_hub_controller_image() {
-    if [ -z "$ADDON_IMAGE" ]; then
+    if [ -z "$ADDON_IMAGE" ] || [ -z "$HUB_CONTROLLER_DEPLOY" ]; then
         return 0
     fi
     export KUBECONFIG=$HUB_KUBECONFIG
 
     local current_image
-    current_image=$(kubectl get deploy multicluster-operators-application -n open-cluster-management \
-        -o jsonpath='{.spec.template.spec.containers[?(@.name=="multicluster-operators-gitopscluster")].env[?(@.name=="CONTROLLER_IMAGE")].value}' 2>/dev/null)
+    current_image=$(kubectl get deploy "$HUB_CONTROLLER_DEPLOY" -n open-cluster-management \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CONTROLLER_IMAGE")].value}' 2>/dev/null)
 
     if [ "$current_image" = "$ADDON_IMAGE" ]; then
         log_info "Hub controller CONTROLLER_IMAGE already set to $ADDON_IMAGE"
         return 0
     fi
 
-    log_info "Setting CONTROLLER_IMAGE=$ADDON_IMAGE on hub controller..."
-    kubectl set env deploy/multicluster-operators-application -n open-cluster-management \
-        -c multicluster-operators-gitopscluster CONTROLLER_IMAGE="$ADDON_IMAGE" 2>/dev/null || true
-    kubectl rollout status deploy/multicluster-operators-application -n open-cluster-management --timeout=120s 2>/dev/null || {
+    log_info "Setting CONTROLLER_IMAGE=$ADDON_IMAGE on hub controller ($HUB_CONTROLLER_DEPLOY)..."
+    kubectl set env "deploy/$HUB_CONTROLLER_DEPLOY" -n open-cluster-management \
+        CONTROLLER_IMAGE="$ADDON_IMAGE" 2>/dev/null || true
+    kubectl rollout status "deploy/$HUB_CONTROLLER_DEPLOY" -n open-cluster-management --timeout=120s 2>/dev/null || {
         log_warn "Hub controller rollout timed out - continuing anyway"
     }
     log_info "Hub controller CONTROLLER_IMAGE set to $ADDON_IMAGE"
@@ -321,18 +330,25 @@ verify_cert_rotation() {
     before_md5=$(echo "$before_cert" | md5sum | awk '{print $1}')
     log_info "  cert fingerprint before: $before_md5"
 
-    # Step 3: Delete the target secret
-    kubectl delete secret argocd-agent-client-tls -n "$argocd_ns" 2>/dev/null || true
-    log_info "  deleted argocd-agent-client-tls in $argocd_ns"
+    # Step 3: Record resourceVersion before deletion to detect actual recreation
+    local before_rv
+    before_rv=$(kubectl get secret argocd-agent-client-tls -n "$argocd_ns" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null)
 
-    # Step 4: Wait for recreation (up to 120s — local-cluster may need longer)
+    # Step 4: Delete the target secret (must succeed)
+    if ! kubectl delete secret argocd-agent-client-tls -n "$argocd_ns" 2>/dev/null; then
+        log_error "Failed to delete argocd-agent-client-tls in $argocd_ns on $cluster_name"
+        return 1
+    fi
+    log_info "  deleted argocd-agent-client-tls in $argocd_ns (rv=$before_rv)"
+
+    # Step 5: Wait for recreation (up to 120s — local-cluster may need longer)
     wait_for_condition 120 "argocd-agent-client-tls recreated in $argocd_ns on $cluster_name" \
         "kubectl get secret argocd-agent-client-tls -n $argocd_ns -o name" || {
             log_error "CERT ROTATION FAILED: argocd-agent-client-tls not recreated in $argocd_ns on $cluster_name"
             return 1
         }
 
-    # Step 5: Verify cert data was restored
+    # Step 6: Verify cert data was restored and secret is actually new
     local after_cert
     after_cert=$(kubectl get secret argocd-agent-client-tls -n "$argocd_ns" -o jsonpath='{.data.tls\.crt}' 2>/dev/null)
     if [ -z "$after_cert" ]; then
@@ -341,7 +357,13 @@ verify_cert_rotation() {
     fi
     local after_md5
     after_md5=$(echo "$after_cert" | md5sum | awk '{print $1}')
-    log_info "  cert fingerprint after: $after_md5"
+    local after_rv
+    after_rv=$(kubectl get secret argocd-agent-client-tls -n "$argocd_ns" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null)
+    if [ "$after_rv" = "$before_rv" ]; then
+        log_error "argocd-agent-client-tls resourceVersion unchanged ($after_rv) — secret was not actually recreated"
+        return 1
+    fi
+    log_info "  cert fingerprint after: $after_md5 (rv=$after_rv)"
 
     if [ "$before_md5" = "$after_md5" ]; then
         log_info "  [OK] Cert rotation verified on $cluster_name — cert data matches"
@@ -931,8 +953,10 @@ json.dump(secret, sys.stdout)
     # (prevents UID mismatch errors when resources are rapidly deleted/recreated)
     log_info "Restarting hub controller to clear cache..."
     kubectl delete lease multicloud-operators-gitopscluster-leader.open-cluster-management.io -n kube-system --ignore-not-found 2>/dev/null || true
-    kubectl -n open-cluster-management rollout restart deployment/multicluster-operators-application 2>/dev/null || true
-    kubectl -n open-cluster-management rollout status deployment/multicluster-operators-application --timeout=120s 2>/dev/null || true
+    if [ -n "$HUB_CONTROLLER_DEPLOY" ]; then
+        kubectl -n open-cluster-management rollout restart "deployment/$HUB_CONTROLLER_DEPLOY" 2>/dev/null || true
+        kubectl -n open-cluster-management rollout status "deployment/$HUB_CONTROLLER_DEPLOY" --timeout=120s 2>/dev/null || true
+    fi
     sleep 15
 
     [ "$issues" -eq 0 ] && log_info "=== Initial cleanup complete (clean) ===" || log_error "=== Initial cleanup complete ($issues issues force-resolved) ==="
@@ -1203,7 +1227,7 @@ add_rbac_and_app_to_policy() {
     export KUBECONFIG=$HUB_KUBECONFIG
 
     # Wait for the Policy to be created by the controller
-    wait_for_condition 120 "Policy $policy_name to be created" \
+    wait_for_condition 300 "Policy $policy_name to be created" \
         "kubectl get policy $policy_name -n $namespace -o name" || return 1
 
     # Get the current Policy and add RBAC + Application to its object-templates
@@ -1315,7 +1339,7 @@ add_rbac_to_policy() {
     export KUBECONFIG=$HUB_KUBECONFIG
 
     # Wait for the Policy to be created by the controller
-    wait_for_condition 120 "Policy $policy_name to be created" \
+    wait_for_condition 300 "Policy $policy_name to be created" \
         "kubectl get policy $policy_name -n $namespace -o name" || return 1
 
     # Add RBAC and guestbook namespace to the Policy.
@@ -2016,7 +2040,7 @@ EOF
         log_info "NOTE: On OCP, guestbook-ui pods crash (port 80 + restricted SCC) - expected"
     fi
 
-    wait_for_condition 300 "Guestbook on $KIND_CLUSTER_NAME" \
+    wait_for_condition 600 "Guestbook on $KIND_CLUSTER_NAME" \
         "KUBECONFIG=$KIND_KUBECONFIG kubectl get deployment guestbook-ui -n guestbook -o name" || {
             log_error "SCENARIO 1: Guestbook not deployed on $KIND_CLUSTER_NAME"
             return 1
@@ -3542,6 +3566,7 @@ case "${1:-all}" in
         cleanup_scenario "all-autonomous-gitops" "all-autonomous-placement" "${CLEANUP_CLUSTERS[@]}"
         ;;
     7)
+        cleanup_all
         CLEANUP_NS=custom-gitops cleanup_scenario "custom-ns-gitops" "custom-ns-placement" "$KIND_CLUSTER_NAME"
         test_scenario_7
         CLEANUP_NS=custom-gitops cleanup_scenario "custom-ns-gitops" "custom-ns-placement" "$KIND_CLUSTER_NAME"

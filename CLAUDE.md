@@ -78,13 +78,15 @@ docker push quay.io/stolostron/multicloud-integrations:latest
 If you don't have push access to `quay.io/stolostron`, tag and push to a personal registry, then update the deployment image.
 
 ### 2. Redeploy on Hub
-The hub controller runs as `multicluster-operators-gitopscluster` container inside the `multicluster-operators-application` deployment:
+The hub controller deployment name varies across ACM versions. Find it first, then update the image:
 ```bash
 export KUBECONFIG=~/Desktop/hub
-kubectl -n open-cluster-management set image deployment/multicluster-operators-application \
-  multicluster-operators-gitopscluster=quay.io/stolostron/multicloud-integrations:latest
-kubectl -n open-cluster-management rollout restart deployment multicluster-operators-application
-kubectl -n open-cluster-management rollout status deployment multicluster-operators-application --timeout=120s
+# Find the deployment (name varies: multicluster-operators-application or multicloud-integrations-gitops)
+DEPLOY=$(kubectl get deploy -n open-cluster-management -o name 2>/dev/null | grep -E 'multicluster-operators-application|multicloud-integrations-gitops' | head -1)
+kubectl -n open-cluster-management set image "$DEPLOY" \
+  '*=quay.io/stolostron/multicloud-integrations:latest'
+kubectl -n open-cluster-management rollout restart "$DEPLOY"
+kubectl -n open-cluster-management rollout status "$DEPLOY" --timeout=120s
 ```
 
 ### 3. Prevent MCH Operator Revert
@@ -114,8 +116,8 @@ If agent mode is enabled, a dynamic template `gitops-addon-{ns}-{name}` is also 
 ### 5. Set CONTROLLER_IMAGE
 The hub controller's `getControllerImage()` reads the `CONTROLLER_IMAGE` env var to determine which image to embed in dynamic `AddOnTemplate`s. If this env var still points to the old image, managed cluster addon pods will run the old code. Update it:
 ```bash
-kubectl -n open-cluster-management set env deployment/multicluster-operators-application \
-  -c multicluster-operators-gitopscluster CONTROLLER_IMAGE=quay.io/stolostron/multicloud-integrations:latest
+kubectl -n open-cluster-management set env "$DEPLOY" \
+  CONTROLLER_IMAGE=quay.io/stolostron/multicloud-integrations:latest
 ```
 
 ### 6. Verify
@@ -228,7 +230,7 @@ The **gitopsaddon agent** (managed cluster) receives env vars from `AddOnDeploym
    - Update the ClusterRole in `templates/openshift-gitops-operator-manager-role.clusterrole.yaml` if RBAC rules changed (e.g., `argocdexports` was removed in v1.20.3).
 6. **Integration Testing**: Use `gitopsaddon/test-scenarios.sh` against real ACM clusters. **WARNING: Scenarios must run sequentially, never in parallel** — they modify shared hub state (GitOpsCluster, Policy, MCA, ArgoCD CRs). Run `bash test-scenarios.sh all` or individual scenarios one at a time.
 7. **E2E Tests**: Run `make test-local-e2e-gitopsaddon-embedded-agent` for local e2e (creates Kind clusters automatically). Use `make test-local-e2e-*` targets (not `make test-e2e-*`) to mirror CI behavior — they create fresh Kind clusters, build the image, and run setup from scratch.
-8. **Documentation**: After any code change or when learning new context about the codebase (architecture, behaviors, gotchas, testing patterns, environment setup), always update both `CLAUDE.md` and `gitopsaddon/README.md` to reflect the new knowledge. Future chat sessions start fresh and rely on these files for context.
+8. **Documentation (MANDATORY)**: After ANY code change, bug fix, test fix, or when learning ANY new context about the codebase (architecture, behaviors, gotchas, testing patterns, environment setup), **ALWAYS** update both `CLAUDE.md` and `gitopsaddon/README.md` to reflect the new knowledge. This is not optional — future chat sessions start completely fresh and rely on these files for context. If you fix a bug, document the root cause. If you learn why something works a certain way, document it. If you change a timeout, document why.
 9. **Ask before acting**: If confused about requirements, scope, or trade-offs, always ask clarifying questions before proceeding. Prefer switching to plan mode for large or ambiguous tasks.
 
 ## Test Environments
@@ -353,6 +355,7 @@ Uses Ginkgo/Gomega for e2e testing with kubebuilder tools for unit tests. Unit t
 - **Pre-delete ManifestWork race**: When a MCA is deleted, OCM creates a pre-delete ManifestWork that runs a cleanup Job on the managed cluster. If the cleanup Job is slow and a new MCA is created, the old pre-delete MW can interfere (e.g., deleting resources the new MW just applied). `cleanup_all` now deletes stale `addon-gitops-addon-pre-delete` ManifestWorks and kills stale cleanup Jobs on managed clusters.
 - **OCP OLM timing**: On real OCP clusters, OLM catalog resolution + InstallPlan + CSV installation can take 30-120 seconds even when healthy. After a full cleanup that removes the CSV and operator, OLM must re-resolve the package from the catalog, which involves gRPC calls to the catalog pod. If the catalog pod was recently restarted, this can take even longer. The test script uses 600s timeouts for OLM operations.
 - **MCA cleanup finalizer timeout**: The OCM addon framework removes MCA finalizers only after the pre-delete Job completes (which runs `gitopsaddon -cleanup`). On OCP this can take 2-3 minutes as OLM uninstalls. `cleanup_scenario` waits 180s then falls back to stripping finalizers and force-deleting. `cleanup_all` strips finalizers immediately (no waiting).
+- **Hub controller deployment name**: The deployment name varies across ACM versions (`multicluster-operators-application` in older, `multicloud-integrations-gitops` in newer). `test-scenarios.sh` auto-detects via `HUB_CONTROLLER_DEPLOY` variable. If neither name is found, controller restart in `cleanup_all` is silently skipped.
 
 ## Container Registry
 
