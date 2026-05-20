@@ -198,20 +198,18 @@ func TestBuildAddonManifests(t *testing.T) {
 		t.Error("buildAddonManifests() returned empty manifests")
 	}
 
-	// Verify the number of manifests (should include Job, ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment)
-	expectedCount := 5
+	// 7 manifests: pre-delete ClusterRole, pre-delete ClusterRoleBinding, Job,
+	// ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
+	expectedCount := 7
 	if len(manifests) != expectedCount {
 		t.Errorf("buildAddonManifests() manifest count = %v, want %v", len(manifests), expectedCount)
 	}
 
-	// Verify that all manifests use Raw bytes, have correct kinds, and no status fields
-	expectedKinds := map[string]bool{
-		"Job":                false,
-		"ServiceAccount":     false,
-		"ClusterRole":        false,
-		"ClusterRoleBinding": false,
-		"Deployment":         false,
+	allowedKinds := map[string]bool{
+		"Job": true, "ServiceAccount": true, "ClusterRole": true,
+		"ClusterRoleBinding": true, "Deployment": true,
 	}
+	kindCounts := map[string]int{}
 
 	for i, manifest := range manifests {
 		if len(manifest.Raw) == 0 {
@@ -237,31 +235,180 @@ func TestBuildAddonManifests(t *testing.T) {
 			t.Errorf("Manifest %d missing 'apiVersion' field", i)
 		}
 
-		if _, expected := expectedKinds[kind]; expected {
-			expectedKinds[kind] = true
-		} else {
+		if !allowedKinds[kind] {
 			t.Errorf("Manifest %d has unexpected kind %q", i, kind)
 		}
+		kindCounts[kind]++
+	}
 
-		if kind == "ClusterRoleBinding" {
-			roleRef, ok := objMap["roleRef"].(map[string]interface{})
-			if !ok {
-				t.Error("ClusterRoleBinding manifest missing roleRef")
-				continue
-			}
-			if roleRef["name"] != "gitops-addon" {
-				t.Errorf("ClusterRoleBinding roleRef.name = %q, want %q", roleRef["name"], "gitops-addon")
-			}
-			if roleRef["kind"] != "ClusterRole" {
-				t.Errorf("ClusterRoleBinding roleRef.kind = %q, want %q", roleRef["kind"], "ClusterRole")
+	// 2 ClusterRoles (main + cleanup), 2 ClusterRoleBindings (main + cleanup)
+	if kindCounts["ClusterRole"] != 2 {
+		t.Errorf("expected 2 ClusterRole manifests, got %d", kindCounts["ClusterRole"])
+	}
+	if kindCounts["ClusterRoleBinding"] != 2 {
+		t.Errorf("expected 2 ClusterRoleBinding manifests, got %d", kindCounts["ClusterRoleBinding"])
+	}
+	for _, required := range []string{"Job", "ServiceAccount", "Deployment"} {
+		if kindCounts[required] != 1 {
+			t.Errorf("expected 1 %s manifest, got %d", required, kindCounts[required])
+		}
+	}
+}
+
+func TestBuildCleanupJobManifestHasManualSelector(t *testing.T) {
+	manifest := buildCleanupJobManifest("addon:v1", "test-ns")
+
+	var objMap map[string]interface{}
+	if err := json.Unmarshal(manifest.Raw, &objMap); err != nil {
+		t.Fatalf("Failed to unmarshal Job manifest: %v", err)
+	}
+
+	spec, ok := objMap["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec")
+	}
+
+	if ms, ok := spec["manualSelector"].(bool); !ok || !ms {
+		t.Errorf("Job spec.manualSelector = %v, want true", spec["manualSelector"])
+	}
+
+	selector, ok := spec["selector"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec.selector")
+	}
+	matchLabels, ok := selector["matchLabels"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec.selector.matchLabels")
+	}
+	if matchLabels["job-name"] != "gitops-addon-cleanup" {
+		t.Errorf("selector.matchLabels[job-name] = %q, want %q", matchLabels["job-name"], "gitops-addon-cleanup")
+	}
+
+	template, ok := spec["template"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec.template")
+	}
+	tmplMeta, ok := template["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec.template.metadata")
+	}
+	tmplLabels, ok := tmplMeta["labels"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Job manifest missing spec.template.metadata.labels")
+	}
+	if tmplLabels["job-name"] != "gitops-addon-cleanup" {
+		t.Errorf("template.metadata.labels[job-name] = %q, want %q", tmplLabels["job-name"], "gitops-addon-cleanup")
+	}
+}
+
+func TestBuildCleanupClusterRoleManifest(t *testing.T) {
+	manifest := buildCleanupClusterRoleManifest()
+
+	var objMap map[string]interface{}
+	if err := json.Unmarshal(manifest.Raw, &objMap); err != nil {
+		t.Fatalf("Failed to unmarshal ClusterRole manifest: %v", err)
+	}
+
+	if objMap["kind"] != "ClusterRole" {
+		t.Errorf("kind = %q, want ClusterRole", objMap["kind"])
+	}
+
+	metadata := objMap["metadata"].(map[string]interface{})
+	if metadata["name"] != "gitops-addon-cleanup" {
+		t.Errorf("name = %q, want gitops-addon-cleanup", metadata["name"])
+	}
+
+	annotations := metadata["annotations"].(map[string]interface{})
+	if _, ok := annotations["addon.open-cluster-management.io/addon-pre-delete"]; !ok {
+		t.Error("ClusterRole missing addon-pre-delete annotation")
+	}
+
+	rules, ok := objMap["rules"].([]interface{})
+	if !ok || len(rules) == 0 {
+		t.Fatal("ClusterRole has no rules")
+	}
+
+	// Verify argocds has delete+patch (needed for finalizer stripping)
+	foundArgoCDDelete := false
+	for _, r := range rules {
+		rule := r.(map[string]interface{})
+		resources, _ := rule["resources"].([]interface{})
+		verbs, _ := rule["verbs"].([]interface{})
+		for _, res := range resources {
+			if res == "argocds" {
+				for _, v := range verbs {
+					if v == "delete" {
+						foundArgoCDDelete = true
+					}
+				}
 			}
 		}
 	}
+	if !foundArgoCDDelete {
+		t.Error("ClusterRole rules missing 'delete' for 'argocds'")
+	}
+}
 
-	for kind, found := range expectedKinds {
-		if !found {
-			t.Errorf("Expected manifest kind %q not found in buildAddonManifests output", kind)
+func TestBuildCleanupClusterRoleBindingManifest(t *testing.T) {
+	manifest := buildCleanupClusterRoleBindingManifest("test-addon-ns")
+
+	var objMap map[string]interface{}
+	if err := json.Unmarshal(manifest.Raw, &objMap); err != nil {
+		t.Fatalf("Failed to unmarshal ClusterRoleBinding manifest: %v", err)
+	}
+
+	if objMap["kind"] != "ClusterRoleBinding" {
+		t.Errorf("kind = %q, want ClusterRoleBinding", objMap["kind"])
+	}
+
+	metadata := objMap["metadata"].(map[string]interface{})
+	if metadata["name"] != "gitops-addon-cleanup" {
+		t.Errorf("name = %q, want gitops-addon-cleanup", metadata["name"])
+	}
+
+	annotations := metadata["annotations"].(map[string]interface{})
+	if _, ok := annotations["addon.open-cluster-management.io/addon-pre-delete"]; !ok {
+		t.Error("ClusterRoleBinding missing addon-pre-delete annotation")
+	}
+
+	roleRef := objMap["roleRef"].(map[string]interface{})
+	if roleRef["name"] != "gitops-addon-cleanup" {
+		t.Errorf("roleRef.name = %q, want gitops-addon-cleanup", roleRef["name"])
+	}
+
+	subjects := objMap["subjects"].([]interface{})
+	if len(subjects) != 1 {
+		t.Fatalf("expected 1 subject, got %d", len(subjects))
+	}
+	subject := subjects[0].(map[string]interface{})
+	if subject["name"] != "gitops-addon" {
+		t.Errorf("subject.name = %q, want gitops-addon", subject["name"])
+	}
+	if subject["namespace"] != "test-addon-ns" {
+		t.Errorf("subject.namespace = %q, want test-addon-ns", subject["namespace"])
+	}
+}
+
+func TestBuildAddonManifestsIncludesPreDeleteRBAC(t *testing.T) {
+	manifests := buildAddonManifests("openshift-gitops", "addon:v1")
+
+	preDeleteCount := 0
+	var preDeleteKinds []string
+	for _, m := range manifests {
+		var objMap map[string]interface{}
+		if err := json.Unmarshal(m.Raw, &objMap); err != nil {
+			continue
 		}
+		metadata, _ := objMap["metadata"].(map[string]interface{})
+		annotations, _ := metadata["annotations"].(map[string]interface{})
+		if _, ok := annotations["addon.open-cluster-management.io/addon-pre-delete"]; ok {
+			preDeleteCount++
+			preDeleteKinds = append(preDeleteKinds, objMap["kind"].(string))
+		}
+	}
+
+	if preDeleteCount != 3 {
+		t.Errorf("expected 3 pre-delete manifests (ClusterRole, ClusterRoleBinding, Job), got %d: %v", preDeleteCount, preDeleteKinds)
 	}
 }
 

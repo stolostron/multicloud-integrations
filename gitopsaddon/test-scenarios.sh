@@ -467,6 +467,125 @@ verify_environment_health() {
     return 0
 }
 
+# Verify the gitops-addon ClusterRole has delete permissions for all resource types
+# that deleteOperatorResources() in gitopsaddon_cleanup.go attempts to clean up.
+# Without delete permission on any of these, the label-based cleanup pass times out
+# and the fallback runs — which previously destroyed all cluster RBAC.
+# Must be called AFTER the addon is deployed on the managed cluster.
+verify_cleanup_rbac_safety() {
+    local cluster_kubeconfig=$1
+    local cluster_name=$2
+    local issues=0
+
+    log_info "--- Cleanup RBAC safety check: $cluster_name ---"
+
+    export KUBECONFIG=$cluster_kubeconfig
+
+    # Resource types from deleteOperatorResources() that need "delete" verb
+    local required_delete_resources=("services" "serviceaccounts" "deployments" "configmaps" "roles" "rolebindings" "clusterroles" "clusterrolebindings")
+
+    local cr_json
+    cr_json=$(kubectl get clusterrole gitops-addon -o json 2>/dev/null || true)
+    if [ -z "$cr_json" ]; then
+        log_error "  gitops-addon ClusterRole not found on $cluster_name — cleanup RBAC safety check cannot proceed"
+        return 1
+    fi
+
+    for resource in "${required_delete_resources[@]}"; do
+        local has_delete
+        has_delete=$(echo "$cr_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for rule in data.get('rules', []):
+    resources = rule.get('resources', [])
+    if '$resource' in resources or '*' in resources:
+        verbs = rule.get('verbs', [])
+        if 'delete' in verbs or '*' in verbs:
+            print('yes')
+            sys.exit(0)
+print('no')
+" 2>/dev/null || echo "no")
+        if [ "$has_delete" != "yes" ]; then
+            log_error "RBAC SAFETY FAIL: gitops-addon ClusterRole missing 'delete' for '$resource' on $cluster_name"
+            log_error "  This will cause cleanup fallback to run, potentially destroying all cluster RBAC!"
+            issues=$((issues + 1))
+        fi
+    done
+
+    if [ "$issues" -gt 0 ]; then
+        log_error "Cleanup RBAC safety check FAILED with $issues issue(s) on $cluster_name"
+        return 1
+    fi
+
+    log_info "  [OK] gitops-addon ClusterRole has 'delete' for all cleanup resource types"
+    log_info "  Cleanup RBAC safety check PASSED for $cluster_name"
+    return 0
+}
+
+# Verify a managed cluster is still accessible after cleanup.
+# Checks that core RBAC (cluster-admin) and API server access are intact.
+# This catches the catastrophic bug where cleanup deletes all ClusterRoles/ClusterRoleBindings.
+verify_cluster_accessible_after_cleanup() {
+    local cluster_kubeconfig=$1
+    local cluster_name=$2
+    local issues=0
+
+    log_info "--- Post-cleanup accessibility check: $cluster_name ---"
+
+    export KUBECONFIG=$cluster_kubeconfig
+
+    # CHECK 1: Can we reach the API server?
+    if ! kubectl cluster-info &>/dev/null; then
+        log_error "POST-CLEANUP FAIL: Cannot reach API server on $cluster_name"
+        return 1
+    fi
+    log_info "  [OK] API server reachable"
+
+    # CHECK 2: Can we list nodes? (requires core RBAC)
+    if ! kubectl get nodes --no-headers &>/dev/null; then
+        log_error "POST-CLEANUP FAIL: Cannot list nodes on $cluster_name — RBAC may be destroyed"
+        issues=$((issues + 1))
+    else
+        log_info "  [OK] Can list nodes"
+    fi
+
+    # CHECK 3: Does cluster-admin ClusterRoleBinding still exist?
+    local admin_crb
+    admin_crb=$(kubectl get clusterrolebinding cluster-admin --no-headers 2>/dev/null || true)
+    if [ -z "$admin_crb" ]; then
+        log_error "POST-CLEANUP FAIL: cluster-admin ClusterRoleBinding missing on $cluster_name — RBAC destroyed!"
+        issues=$((issues + 1))
+    else
+        log_info "  [OK] cluster-admin ClusterRoleBinding exists"
+    fi
+
+    # CHECK 4: Can we list services in kube-system? (the exact operation that fails when RBAC is destroyed)
+    if ! kubectl get services -n kube-system --no-headers &>/dev/null; then
+        log_error "POST-CLEANUP FAIL: Cannot list services in kube-system on $cluster_name — RBAC may be destroyed"
+        issues=$((issues + 1))
+    else
+        log_info "  [OK] Can list services in kube-system"
+    fi
+
+    # CHECK 5: Sanity count of ClusterRoleBindings (healthy cluster has 40+, destroyed has <10)
+    local crb_count
+    crb_count=$(kubectl get clusterrolebindings --no-headers 2>/dev/null | wc -l)
+    if [ "$crb_count" -lt 20 ]; then
+        log_error "POST-CLEANUP FAIL: Only $crb_count ClusterRoleBindings on $cluster_name (expected 40+) — RBAC likely destroyed!"
+        issues=$((issues + 1))
+    else
+        log_info "  [OK] ClusterRoleBindings count: $crb_count (healthy)"
+    fi
+
+    if [ "$issues" -gt 0 ]; then
+        log_error "Post-cleanup accessibility check FAILED with $issues issue(s) on $cluster_name"
+        return 1
+    fi
+
+    log_info "  Post-cleanup accessibility check PASSED for $cluster_name"
+    return 0
+}
+
 wait_for_condition() {
     local timeout=$1
     local message=$2
@@ -733,6 +852,27 @@ cleanup_scenario() {
             kubectl delete secret "${cluster}-application-manager-cluster-secret" -n openshift-gitops --ignore-not-found 2>/dev/null || true
         done
     fi
+
+    export KUBECONFIG=$HUB_KUBECONFIG
+
+    # --- STEP 4: Post-cleanup cluster accessibility check ---
+    # Verifies the cleanup did not destroy cluster RBAC (the critical bug where
+    # deleteOperatorResources fallback deleted all ClusterRoles/ClusterRoleBindings).
+    log_info "--- Post-cleanup cluster accessibility check ---"
+    for cluster in "${clusters[@]}"; do
+        local kubeconfig
+        if [ "$cluster" = "$LOCAL_CLUSTER_NAME" ]; then
+            kubeconfig=$HUB_KUBECONFIG
+        elif [ "$cluster" = "$KIND_CLUSTER_NAME" ]; then
+            kubeconfig=$KIND_KUBECONFIG
+        else
+            kubeconfig=$OCP_KUBECONFIG
+        fi
+        if ! verify_cluster_accessible_after_cleanup "$kubeconfig" "$cluster"; then
+            log_error "CRITICAL: Cluster $cluster became inaccessible after cleanup!"
+            verification_failed=true
+        fi
+    done
 
     export KUBECONFIG=$HUB_KUBECONFIG
 
@@ -2050,6 +2190,12 @@ EOF
     fi
     verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "1" "false" || return 1
 
+    # Cleanup RBAC safety checks (verify addon ClusterRole has delete for all cleanup resource types)
+    if [ "$HAS_OCP" = true ]; then
+        verify_cleanup_rbac_safety "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+    fi
+    verify_cleanup_rbac_safety "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 1: PASSED"
     if [ "$HAS_OCP" = true ]; then
@@ -2063,6 +2209,7 @@ EOF
     log_info "  - Red Hat images: OK"
     log_info "  - Guestbook on $KIND_CLUSTER_NAME: OK"
     log_info "  - Guestbook on $LOCAL_CLUSTER_NAME: OK"
+    log_info "  - Cleanup RBAC safety: OK"
     log_info "=============================================="
     return 0
 }
@@ -2370,6 +2517,12 @@ EOF
     verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "2" "false" || return 1
     verify_environment_health "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" "2" "true" || return 1
 
+    # Cleanup RBAC safety checks
+    if [ "$HAS_OCP" = true ]; then
+        verify_cleanup_rbac_safety "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+    fi
+    verify_cleanup_rbac_safety "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" || return 1
+
     # Cert rotation verification: delete target secret and verify re-copy
     local cert_ocp_result="SKIPPED"
     local cert_kind_result="SKIPPED"
@@ -2426,6 +2579,7 @@ EOF
     log_info "  - Cert rotation OCP: $cert_ocp_result"
     log_info "  - Cert rotation Kind: $cert_kind_result"
     log_info "  - Cert rotation local-cluster: $cert_local_result"
+    log_info "  - Cleanup RBAC safety: OK"
     log_info "=============================================="
     return 0
 }
@@ -3254,6 +3408,12 @@ EOF
     verify_environment_health "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" "6" "false" || return 1
     verify_environment_health "$HUB_KUBECONFIG" "$LOCAL_CLUSTER_NAME" "6" "true" || return 1
 
+    # Cleanup RBAC safety checks
+    if [ "$HAS_OCP" = true ]; then
+        verify_cleanup_rbac_safety "$OCP_KUBECONFIG" "$OCP_CLUSTER_NAME" || return 1
+    fi
+    verify_cleanup_rbac_safety "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 6: PASSED"
     log_info "  - Autonomous agent mode with Policy-based app delivery: OK"
@@ -3270,6 +3430,7 @@ EOF
     log_info "  - Red Hat images: OK"
     log_info "  - Guestbook on $KIND_CLUSTER_NAME (Sync=$kind_sync): OK"
     log_info "  - local-cluster: infrastructure verified (app sync skipped — autonomous on hub limitation)"
+    log_info "  - Cleanup RBAC safety: OK"
     log_info "=============================================="
     return 0
 }
@@ -3475,12 +3636,16 @@ EOF
         return 1
     fi
 
+    # Cleanup RBAC safety check
+    verify_cleanup_rbac_safety "$KIND_KUBECONFIG" "$KIND_CLUSTER_NAME" || return 1
+
     log_info "=============================================="
     log_info "SCENARIO 7: PASSED"
     log_info "  - Custom hub ArgoCD namespace ($custom_ns): OK"
     log_info "  - CA cert in custom namespace: OK"
     log_info "  - GitOpsCluster Ready: OK"
     log_info "  - ManagedClusterAddOn created: OK"
+    log_info "  - Cleanup RBAC safety: OK"
     log_info "=============================================="
     return 0
 }
