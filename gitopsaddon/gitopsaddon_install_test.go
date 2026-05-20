@@ -1591,3 +1591,254 @@ func TestInstallOrUpdateOpenshiftGitopsOLMOverride(t *testing.T) {
 		g.Expect(err.Error()).ToNot(gomega.ContainSubstring("OLM subscription"))
 	})
 }
+
+func TestMigrateSubscriptionFromNamespace(t *testing.T) {
+	t.Run("deletes subscription and its installed CSV", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			Config: getTestEnv().Config,
+		}
+
+		unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+
+		// Ensure the source namespace exists.
+		oldNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators-migrate-test"}}
+		_ = reconciler.Create(ctx, oldNs)
+
+		csvName := "openshift-gitops-operator.v1.20.1"
+
+		// Create the old subscription with gitopsaddon label and status.installedCSV.
+		sub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": "openshift-operators-migrate-test",
+					"labels": map[string]interface{}{
+						"apps.open-cluster-management.io/gitopsaddon": "true",
+					},
+				},
+				"spec": map[string]interface{}{
+					"name":                "openshift-gitops-operator",
+					"channel":             "latest",
+					"source":              "redhat-operators",
+					"sourceNamespace":     "openshift-marketplace",
+					"installPlanApproval": "Automatic",
+				},
+				"status": map[string]interface{}{
+					"installedCSV": csvName,
+				},
+			},
+		}
+		err := reconciler.Create(ctx, sub)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+		t.Cleanup(func() { _ = reconciler.Delete(ctx, sub) })
+
+		// Create the corresponding CSV (no special label needed — ownership is
+		// established via the subscription chain, not a label on the CSV itself).
+		csv := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "ClusterServiceVersion",
+				"metadata": map[string]interface{}{
+					"name":      csvName,
+					"namespace": "openshift-operators-migrate-test",
+				},
+			},
+		}
+		err = reconciler.Create(ctx, csv)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+
+		t.Setenv("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+		err = reconciler.migrateSubscriptionFromNamespace(ctx, "openshift-operators-migrate-test")
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// Subscription must be gone.
+		checkSub := &unstructured.Unstructured{}
+		checkSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkSub.SetKind("Subscription")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      "openshift-gitops-operator",
+			Namespace: "openshift-operators-migrate-test",
+		}, checkSub)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "old subscription should be deleted")
+
+		// CSV must be gone.
+		checkCSV := &unstructured.Unstructured{}
+		checkCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkCSV.SetKind("ClusterServiceVersion")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      csvName,
+			Namespace: "openshift-operators-migrate-test",
+		}, checkCSV)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "CSV installed by old subscription should be deleted")
+	})
+
+	t.Run("skips unlabeled pre-existing subscription", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			Config: getTestEnv().Config,
+		}
+
+		unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+
+		preExistingNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators-preexisting-test"}}
+		_ = reconciler.Create(ctx, preExistingNs)
+
+		// Subscription without our label — simulates a pre-existing user subscription.
+		sub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": "openshift-operators-preexisting-test",
+				},
+				"spec": map[string]interface{}{
+					"name":    "openshift-gitops-operator",
+					"channel": "latest",
+				},
+			},
+		}
+		err := reconciler.Create(ctx, sub)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+		t.Cleanup(func() { _ = reconciler.Delete(ctx, sub) })
+
+		t.Setenv("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+		err = reconciler.migrateSubscriptionFromNamespace(ctx, "openshift-operators-preexisting-test")
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// Unlabeled subscription must still exist.
+		checkSub := &unstructured.Unstructured{}
+		checkSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkSub.SetKind("Subscription")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      "openshift-gitops-operator",
+			Namespace: "openshift-operators-preexisting-test",
+		}, checkSub)
+		g.Expect(err).ToNot(gomega.HaveOccurred(), "pre-existing subscription should not be deleted")
+	})
+
+	t.Run("sweep skips CSV still referenced by another subscription", func(t *testing.T) {
+		// Verifies deleteRemainingGitOpsCSVs (the sweep for "Replacing" CSVs) does not
+		// delete a CSV that another subscription still references, even if the CSV name
+		// matches our package prefix.
+		//
+		// OLM invariant: a subscription's status.installedCSV always points to a CSV in
+		// the SAME namespace as the subscription. The check is scoped to csvNamespace for
+		// performance, which is correct by this invariant.
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			Config: getTestEnv().Config,
+		}
+
+		unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+
+		fromNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-operators-sweep-ref-test"}}
+		_ = reconciler.Create(ctx, fromNs)
+
+		// Use a name that starts with the default subName prefix so the sweep picks it up.
+		csvName := "openshift-gitops-operator.v1.20.1-sweepref"
+
+		// Our labeled subscription — no installedCSV so the primary deletion path is skipped;
+		// this exercises only the sweep path.
+		sub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": "openshift-operators-sweep-ref-test",
+					"labels":    map[string]interface{}{"apps.open-cluster-management.io/gitopsaddon": "true"},
+				},
+				"spec": map[string]interface{}{"name": "openshift-gitops-operator"},
+				// no status.installedCSV
+			},
+		}
+		err := reconciler.Create(ctx, sub)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+
+		// A second subscription in the SAME namespace that still references the CSV.
+		// Per OLM invariant, status.installedCSV always points to a CSV in the subscription's
+		// own namespace — never across namespaces. So we test the same-namespace scenario.
+		otherSub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "other-gitops-subscription",
+					"namespace": "openshift-operators-sweep-ref-test",
+				},
+				"spec":   map[string]interface{}{"name": "openshift-gitops-operator"},
+				"status": map[string]interface{}{"installedCSV": csvName},
+			},
+		}
+		err = reconciler.Create(ctx, otherSub)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+		t.Cleanup(func() { _ = reconciler.Delete(ctx, otherSub) })
+
+		// The CSV lives in the old namespace (sweep target).
+		csv := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "ClusterServiceVersion",
+				"metadata": map[string]interface{}{
+					"name":      csvName,
+					"namespace": "openshift-operators-sweep-ref-test",
+				},
+			},
+		}
+		err = reconciler.Create(ctx, csv)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+		t.Cleanup(func() { _ = reconciler.Delete(ctx, csv) })
+
+		t.Setenv("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+		err = reconciler.migrateSubscriptionFromNamespace(ctx, "openshift-operators-sweep-ref-test")
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// CSV must be preserved — the other subscription still references it.
+		checkCSV := &unstructured.Unstructured{}
+		checkCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkCSV.SetKind("ClusterServiceVersion")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      csvName,
+			Namespace: "openshift-operators-sweep-ref-test",
+		}, checkCSV)
+		g.Expect(err).ToNot(gomega.HaveOccurred(), "CSV referenced by another subscription must not be deleted by sweep")
+	})
+
+	t.Run("no-op when subscription does not exist", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			Config: getTestEnv().Config,
+		}
+
+		unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+		err := reconciler.migrateSubscriptionFromNamespace(context.Background(), "openshift-operators-nonexistent-ns")
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
+}

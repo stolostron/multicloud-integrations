@@ -39,6 +39,7 @@ import (
 	"k8s.io/klog"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -75,6 +76,55 @@ type Cluster struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// deleteBlankClusterSecretsForCluster deletes blank pull-model ACM cluster secrets for the given
+// cluster after the agent cluster secret has been successfully created. Blank secrets
+// (label apps.open-cluster-management.io/data-source=blank) are dummy entries with no real
+// credentials that are created for the basic GitOps pull model. When a GitOpsCluster transitions
+// from non-agent mode to agent mode, both the old blank secret (e.g.
+// "<cluster>-application-manager-cluster-secret") and the new agent secret ("cluster-<cluster>")
+// carry data["name"] = <cluster>. ArgoCD rejects this with:
+//
+//	"there are 2 clusters with the same name: [<agent-url> <traditional-url>]"
+//
+// The orphan cleanup in cleanupOrphanSecrets will NOT remove the old secret while the ManagedCluster
+// still exists. This function is called only after the agent secret is confirmed created/updated, so
+// deleting the blank secret is safe — the agent secret is now the authoritative entry for the cluster.
+// Non-blank traditional secrets (e.g. MSA-backed secrets with real credentials) are intentionally
+// left untouched.
+func (r *ReconcileGitOpsCluster) deleteBlankClusterSecretsForCluster(
+	ctx context.Context,
+	clusterName string,
+	argoNamespace string,
+) error {
+	secretList := &v1.SecretList{}
+
+	err := r.List(ctx, secretList,
+		client.InNamespace(argoNamespace),
+		client.MatchingLabels{
+			"argocd.argoproj.io/secret-type":               "cluster",
+			"apps.open-cluster-management.io/acm-cluster":  "true",
+			"apps.open-cluster-management.io/cluster-name": clusterName,
+			"apps.open-cluster-management.io/data-source":  "blank",
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to list blank cluster secrets for cluster %s: %w", clusterName, err)
+	}
+
+	for i := range secretList.Items {
+		secret := &secretList.Items[i]
+
+		klog.Infof("Deleting blank cluster secret %s/%s for cluster %s: agent secret created, pull-model placeholder no longer needed",
+			secret.Namespace, secret.Name, clusterName)
+
+		if delErr := r.Delete(ctx, secret); delErr != nil && !k8errors.IsNotFound(delErr) {
+			return fmt.Errorf("failed to delete blank cluster secret %s: %w", secret.Name, delErr)
+		}
+	}
+
+	return nil
+}
+
 // CreateArgoCDAgentClusters creates ArgoCD cluster secrets for each managed cluster using ArgoCD agent configuration
 func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster,
@@ -85,10 +135,22 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 
 	argoNamespace := gitOpsCluster.Spec.ArgoServer.ArgoNamespace
 
-	// Get server address and port
-	serverAddress, serverPort, err := r.getArgoCDAgentServerConfig(gitOpsCluster)
-	if err != nil {
-		return fmt.Errorf("failed to get ArgoCD agent server configuration: %w", err)
+	if argoNamespace == "" {
+		return fmt.Errorf("ArgoCDnamespace must not be empty")
+	}
+
+	// Discover the resource proxy service so the cluster secret server URL points to it.
+	// The hub ArgoCD UI (live manifest, resource tree) routes requests through the proxy:
+	//   https://<resource-proxy-svc>.<ns>.svc:<port>?agentName=<cluster>
+	// The service name and port are read from the live service object rather than hardcoded.
+	resourceProxySvcName := defaultResourceProxyServiceName // well-known fallback
+	var resourceProxyPort int32 = 9090                      // standard fallback port
+	if svc, port, svcErr := r.FindArgoCDAgentResourceProxyService(context.TODO(), argoNamespace); svcErr == nil {
+		resourceProxySvcName = svc.Name
+		resourceProxyPort = port
+	} else {
+		klog.Infof("Resource proxy service not found in namespace %s, falling back to defaults (%s:%d): %v",
+			argoNamespace, resourceProxySvcName, resourceProxyPort, svcErr)
 	}
 
 	// Load the principal CA certificate for signing client certificates
@@ -164,10 +226,10 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			continue
 		}
 
-		// Construct server URL
-		serverURL, err := constructServerURL(serverAddress, serverPort, clusterName)
+		// Construct resource proxy URL for this cluster
+		serverURL, err := constructResourceProxyURL(resourceProxySvcName, argoNamespace, resourceProxyPort, clusterName)
 		if err != nil {
-			klog.Errorf("Failed to construct server URL for cluster %s: %v", clusterName, err)
+			klog.Errorf("Failed to construct resource proxy URL for cluster %s: %v", clusterName, err)
 			continue
 		}
 
@@ -222,6 +284,16 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 				continue
 			}
 			klog.Infof("Updated ArgoCD agent cluster secret %s for cluster %s", secretName, clusterName)
+		}
+
+		// Delete blank pull-model cluster secrets for this cluster now that the agent secret exists.
+		// Blank secrets (data-source=blank) are pull-model placeholders that share the same
+		// data["name"] value as the new agent secret. ArgoCD raises an ApplicationSet error when
+		// two cluster secrets have the same name. The orphan cleanup will not remove blank secrets
+		// while the ManagedCluster still exists, so we delete them proactively here.
+		// Non-blank traditional secrets (e.g. MSA-backed) are left untouched.
+		if cleanErr := r.deleteBlankClusterSecretsForCluster(context.TODO(), clusterName, argoNamespace); cleanErr != nil {
+			klog.Warningf("Failed to delete blank cluster secrets for cluster %s (agent secret was created successfully): %v", clusterName, cleanErr)
 		}
 	}
 
@@ -397,6 +469,17 @@ func constructServerURL(serverAddress, serverPort, agentName string) (string, er
 	}
 
 	return fmt.Sprintf("https://%s?agentName=%s", address, agentName), nil
+}
+
+// constructResourceProxyURL constructs the in-cluster resource proxy URL for an ArgoCD agent cluster secret.
+// The hub ArgoCD UI uses this URL to serve live manifest and resource tree requests by routing them
+// through the resource proxy sidecar in the principal pod to the appropriate managed cluster agent.
+// Format: https://<resource-proxy-svc>.<namespace>.svc:<port>?agentName=<cluster>
+func constructResourceProxyURL(resourceProxySvcName, namespace string, port int32, agentName string) (string, error) {
+	if !isValidAgentName(agentName) {
+		return "", fmt.Errorf("invalid agent name: %s", agentName)
+	}
+	return fmt.Sprintf("https://%s.%s.svc:%d?agentName=%s", resourceProxySvcName, namespace, port, agentName), nil
 }
 
 // isValidAgentName checks if the agent name is valid (DNS subdomain)

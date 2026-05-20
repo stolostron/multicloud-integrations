@@ -602,9 +602,11 @@ func (r *GitopsAddonReconciler) createOrUpdateOperatorGroup(ctx context.Context,
 }
 
 // migrateSubscriptionFromNamespace deletes any gitopsaddon-labeled OLM Subscription
-// found in fromNamespace. This handles the transition from the old default
-// (openshift-operators) to the new default (openshift-gitops-operator) so that OLM
-// does not run two competing operator instances.
+// found in fromNamespace, then immediately deletes its installed CSV so OLM tears down
+// the operator Deployment without waiting for garbage-collection (which can take minutes).
+// This handles the transition from the old default (openshift-operators) to the new default
+// (openshift-gitops-operator) so that OLM does not run two competing AllNamespaces
+// operator instances during the migration window.
 func (r *GitopsAddonReconciler) migrateSubscriptionFromNamespace(ctx context.Context, fromNamespace string) error {
 	subName := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
 
@@ -626,10 +628,45 @@ func (r *GitopsAddonReconciler) migrateSubscriptionFromNamespace(ctx context.Con
 		return nil
 	}
 
+	// Read status.installedCSV BEFORE deleting the subscription. Once the
+	// subscription is gone OLM clears the status field and we can't recover it.
+	csvName, _, _ := unstructured.NestedString(existing.Object, "status", "installedCSV")
+
 	klog.Infof("Migrating: deleting old gitopsaddon subscription %s from %s", subName, fromNamespace)
 	if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete old subscription %s/%s: %w", fromNamespace, subName, err)
 	}
+
+	// Delete the CSV that was installed by the old subscription so OLM removes
+	// the operator Deployment immediately instead of waiting for async GC.
+	// Without this, two AllNamespaces operator instances can compete over the
+	// same ArgoCD CRDs for several minutes while OLM slowly GCs the old CSV.
+	//
+	// Ownership is already established by the subscription chain above: we confirmed
+	// the subscription carries our gitopsaddon label, and csvName came directly from
+	// that subscription's status.installedCSV. No additional label check on the CSV
+	// is needed — OLM provenance labels are unreliable because they are also present
+	// on OperatorHub-installed CSVs in the same namespace.
+	if csvName != "" {
+		klog.Infof("Migrating: deleting old CSV %s/%s", fromNamespace, csvName)
+		csv := &unstructured.Unstructured{}
+		csv.SetAPIVersion("operators.coreos.com/v1alpha1")
+		csv.SetKind("ClusterServiceVersion")
+		csv.SetName(csvName)
+		csv.SetNamespace(fromNamespace)
+		if err := r.Delete(ctx, csv); err != nil && !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+			klog.Warningf("Migration: failed to delete old CSV %s/%s: %v", fromNamespace, csvName, err)
+		}
+	}
+
+	// Sweep for any remaining gitops-operator CSVs in the old namespace — e.g. a
+	// "Replacing" CSV from an in-progress OLM upgrade that isn't referenced by
+	// status.installedCSV. For these, we have no subscription-status anchor, so we
+	// only delete CSVs that no surviving subscription still references.
+	if err := deleteRemainingGitOpsCSVs(ctx, r.Client, fromNamespace, subName); err != nil {
+		klog.Warningf("Migration: failed to clean remaining CSVs in %s: %v", fromNamespace, err)
+	}
+
 	return nil
 }
 

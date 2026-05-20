@@ -14,7 +14,9 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **OLM Subscription Override**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, the addon agent is **forced** to use OLM subscription mode for operator installation, bypassing OCP auto-detection. This ensures OLM is used even if the cluster detection fails or the cluster is non-OCP (though OLM must be available on the cluster for the installation to succeed). Custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. When absent or disabled, the agent falls back to OCP auto-detection and uses hardcoded defaults (`channel: latest`, `source: redhat-operators`, etc.).
 - **AppProject Propagation (Agent Mode)**: In managed agent mode, the ArgoCD principal propagates AppProjects from the hub to managed clusters. In autonomous agent mode, AppProjects are created locally on the spoke and synced back to the hub with the agent name prefixed (e.g., `default` becomes `ocp-cluster1-default`). The `default` AppProject is included in the generated Policy for autonomous mode to ensure local reconciliation works before any agent sync occurs.
 - **Default AppProject Wildcard Settings (Agent Mode Prerequisite)**: The `default` AppProject in `openshift-gitops` on the hub must have wildcard settings: `sourceNamespaces: ["*"]`, `destinations: [{name:"*", namespace:"*", server:"*"}]`, `clusterResourceWhitelist: [{group:"*", kind:"*"}]`, `sourceRepos: ["*"]`. The principal only propagates AppProjects whose destinations and sourceNamespaces match the agent's configuration. Without wildcards, propagation is skipped and agents fail with "project not found". The `test-scenarios.sh` helper `ensure_default_appproject_for_agents` patches this.
-- **Destination-Based Mapping (Agent Architecture)**: The principal keeps `destinationBasedMapping: true` for **routing** — it dispatches Applications to agents based on `spec.destination.name`. The **agents** have `destinationBasedMapping` disabled (not set in the ArgoCD CR). This is critical for `local-cluster`: the agent's `getTargetNamespaceForApp()` returns its own namespace (`local-cluster`), so agent-created Application copies go to the `local-cluster` namespace where the app controller watches. For remote clusters (Kind/OCP), the agent's namespace IS `openshift-gitops`, so the behavior is identical whether DBM is enabled or disabled on the agent. If agent DBM were enabled, the agent would keep the original namespace (`openshift-gitops`) from the hub — this fails on `local-cluster` because the app controller runs in `local-cluster`, not `openshift-gitops`, and it conflicts with existing ApplicationSet-generated apps in `openshift-gitops`.
+- **Destination-Based Mapping (Agent Architecture)**: The principal keeps `destinationBasedMapping: true` for **routing** — it dispatches Applications to agents based on `spec.destination.name`. The **agents** have `destinationBasedMapping` disabled (not set in the ArgoCD CR). This is critical for `local-cluster`: the agent's `getTargetNamespaceForApp()` returns its own namespace (`local-cluster`), so agent-created Application copies go to the `local-cluster` namespace where the app controller watches. For remote clusters (Kind/OCP), the agent's namespace IS `openshift-gitops`, so the behavior is identical whether DBM is enabled or disabled on the agent. If agent DBM were enabled, the agent would keep the original namespace (`openshift-gitops`) from the hub — this fails on `local-cluster` because the app controller runs in `local-cluster`, not `openshift-gitops`, and it conflicts with existing ApplicationSet-generated apps in `openshift-gitops`. **Critical gotcha**: For OCP remote clusters in managed mode where you want live manifest in the ArgoCD UI, the agent's `destinationBasedMapping` must match the principal's. If they differ, the Redis cache key format diverges (`|` vs `_` separator) and the UI shows `"Resource not found in cluster: <resource>"` with agent log error `"unexpected key format, missing '_': 'app|resources-tree|...'`. Fix by setting `spec.argoCDAgent.agent.client.destinationBasedMapping: true` in the agent's ArgoCD CR template inside the Policy.
+- **Cluster Secret Resource Proxy URL**: In agent mode, the hub controller creates ArgoCD cluster secrets whose `server` field uses the resource proxy service URL format: `https://openshift-gitops-agent-principal-resource-proxy.<argocd-ns>.svc:9090?agentName=<cluster-name>`. This is an in-cluster URL pointing to the resource proxy sidecar in the principal pod; the `agentName` query parameter tells the proxy which agent cluster to route API requests to for live manifest and resource tree lookups. Verify with: `kubectl get secret cluster-<cluster-name> -n openshift-gitops -o jsonpath='{.data.server}' | base64 -d`.
+- **Agent SA View ClusterRole (Live Manifest)**: For the ArgoCD UI live manifest view to work, the ArgoCD agent ServiceAccount on the managed cluster must have read access to cluster resources. Create a ClusterRoleBinding on the managed cluster: `kubectl create clusterrolebinding acm-openshift-gitops-argocd-agent-cluster-reader --clusterrole=view --serviceaccount=openshift-gitops:acm-openshift-gitops-agent-agent`. Without this, the resource proxy cannot query the managed cluster and the UI shows `"Resource not found in cluster: <resource-name>"`. This can be added to the Policy's object templates so it is applied via OCM governance.
 - **Image Pull Secret Handling**: Two mechanisms work together:
   1. **Secret copying (OCM klusterlet)**: The addon agent labels namespaces it creates (`openshift-gitops-operator`, `openshift-gitops`) with `addon.open-cluster-management.io/namespace: true`. This label tells the OCM klusterlet to automatically copy the `open-cluster-management-image-pull-credentials` secret into those namespaces. No custom propagation code is needed for this step.
   2. **ServiceAccount patching (addon agent)**: On non-OCP clusters, the ArgoCD operator creates ServiceAccounts without `imagePullSecrets` references. Since the ArgoCD CRD has no native `imagePullSecrets` field, the addon agent patches all ServiceAccounts in the ArgoCD namespace to reference `open-cluster-management-image-pull-credentials` (via `patchArgoCDServiceAccountsWithImagePullSecrets`). It also deletes pods stuck in `ImagePullBackOff`/`ErrImagePull` so they restart with the patched SAs. On OCP clusters, node-level pull secrets handle registry authentication, so this patching is skipped.
@@ -477,7 +479,8 @@ EOF
 ### Step 4: Verify Agent Connection and Application
 
 ```bash
-# Check cluster secret exists with proper server URL
+# Check cluster secret exists with proper server URL (resource proxy format)
+# Expected output: https://openshift-gitops-agent-principal-resource-proxy.openshift-gitops.svc:9090?agentName=<cluster-name>
 kubectl get secret cluster-${CLUSTER_NAME} -n openshift-gitops -o jsonpath='{.data.server}' | base64 -d
 
 # Check principal logs for agent connections
@@ -1109,6 +1112,45 @@ If the OLM operator deployment never appears in `openshift-gitops-operator` afte
    KUBECONFIG=/path/to/ocp kubectl get installplan -n openshift-gitops-operator
    ```
 
+### ArgoCD UI Live Manifest Shows "Resource not found in cluster"
+
+This error has two common causes in agent mode:
+
+**Cause 1: Destination-Based Mapping mismatch between principal and agent**
+
+The `destinationBasedMapping` setting controls the Redis key separator (principal uses `_`, agent without DBM uses `|`). If the principal has DBM enabled but the agent does not, the agent logs show:
+
+```
+unexpected key format, missing '_': 'app|resources-tree|<cluster>-<appname>|<version>.gz'
+```
+
+Fix: ensure the agent's ArgoCD CR has `destinationBasedMapping` enabled to match the principal. Add this to the Policy's object templates for the agent's ArgoCD CR:
+
+```yaml
+spec:
+  argoCDAgent:
+    agent:
+      client:
+        destinationBasedMapping: true
+```
+
+**Cause 2: Agent SA missing `view` ClusterRole binding**
+
+The resource proxy forwards live manifest requests to the managed cluster using the agent ServiceAccount. Without cluster read access, the proxy cannot retrieve resource state.
+
+Fix: create a ClusterRoleBinding on the managed cluster (or add it to the Policy):
+
+```bash
+KUBECONFIG=/path/to/managed kubectl create clusterrolebinding acm-openshift-gitops-argocd-agent-cluster-reader \
+  --clusterrole=view \
+  --serviceaccount=openshift-gitops:acm-openshift-gitops-agent-agent
+```
+
+Verify the binding exists:
+```bash
+KUBECONFIG=/path/to/managed kubectl get clusterrolebinding acm-openshift-gitops-argocd-agent-cluster-reader -o yaml
+```
+
 ### Hub Controller Stuck / UID Mismatch
 
 If the hub controller logs show `StorageError: invalid object, UID mismatch`, the informer cache is stale. Fix by restarting the controller:
@@ -1155,3 +1197,7 @@ kubectl -n open-cluster-management rollout restart deployment/multicluster-opera
 10. **Orphaned ArgoCD Resources After Cleanup**: When the OLM operator is deleted (via CSV/Subscription removal), the ArgoCD deployments/statefulsets it created (e.g., `acm-openshift-gitops-redis`, `acm-openshift-gitops-repo-server`) survive because the operator can't process their owner references if it's already gone. `cleanup_managed_cluster_direct` explicitly deletes these orphans.
 
 11. **Pre-delete ManifestWork Race**: When a MCA is deleted, OCM creates a pre-delete ManifestWork that runs a cleanup Job. If the Job is slow and a new MCA is created before it finishes, the old pre-delete MW may interfere (e.g., deleting resources the new MW just applied, causing the ClusterRole to vanish). `cleanup_all` deletes stale pre-delete ManifestWorks to prevent this.
+
+12. **Destination-Based Mapping Must Match Principal and Agent**: The `destinationBasedMapping` setting controls the Redis key format for resource tree data. If the principal has it enabled but the agent does not (or vice versa), the Redis keys use different separators (`_` vs `|`) and the ArgoCD UI live manifest shows `"Resource not found in cluster"`. Always keep `destinationBasedMapping` consistent across principal and all agents. The agent setting is `spec.argoCDAgent.agent.client.destinationBasedMapping` in the ArgoCD CR.
+
+13. **Agent SA View ClusterRole Not Auto-Provisioned**: The ArgoCD agent ServiceAccount (`acm-openshift-gitops-agent-agent`) on OCP managed clusters is not automatically granted cluster read access. Without a `view` ClusterRoleBinding, the resource proxy cannot serve live manifest requests to the ArgoCD UI. This must be added manually or included in the Policy's object templates.

@@ -91,6 +91,22 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDPolicy(instance *gitopsclusterV1bet
 		return err
 	}
 
+	// When agent is enabled, reconcile the controlled agent spec fields in the existing policy
+	// on every reconcile. This ensures fields like destinationBasedMapping, client config, and
+	// TLS settings are always in sync with the GitOpsCluster spec, even for policies that were
+	// created before these fields were added to the generator. User customizations (e.g., extra
+	// object-templates for RBAC) are preserved since only the ArgoCD object template is touched.
+	argoCDAgentEnabled := instance.Spec.GitOpsAddon != nil &&
+		instance.Spec.GitOpsAddon.ArgoCDAgent != nil &&
+		instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled != nil &&
+		*instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled
+	if argoCDAgentEnabled {
+		if err := r.reconcileArgoCDPolicyAgentSpec(instance); err != nil {
+			return fmt.Errorf("failed to reconcile agent spec in ArgoCD Policy for %s/%s: %w",
+				instance.Namespace, instance.Name, err)
+		}
+	}
+
 	klog.Infof("Successfully created ArgoCD Policy for GitOpsCluster %s/%s", instance.Namespace, instance.Name)
 	return nil
 }
@@ -289,13 +305,15 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 	// The operator handles agent image selection via ARGOCD_AGENT_IMAGE env var (v1.20+),
 	// so we don't set the image in the ArgoCD CR - the operator picks the correct Red Hat image.
 	//
-	// destinationBasedMapping is DISABLED on the agent side. The principal keeps DBM enabled
-	// for routing (apps are dispatched to agents based on spec.destination.name). On the agent,
-	// DBM=false means getTargetNamespaceForApp() returns the agent's own namespace. This is
-	// critical for local-cluster: the agent's ArgoCD is in "local-cluster" namespace (to avoid
-	// conflicting with the hub's ArgoCD in "openshift-gitops"), so the agent must store apps
-	// in "local-cluster" where the app controller watches. For remote clusters (Kind/OCP), the
-	// agent namespace IS "openshift-gitops", so DBM=true/false produces the same result.
+	// destinationBasedMapping must be ENABLED on the agent to match the principal. The principal
+	// also has DBM enabled for routing (apps dispatched to agents based on spec.destination.name).
+	// Principal and agent must agree on this setting because it controls the Redis key separator
+	// used for resource tree data ('_' when enabled, '|' when disabled). A mismatch causes the
+	// ArgoCD UI live manifest to fail with "Resource not found in cluster" and agent logs showing
+	// "unexpected key format, missing '_'". For local-cluster, DBM on the agent is safe: the
+	// agent's getTargetNamespaceForApp() still returns its own namespace ("local-cluster") for
+	// the Application copy because the agent's destination is the in-cluster server URL, not the
+	// hub cluster name - so apps are stored in "local-cluster" regardless of DBM setting.
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 		agentConfig := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
 		serverAddress := agentConfig.ServerAddress
@@ -318,6 +336,8 @@ argoCDAgent:
       principalServerAddress: "%s"
       principalServerPort: "%s"
       mode: "%s"
+    destinationBasedMapping:
+      enabled: true
     tls:
       secretName: argocd-agent-client-tls
       rootCASecretName: argocd-agent-ca`,
