@@ -18,6 +18,7 @@ package gitopsaddon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -1384,4 +1385,76 @@ func TestDeleteOLMResourcesOnlyDeletesOwnedCSVs(t *testing.T) {
 	checkAdminCSV.SetKind("ClusterServiceVersion")
 	err = testClient.Get(ctx, types.NamespacedName{Name: "admin-argocd.v2.0.0", Namespace: GitOpsOperatorNamespace}, checkAdminCSV)
 	g.Expect(err).NotTo(gomega.HaveOccurred(), "Admin CSV should still exist")
+}
+
+func TestDeleteOperatorResourcesNamespacedFallbackPreservesClusterError(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).To(gomega.Succeed())
+
+	ns := "openshift-gitops-operator"
+
+	// Create a labeled namespaced resource (ServiceAccount) that will be cleaned by fallback,
+	// and a labeled cluster-scoped resource (ClusterRole) that the wrapper will refuse to delete.
+	baseClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sa", Namespace: ns,
+					Labels: map[string]string{"apps.open-cluster-management.io/gitopsaddon": "true"},
+				},
+			},
+			&rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "test-cr",
+					Labels: map[string]string{"apps.open-cluster-management.io/gitopsaddon": "true"},
+				},
+			},
+		).
+		Build()
+
+	// Wrap the client to force Delete to fail on ClusterRole objects.
+	testClient := &clusterRoleDeleteBlocker{Client: baseClient}
+
+	// Use a short-lived context so the retry loops in deleteOperatorResources
+	// don't spin for their full 4+2 minute timeouts.
+	ctx, cancel := context.WithTimeout(context.TODO(), 15*time.Second)
+	defer cancel()
+
+	err := deleteOperatorResources(ctx, testClient, ns)
+
+	// Namespaced SA should be deleted by the fallback path.
+	checkSA := &corev1.ServiceAccount{}
+	saErr := baseClient.Get(context.TODO(), types.NamespacedName{Name: "test-sa", Namespace: ns}, checkSA)
+	g.Expect(saErr).To(gomega.HaveOccurred(), "ServiceAccount should have been deleted by namespaced fallback")
+
+	// ClusterRole must still exist (delete was blocked).
+	checkCR := &rbacv1.ClusterRole{}
+	crErr := baseClient.Get(context.TODO(), types.NamespacedName{Name: "test-cr"}, checkCR)
+	g.Expect(crErr).NotTo(gomega.HaveOccurred(), "ClusterRole should still exist because delete was blocked")
+
+	// The function must surface the cluster-scoped error.
+	g.Expect(err).To(gomega.HaveOccurred(), "deleteOperatorResources must return error when cluster-scoped resources remain")
+}
+
+// clusterRoleDeleteBlocker wraps a client.Client and rejects Delete calls for
+// ClusterRole objects, simulating a permission or network error.
+type clusterRoleDeleteBlocker struct {
+	client.Client
+}
+
+func (c *clusterRoleDeleteBlocker) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*rbacv1.ClusterRole); ok {
+		return fmt.Errorf("simulated: cannot delete ClusterRole")
+	}
+	// For unstructured objects used by deleteResourcesWithRetry
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		if u.GetKind() == "ClusterRole" {
+			return fmt.Errorf("simulated: cannot delete ClusterRole")
+		}
+	}
+	return c.Client.Delete(ctx, obj, opts...)
 }

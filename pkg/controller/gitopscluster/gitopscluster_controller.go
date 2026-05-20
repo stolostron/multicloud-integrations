@@ -308,9 +308,6 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 		err := r.Get(context.TODO(), types.NamespacedName{Name: gitOpsCluster.Name, Namespace: gitOpsCluster.Namespace}, instance)
 
 		if err != nil && k8errors.IsNotFound(err) {
-			klog.Infof("GitOpsCluster %s/%s deleted", gitOpsCluster.Namespace, gitOpsCluster.Name)
-			// Clean up dynamic AddOnTemplates that were created for this GitOpsCluster
-			r.CleanupDynamicAddOnTemplates(&gitOpsCluster)
 			continue
 		}
 
@@ -392,7 +389,6 @@ func (r *ReconcileGitOpsCluster) cleanupOrphanSecrets(orphanGitOpsClusterSecretL
 	return cleanupSuccessful
 }
 
-// initializeConditions sets all applicable conditions to Unknown/Reconciling state at the start
 func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1beta1.GitOpsCluster) {
 	// Check if GitOps addon is enabled
 	gitopsAddonEnabled := false
@@ -1071,38 +1067,38 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				})
 		}
 
-	// Update OLMSubscriptionReady condition when OLM subscription config is enabled
-	olmSubscriptionEnabled := IsOLMSubscriptionEnabled(instance)
-	if olmSubscriptionEnabled {
-		if len(configFailures) > 0 {
-			r.updateGitOpsClusterConditions(instance, "", "",
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonConfigCreationFailed,
-						Message: "OLM subscription config could not be delivered to all managed clusters",
-					},
-				})
+		// Update OLMSubscriptionReady condition when OLM subscription config is enabled
+		olmSubscriptionEnabled := IsOLMSubscriptionEnabled(instance)
+		if olmSubscriptionEnabled {
+			if len(configFailures) > 0 {
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionFalse,
+							Reason:  gitopsclusterV1beta1.ReasonConfigCreationFailed,
+							Message: "OLM subscription config could not be delivered to all managed clusters",
+						},
+					})
+			} else {
+				r.updateGitOpsClusterConditions(instance, "", "",
+					map[string]ConditionUpdate{
+						gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
+							Status:  metav1.ConditionTrue,
+							Reason:  gitopsclusterV1beta1.ReasonSuccess,
+							Message: "OLM subscription configuration delivered to managed clusters via AddOnDeploymentConfig",
+						},
+					})
+			}
 		} else {
 			r.updateGitOpsClusterConditions(instance, "", "",
 				map[string]ConditionUpdate{
 					gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
 						Status:  metav1.ConditionTrue,
-						Reason:  gitopsclusterV1beta1.ReasonSuccess,
-						Message: "OLM subscription configuration delivered to managed clusters via AddOnDeploymentConfig",
+						Reason:  gitopsclusterV1beta1.ReasonNotRequired,
+						Message: "OLM passthrough not required",
 					},
 				})
 		}
-	} else {
-		r.updateGitOpsClusterConditions(instance, "", "",
-			map[string]ConditionUpdate{
-				gitopsclusterV1beta1.GitOpsClusterOLMSubscriptionReady: {
-					Status:  metav1.ConditionTrue,
-					Reason:  gitopsclusterV1beta1.ReasonNotRequired,
-					Message: "OLM passthrough not required",
-				},
-			})
-	}
 
 		// Update ManagedClusterAddOnsReady condition
 		if len(addonFailures) > 0 {
