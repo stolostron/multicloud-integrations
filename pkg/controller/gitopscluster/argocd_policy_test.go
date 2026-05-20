@@ -269,7 +269,8 @@ func TestGenerateArgoCDSpec_WithArgoCDAgent(t *testing.T) {
 	assert.Contains(t, spec, "principalServerPort: \"443\"")
 	assert.Contains(t, spec, "mode: \"managed\"")
 	assert.Contains(t, spec, "allowedNamespaces:")
-	assert.NotContains(t, spec, "destinationBasedMapping:")
+	assert.Contains(t, spec, "destinationBasedMapping:")
+	assert.Contains(t, spec, "enabled: true")
 	assert.NotContains(t, spec, "sourceNamespaces:")
 }
 
@@ -298,7 +299,8 @@ func TestGenerateArgoCDSpec_WithArgoCDAgentNoImageOverride(t *testing.T) {
 	assert.Contains(t, spec, "argoCDAgent:")
 	assert.NotContains(t, spec, "image:")
 	assert.Contains(t, spec, "allowedNamespaces:")
-	assert.NotContains(t, spec, "destinationBasedMapping:")
+	assert.Contains(t, spec, "destinationBasedMapping:")
+	assert.Contains(t, spec, "enabled: true")
 }
 
 func TestGenerateArgoCDSpec_WithArgoCDAgentDefaults(t *testing.T) {
@@ -356,7 +358,7 @@ func TestGenerateArgoCDSpec_NoAgentImageForAnyOperator(t *testing.T) {
 	assert.NotContains(t, spec, "image:")
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
 	assert.Contains(t, spec, "allowedNamespaces:")
-	assert.NotContains(t, spec, "destinationBasedMapping:")
+	assert.Contains(t, spec, "destinationBasedMapping:")
 }
 
 func TestIndentYaml(t *testing.T) {

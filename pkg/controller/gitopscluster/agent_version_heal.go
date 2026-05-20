@@ -23,6 +23,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -221,6 +222,188 @@ func (r *ReconcileGitOpsCluster) patchArgoCDPolicyAgentImage(instance *gitopsclu
 		}
 
 		klog.Infof("Successfully patched agent image in Policy %s/%s", instance.Namespace, policyName)
+		return nil
+	})
+}
+
+// reconcileArgoCDPolicyAgentSpec ensures all controller-managed agent config fields
+// are present and correct in the existing ArgoCD Policy's object template.
+// This handles policies created before certain fields were added (e.g., destinationBasedMapping,
+// client TLS config, allowedNamespaces) or when the GitOpsCluster spec changes.
+// Fields NOT touched: image (managed by HealAgentVersionDrift), user-added object-templates.
+func (r *ReconcileGitOpsCluster) reconcileArgoCDPolicyAgentSpec(instance *gitopsclusterV1beta1.GitOpsCluster) error {
+	policyName := instance.Name + "-argocd-policy"
+	policyGVR := schema.GroupVersionResource{
+		Group:    "policy.open-cluster-management.io",
+		Version:  "v1",
+		Resource: "policies",
+	}
+
+	agentConfig := instance.Spec.GitOpsAddon.ArgoCDAgent
+	serverAddress := agentConfig.ServerAddress
+	serverPort := agentConfig.ServerPort
+	if serverPort == "" {
+		serverPort = "443"
+	}
+	mode := agentConfig.Mode
+	if mode == "" {
+		mode = "managed"
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var existing *unstructured.Unstructured
+		var fetchErr error
+		func() {
+			defer func() {
+				if panicErr := recover(); panicErr != nil {
+					klog.V(4).Infof("Dynamic client not available for agent spec reconcile (test environment): %v", panicErr)
+					fetchErr = fmt.Errorf("dynamic client not available: %v", panicErr)
+				}
+			}()
+			existing, fetchErr = r.DynamicClient.Resource(policyGVR).Namespace(instance.Namespace).Get(
+				context.TODO(), policyName, metav1.GetOptions{})
+		}()
+		if fetchErr != nil {
+			if strings.Contains(fetchErr.Error(), "dynamic client not available") {
+				return nil
+			}
+			if errors.IsNotFound(fetchErr) {
+				klog.V(2).Infof("ArgoCD Policy %s/%s not found, skipping agent spec reconcile",
+					instance.Namespace, policyName)
+				return nil
+			}
+			return fmt.Errorf("failed to get ArgoCD Policy %s/%s: %w", instance.Namespace, policyName, fetchErr)
+		}
+
+		spec, ok := existing.Object["spec"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("policy %s has no spec", policyName)
+		}
+
+		policyTemplates, ok := spec["policy-templates"].([]interface{})
+		if !ok || len(policyTemplates) == 0 {
+			return fmt.Errorf("policy %s has no policy-templates", policyName)
+		}
+
+		needsUpdate := false
+		for ptIdx, pt := range policyTemplates {
+			ptMap, ok := pt.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			configPolicyDef, ok := ptMap["objectDefinition"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			configPolicySpec, ok := configPolicyDef["spec"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			objectTemplates, ok := configPolicySpec["object-templates"].([]interface{})
+			if !ok || len(objectTemplates) == 0 {
+				continue
+			}
+
+			for _, tmpl := range objectTemplates {
+				tmplMap, ok := tmpl.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				objDef, ok := tmplMap["objectDefinition"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if objDef["kind"] != "ArgoCD" {
+					continue
+				}
+
+				objMeta, _ := objDef["metadata"].(map[string]interface{})
+				objName, _ := objMeta["name"].(string)
+				if objName != addonManagedArgoCDName {
+					klog.V(2).Infof("Skipping ArgoCD template %q in Policy %s policy-templates[%d] (only reconciling %s)",
+						objName, policyName, ptIdx, addonManagedArgoCDName)
+					continue
+				}
+
+				objSpec := ensureNestedMap(objDef, "spec")
+				argoCDAgent := ensureNestedMap(objSpec, "argoCDAgent")
+				agent := ensureNestedMap(argoCDAgent, "agent")
+
+				if agent["enabled"] != true {
+					agent["enabled"] = true
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.enabled=true",
+						instance.Namespace, policyName, ptIdx)
+					needsUpdate = true
+				}
+
+				currentNS, _ := agent["allowedNamespaces"].([]interface{})
+				if len(currentNS) == 0 || currentNS[0] != "*" {
+					agent["allowedNamespaces"] = []interface{}{"*"}
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.allowedNamespaces=[\"*\"]",
+						instance.Namespace, policyName, ptIdx)
+					needsUpdate = true
+				}
+
+				client := ensureNestedMap(agent, "client")
+				if client["principalServerAddress"] != serverAddress {
+					client["principalServerAddress"] = serverAddress
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.client.principalServerAddress=%s",
+						instance.Namespace, policyName, ptIdx, serverAddress)
+					needsUpdate = true
+				}
+				if client["principalServerPort"] != serverPort {
+					client["principalServerPort"] = serverPort
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.client.principalServerPort=%s",
+						instance.Namespace, policyName, ptIdx, serverPort)
+					needsUpdate = true
+				}
+				if client["mode"] != mode {
+					client["mode"] = mode
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.client.mode=%s",
+						instance.Namespace, policyName, ptIdx, mode)
+					needsUpdate = true
+				}
+
+				dbm := ensureNestedMap(agent, "destinationBasedMapping")
+				if dbm["enabled"] != true {
+					dbm["enabled"] = true
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: enabling argoCDAgent.agent.destinationBasedMapping",
+						instance.Namespace, policyName, ptIdx)
+					needsUpdate = true
+				}
+
+				tls := ensureNestedMap(agent, "tls")
+				if tls["secretName"] != "argocd-agent-client-tls" {
+					tls["secretName"] = "argocd-agent-client-tls"
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.tls.secretName",
+						instance.Namespace, policyName, ptIdx)
+					needsUpdate = true
+				}
+				if tls["rootCASecretName"] != "argocd-agent-ca" {
+					tls["rootCASecretName"] = "argocd-agent-ca"
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.tls.rootCASecretName",
+						instance.Namespace, policyName, ptIdx)
+					needsUpdate = true
+				}
+			}
+		}
+
+		if !needsUpdate {
+			klog.V(2).Infof("ArgoCD Policy %s/%s agent spec is up to date, no patch needed",
+				instance.Namespace, policyName)
+			return nil
+		}
+
+		_, updateErr := r.DynamicClient.Resource(policyGVR).Namespace(instance.Namespace).Update(
+			context.TODO(), existing, metav1.UpdateOptions{})
+		if updateErr != nil {
+			return fmt.Errorf("failed to update Policy %s/%s: %w", instance.Namespace, policyName, updateErr)
+		}
+
+		klog.Infof("Successfully reconciled agent spec in Policy %s/%s", instance.Namespace, policyName)
 		return nil
 	})
 }

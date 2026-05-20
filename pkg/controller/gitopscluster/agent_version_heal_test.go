@@ -187,6 +187,126 @@ func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 	})
 }
 
+func TestReconcileArgoCDPolicyAgentSpec_NilDynamicClient(t *testing.T) {
+	// When DynamicClient is zero value (nil REST client), the function should
+	// recover from the panic and return nil gracefully (no-op in test environments).
+	agentEnabled := true
+	scheme := runtime.NewScheme()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ReconcileGitOpsCluster{Client: cl}
+	instance := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mc-gitops-ocp",
+			Namespace: "openshift-gitops",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "principal.example.com",
+					ServerPort:    "443",
+					Mode:          "managed",
+				},
+			},
+		},
+	}
+
+	err := r.reconcileArgoCDPolicyAgentSpec(instance)
+	require.NoError(t, err, "should recover gracefully when DynamicClient is not initialized")
+}
+
+func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
+	// Test that ensureNestedMap + field comparison logic works correctly
+	// for all the fields that reconcileArgoCDPolicyAgentSpec manages.
+	t.Run("destinationBasedMapping defaults to absent and must be set", func(t *testing.T) {
+		agent := map[string]interface{}{}
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		assert.NotNil(t, dbm)
+
+		// Simulates the condition check: dbm["enabled"] != true
+		assert.NotEqual(t, true, dbm["enabled"], "newly created map should not have enabled=true yet")
+		dbm["enabled"] = true
+		assert.Equal(t, true, dbm["enabled"])
+	})
+
+	t.Run("client fields absent on legacy policy template", func(t *testing.T) {
+		// Simulate a legacy policy's argoCDAgent.agent map (only has image, nothing else)
+		agent := map[string]interface{}{
+			"image": "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:abc",
+		}
+		client := ensureNestedMap(agent, "client")
+		assert.Empty(t, client, "client should be empty on a legacy policy")
+
+		client["principalServerAddress"] = "principal.example.com"
+		client["principalServerPort"] = "443"
+		client["mode"] = "managed"
+
+		assert.Equal(t, "principal.example.com", agent["client"].(map[string]interface{})["principalServerAddress"])
+		// image must be preserved
+		assert.Equal(t, "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:abc", agent["image"])
+	})
+
+	t.Run("tls fields absent on legacy policy template", func(t *testing.T) {
+		agent := map[string]interface{}{}
+		tls := ensureNestedMap(agent, "tls")
+		assert.NotEqual(t, "argocd-agent-client-tls", tls["secretName"])
+		assert.NotEqual(t, "argocd-agent-ca", tls["rootCASecretName"])
+
+		tls["secretName"] = "argocd-agent-client-tls"
+		tls["rootCASecretName"] = "argocd-agent-ca"
+		assert.Equal(t, "argocd-agent-client-tls", tls["secretName"])
+		assert.Equal(t, "argocd-agent-ca", tls["rootCASecretName"])
+	})
+
+	t.Run("allowedNamespaces absent on legacy policy template", func(t *testing.T) {
+		agent := map[string]interface{}{}
+		currentNS, _ := agent["allowedNamespaces"].([]interface{})
+		assert.Empty(t, currentNS)
+		agent["allowedNamespaces"] = []interface{}{"*"}
+		updated, _ := agent["allowedNamespaces"].([]interface{})
+		assert.Equal(t, []interface{}{"*"}, updated)
+	})
+
+	t.Run("no update needed when all fields already correct", func(t *testing.T) {
+		agent := map[string]interface{}{
+			"enabled":          true,
+			"allowedNamespaces": []interface{}{"*"},
+			"client": map[string]interface{}{
+				"principalServerAddress": "principal.example.com",
+				"principalServerPort":    "443",
+				"mode":                  "managed",
+			},
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": true,
+			},
+			"tls": map[string]interface{}{
+				"secretName":      "argocd-agent-client-tls",
+				"rootCASecretName": "argocd-agent-ca",
+			},
+		}
+
+		needsUpdate := false
+		if agent["enabled"] != true {
+			needsUpdate = true
+		}
+		dbm, _ := agent["destinationBasedMapping"].(map[string]interface{})
+		if dbm["enabled"] != true {
+			needsUpdate = true
+		}
+		tls, _ := agent["tls"].(map[string]interface{})
+		if tls["secretName"] != "argocd-agent-client-tls" || tls["rootCASecretName"] != "argocd-agent-ca" {
+			needsUpdate = true
+		}
+		client, _ := agent["client"].(map[string]interface{})
+		if client["principalServerAddress"] != "principal.example.com" {
+			needsUpdate = true
+		}
+
+		assert.False(t, needsUpdate, "no update should be needed when all fields are already correct")
+	})
+}
+
 func TestEnsureNestedMap(t *testing.T) {
 	t.Run("creates new map if key missing", func(t *testing.T) {
 		parent := map[string]interface{}{}

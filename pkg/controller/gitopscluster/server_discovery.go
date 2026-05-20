@@ -163,6 +163,66 @@ func (r *ReconcileGitOpsCluster) FindArgoCDAgentPrincipalService(ctx context.Con
 	return nil, fmt.Errorf("ArgoCD agent principal service not found in namespace '%s'. Please ensure the ArgoCD instance has been deployed with agent mode enabled and the principal service is running", namespace)
 }
 
+// defaultResourceProxyServiceName is the well-known name used by the OpenShift GitOps operator
+// for the argocd-agent resource-proxy service.
+const defaultResourceProxyServiceName = "openshift-gitops-agent-principal-resource-proxy"
+
+// FindArgoCDAgentResourceProxyService finds the ArgoCD agent resource-proxy service in the given namespace.
+//
+// The resource-proxy is the in-cluster endpoint that the ArgoCD application controller uses to proxy
+// Kubernetes API calls to managed clusters. It is created by the ArgoCD operator alongside the principal
+// and carries the label app.kubernetes.io/part-of=argocd-agent with a port named "resource-proxy".
+//
+// Discovery order:
+//  1. Direct Get of the well-known name openshift-gitops-agent-principal-resource-proxy.
+//  2. Fallback: list all services in the namespace with label app.kubernetes.io/part-of=argocd-agent
+//     and pick the one that exposes a port named "resource-proxy".
+//
+// Returns the service and the port number read from the service spec so that the caller does not
+// have to hardcode 9090.
+func (r *ReconcileGitOpsCluster) FindArgoCDAgentResourceProxyService(ctx context.Context, namespace string) (*v1.Service, int32, error) {
+	// Step 1: try the well-known default name directly (fast path, no list needed).
+	svc := &v1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: defaultResourceProxyServiceName, Namespace: namespace}, svc); err == nil {
+		if port, ok := resourceProxyPortFromService(svc); ok {
+			klog.Infof("Found resource proxy service by well-known name: %s in namespace %s (port %d)",
+				defaultResourceProxyServiceName, namespace, port)
+			return svc, port, nil
+		}
+	}
+
+	// Step 2: list services labelled app.kubernetes.io/part-of=argocd-agent.
+	serviceList := &v1.ServiceList{}
+	if err := r.List(ctx, serviceList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"app.kubernetes.io/part-of": "argocd-agent"},
+	); err != nil {
+		return nil, 0, fmt.Errorf("failed to list argocd-agent services in namespace '%s': %w", namespace, err)
+	}
+
+	for i := range serviceList.Items {
+		s := &serviceList.Items[i]
+		if port, ok := resourceProxyPortFromService(s); ok {
+			klog.Infof("Found resource proxy service by label+port match: %s in namespace %s (port %d)",
+				s.Name, namespace, port)
+			return s, port, nil
+		}
+	}
+
+	return nil, 0, fmt.Errorf("ArgoCD agent resource-proxy service not found in namespace '%s'", namespace)
+}
+
+// resourceProxyPortFromService returns the port number of the "resource-proxy" named port on the service,
+// or (0, false) if the service does not expose such a port.
+func resourceProxyPortFromService(svc *v1.Service) (int32, bool) {
+	for _, p := range svc.Spec.Ports {
+		if p.Name == "resource-proxy" {
+			return p.Port, true
+		}
+	}
+	return 0, false
+}
+
 // DiscoverServerAddressAndPort discovers the external server address and port from the ArgoCD agent principal Route or Service
 // and updates the GitOpsCluster CR spec fields if they are empty
 func (r *ReconcileGitOpsCluster) DiscoverServerAddressAndPort(ctx context.Context, gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
