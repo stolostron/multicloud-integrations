@@ -292,7 +292,7 @@ func TestDeleteRemainingGitOpsCSVs(t *testing.T) {
 		WithObjects(csv1, csv2, unrelatedCSV).
 		Build()
 
-	err = deleteRemainingGitOpsCSVs(context.TODO(), testClient, "openshift-operators")
+	err = deleteRemainingGitOpsCSVs(context.TODO(), testClient, "openshift-operators", "openshift-gitops-operator")
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	// gitops CSVs should be deleted

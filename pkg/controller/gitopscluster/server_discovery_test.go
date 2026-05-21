@@ -1573,3 +1573,103 @@ func TestDiscoverServerAddressAndPort_RoutePreference(t *testing.T) {
 		})
 	}
 }
+
+func TestFindArgoCDAgentResourceProxyService(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+
+	makeProxySvc := func(name, namespace string, port int32, extraLabels map[string]string) *v1.Service {
+		labels := map[string]string{"app.kubernetes.io/part-of": "argocd-agent"}
+		for k, v := range extraLabels {
+			labels[k] = v
+		}
+		return &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+			Spec: v1.ServiceSpec{
+				Ports: []v1.ServicePort{{Name: "resource-proxy", Port: port, Protocol: v1.ProtocolTCP}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name            string
+		namespace       string
+		existingObjects []client.Object
+		expectedSvcName string
+		expectedPort    int32
+		expectedError   bool
+	}{
+		{
+			name:      "finds well-known service by name (fast path)",
+			namespace: "openshift-gitops",
+			existingObjects: []client.Object{
+				makeProxySvc(defaultResourceProxyServiceName, "openshift-gitops", 9090, nil),
+			},
+			expectedSvcName: defaultResourceProxyServiceName,
+			expectedPort:    9090,
+		},
+		{
+			name:      "falls back to label+port scan when well-known name absent",
+			namespace: "openshift-gitops",
+			existingObjects: []client.Object{
+				makeProxySvc("custom-agent-principal-resource-proxy", "openshift-gitops", 9090, nil),
+			},
+			expectedSvcName: "custom-agent-principal-resource-proxy",
+			expectedPort:    9090,
+		},
+		{
+			name:      "reads port from service spec (non-default port)",
+			namespace: "openshift-gitops",
+			existingObjects: []client.Object{
+				makeProxySvc(defaultResourceProxyServiceName, "openshift-gitops", 8443, nil),
+			},
+			expectedSvcName: defaultResourceProxyServiceName,
+			expectedPort:    8443,
+		},
+		{
+			name:            "no resource proxy service returns error",
+			namespace:       "openshift-gitops",
+			existingObjects: []client.Object{},
+			expectedError:   true,
+		},
+		{
+			name:      "service with argocd-agent label but no resource-proxy port is skipped",
+			namespace: "openshift-gitops",
+			existingObjects: []client.Object{
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "some-agent-svc",
+						Namespace: "openshift-gitops",
+						Labels:    map[string]string{"app.kubernetes.io/part-of": "argocd-agent"},
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{{Name: "grpc", Port: 443}},
+					},
+				},
+			},
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+			r := &ReconcileGitOpsCluster{Client: fakeClient}
+
+			svc, port, err := r.FindArgoCDAgentResourceProxyService(context.TODO(), tt.namespace)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+				assert.Nil(t, svc)
+			} else {
+				assert.NoError(t, err)
+				require.NotNil(t, svc)
+				assert.Equal(t, tt.expectedSvcName, svc.Name)
+				assert.Equal(t, tt.expectedPort, port)
+			}
+		})
+	}
+}

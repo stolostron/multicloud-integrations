@@ -126,7 +126,9 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
-			name: "override existing traditional cluster secret",
+			// When the resource proxy service exists the controller prefers it over the external
+			// NodePort address. Verify that the cluster secret server URL uses the proxy path.
+			name: "override existing traditional cluster secret uses resource proxy when available",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -154,6 +156,18 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			orphanSecretsList: map[types.NamespacedName]string{},
 			existingObjects: []client.Object{
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// Resource proxy service present → controller should prefer proxy URL.
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      defaultResourceProxyServiceName,
+						Namespace: "argocd",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "resource-proxy", Port: 9090},
+						},
+					},
+				},
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster-cluster1",
@@ -179,13 +193,18 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
 				assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
 
-				// Verify it's an agent URL now
+				// Verify the resource proxy URL is used when the service is available
 				serverURL := string(secret.Data["server"])
 				assert.Contains(t, serverURL, "agentName=cluster1")
+				assert.Contains(t, serverURL, "resource-proxy")
+				assert.Contains(t, serverURL, ":9090")
 			},
 		},
 		{
-			name: "missing server configuration should fail",
+			// When the resource proxy service is absent the controller falls back to the external
+			// NodePort / LoadBalancer address discovered by the reconciler. This ensures the
+			// embedded e2e environment (upstream argocd-operator, no resource proxy sidecar) works.
+			name: "falls back to NodePort URL when no resource proxy service exists",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -197,7 +216,8 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
-							// Missing ServerAddress and ServerPort
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
 						},
 					},
 				},
@@ -209,8 +229,86 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 					},
 				},
 			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// No resource proxy service → falls back to NodePort URL
+			},
+			expectedError:        false,
+			expectedSecretsCount: 1,
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
+				assert.NoError(t, err)
+				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+
+				// Without a resource proxy service the URL should use the NodePort address
+				serverURL := string(secret.Data["server"])
+				assert.Contains(t, serverURL, "agentName=cluster1")
+				assert.Contains(t, serverURL, "test-server.example.com")
+				assert.NotContains(t, serverURL, "resource-proxy")
+			},
+		},
+		{
+			// When neither resource proxy nor external server address is configured the function
+			// must return an error rather than silently creating an invalid cluster secret.
+			name: "fails when no resource proxy and no server address configured",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							// No server address/port → fallback will fail
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// No resource proxy service AND no server address → must error
+			},
+			expectedError:        true,
+			expectedSecretsCount: 0,
+		},
+		{
+			name: "missing CA certificate should fail",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
 			orphanSecretsList:    map[types.NamespacedName]string{},
-			existingObjects:      []client.Object{},
+			existingObjects:      []client.Object{}, // No CA secret — must fail
 			expectedError:        true,
 			expectedSecretsCount: 0,
 		},
@@ -244,6 +342,143 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			existingObjects:      []client.Object{}, // No CA secret
 			expectedError:        true,
 			expectedSecretsCount: 0,
+		},
+		{
+			// Regression test: transitioning a GitOpsCluster from non-agent to agent mode
+			// leaves behind a blank pull-model secret with the same data["name"] as the new
+			// agent secret, causing ArgoCD to raise:
+			//   "there are 2 clusters with the same name: [<agent-url> <traditional-url>]"
+			// Only blank secrets (data-source=blank) are deleted; non-blank traditional secrets
+			// (e.g. MSA-backed) are left untouched.
+			name: "transition from non-agent to agent mode deletes blank pull-model secrets",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{
+				// Simulates what GetAllManagedClusterSecretsInArgo finds before reconciliation
+				{Name: "cluster1-application-manager-cluster-secret", Namespace: "argocd"}: "argocd/cluster1-application-manager-cluster-secret",
+			},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// Traditional blank secret left over from non-agent mode
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-application-manager-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":               "cluster",
+							"apps.open-cluster-management.io/acm-cluster":  "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster1",
+							"apps.open-cluster-management.io/data-source":  "blank",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster1"),
+						"server": []byte("https://cluster1-control-plane"),
+					},
+				},
+			},
+			expectedError:        false,
+			expectedSecretsCount: 1, // Only the new agent secret; old traditional secret must be gone
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				// The new agent secret must exist
+				agentSecret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, agentSecret)
+				assert.NoError(t, err, "agent cluster secret should be created")
+				assert.Equal(t, "cluster1", agentSecret.Labels[labelKeyClusterAgentMapping])
+				assert.Equal(t, labelValueManagerName, agentSecret.Annotations[argoCDManagedByAnnotation])
+
+				// The old traditional secret must be deleted
+				oldSecret := &v1.Secret{}
+				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-application-manager-cluster-secret", Namespace: "argocd"}, oldSecret)
+				assert.True(t, err != nil, "old traditional cluster secret should be deleted")
+			},
+		},
+		{
+			// Non-blank traditional secrets (e.g. MSA-backed with real credentials) must NOT be
+			// deleted when transitioning to agent mode — only blank pull-model placeholders are removed.
+			name: "transition to agent mode preserves non-blank traditional secrets",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// Non-blank MSA-backed secret — must be preserved
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster1-msa-cluster-secret",
+						Namespace: "argocd",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type":               "cluster",
+							"apps.open-cluster-management.io/acm-cluster":  "true",
+							"apps.open-cluster-management.io/cluster-name": "cluster1",
+							"apps.open-cluster-management.io/data-source":  "managed-service-account",
+						},
+					},
+					Data: map[string][]byte{
+						"name":   []byte("cluster1"),
+						"server": []byte("https://real-api-server"),
+						"config": []byte(`{"bearerToken":"real-token"}`),
+					},
+				},
+			},
+			expectedError:        false,
+			expectedSecretsCount: 2, // agent secret + preserved non-blank secret
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				// The new agent secret must exist
+				agentSecret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, agentSecret)
+				assert.NoError(t, err, "agent cluster secret should be created")
+
+				// The non-blank MSA-backed secret must still exist
+				msaSecret := &v1.Secret{}
+				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-msa-cluster-secret", Namespace: "argocd"}, msaSecret)
+				assert.NoError(t, err, "non-blank MSA-backed cluster secret must NOT be deleted")
+				assert.Equal(t, "managed-service-account", msaSecret.Labels["apps.open-cluster-management.io/data-source"])
+			},
 		},
 		{
 			name: "local-cluster by name gets cluster secret",
@@ -543,6 +778,66 @@ func TestConstructServerURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			url, err := constructServerURL(tt.serverAddress, tt.serverPort, tt.agentName)
 
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedURL, url)
+			}
+		})
+	}
+}
+
+func TestConstructResourceProxyURL(t *testing.T) {
+	tests := []struct {
+		name                 string
+		resourceProxySvcName string
+		namespace            string
+		port                 int32
+		agentName            string
+		expectedURL          string
+		expectedError        bool
+	}{
+		{
+			name:                 "well-known service name with standard port",
+			resourceProxySvcName: "openshift-gitops-agent-principal-resource-proxy",
+			namespace:            "openshift-gitops",
+			port:                 9090,
+			agentName:            "clc-aws-1779190584137",
+			expectedURL:          "https://openshift-gitops-agent-principal-resource-proxy.openshift-gitops.svc:9090?agentName=clc-aws-1779190584137",
+			expectedError:        false,
+		},
+		{
+			name:                 "fallback default name and port",
+			resourceProxySvcName: defaultResourceProxyServiceName,
+			namespace:            "argocd",
+			port:                 9090,
+			agentName:            "cluster1",
+			expectedURL:          "https://openshift-gitops-agent-principal-resource-proxy.argocd.svc:9090?agentName=cluster1",
+			expectedError:        false,
+		},
+		{
+			name:                 "custom port read from service spec",
+			resourceProxySvcName: "openshift-gitops-agent-principal-resource-proxy",
+			namespace:            "openshift-gitops",
+			port:                 8443,
+			agentName:            "cluster2",
+			expectedURL:          "https://openshift-gitops-agent-principal-resource-proxy.openshift-gitops.svc:8443?agentName=cluster2",
+			expectedError:        false,
+		},
+		{
+			name:                 "invalid agent name",
+			resourceProxySvcName: "openshift-gitops-agent-principal-resource-proxy",
+			namespace:            "openshift-gitops",
+			port:                 9090,
+			agentName:            "INVALID_NAME!",
+			expectedError:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, err := constructResourceProxyURL(tt.resourceProxySvcName, tt.namespace, tt.port, tt.agentName)
 			if tt.expectedError {
 				assert.Error(t, err)
 			} else {

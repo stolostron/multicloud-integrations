@@ -347,8 +347,9 @@ func deleteOLMResources(ctx context.Context, c client.Client) error {
 	// Step 4: Clean up any remaining openshift-gitops-operator CSVs that were not
 	// referenced by status.installedCSV (e.g. replacement CSVs from an OLM upgrade
 	// cycle that are stuck in Pending after the installed CSV was deleted).
+	subName := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
 	for _, ns := range subscriptionNamespaces {
-		if err := deleteRemainingGitOpsCSVs(ctx, c, ns); err != nil {
+		if err := deleteRemainingGitOpsCSVs(ctx, c, ns, subName); err != nil {
 			klog.Warningf("Error cleaning remaining CSVs in %s: %v", ns, err)
 			errs = append(errs, fmt.Errorf("failed to clean remaining CSVs in %s: %w", ns, err))
 		}
@@ -476,8 +477,18 @@ func patchCRDConversionToNone(ctx context.Context, c client.Client, crd *unstruc
 // deleteRemainingGitOpsCSVs deletes any ClusterServiceVersion whose name starts
 // with "openshift-gitops-operator." in the given namespace. This catches CSVs
 // that were created by OLM's upgrade mechanism (status "Replacing") and are not
-// referenced by the subscription's status.installedCSV field.
-func deleteRemainingGitOpsCSVs(ctx context.Context, c client.Client, namespace string) error {
+// deleteRemainingGitOpsCSVs sweeps namespace for CSVs whose name starts with
+// "<subName>." (e.g. "openshift-gitops-operator.v1.20.0") that are not referenced
+// by any surviving OLM Subscription. This covers the "Replacing" CSV left behind
+// during an in-progress OLM upgrade where status.installedCSV pointed only to the
+// newer version.
+//
+// OLM provenance labels (operators.coreos.com/<pkg>.<ns>) are intentionally NOT
+// used as the ownership check: the identical label is also present on CSVs installed
+// via OperatorHub in the same namespace, making it an unreliable discriminator.
+// Checking for surviving subscription references is the reliable guard: a CSV still
+// claimed by any subscription must not be deleted.
+func deleteRemainingGitOpsCSVs(ctx context.Context, c client.Client, namespace, subName string) error {
 	csvList := &unstructured.UnstructuredList{}
 	csvList.SetAPIVersion("operators.coreos.com/v1alpha1")
 	csvList.SetKind("ClusterServiceVersionList")
@@ -492,14 +503,55 @@ func deleteRemainingGitOpsCSVs(ctx context.Context, c client.Client, namespace s
 	for i := range csvList.Items {
 		csv := &csvList.Items[i]
 		name := csv.GetName()
-		if len(name) > 0 && strings.HasPrefix(name, "openshift-gitops-operator.") {
-			klog.Infof("Deleting remaining gitops-operator CSV: %s/%s", namespace, name)
-			if err := c.Delete(ctx, csv); err != nil && !apierrors.IsNotFound(err) {
-				klog.Warningf("Failed to delete remaining CSV %s/%s: %v", namespace, name, err)
-			}
+		if len(name) == 0 || !strings.HasPrefix(name, subName+".") {
+			continue
+		}
+		// Only delete CSVs not claimed by any surviving subscription.
+		// A CSV still referenced by a subscription (ours or the user's) must not be touched.
+		referenced, err := isCsvReferencedByAnySubscription(ctx, c, namespace, name)
+		if err != nil {
+			klog.Warningf("Migration sweep: could not check subscriptions for CSV %s/%s, skipping: %v", namespace, name, err)
+			continue
+		}
+		if referenced {
+			klog.Infof("Migration sweep: CSV %s/%s is still referenced by a subscription, skipping", namespace, name)
+			continue
+		}
+		klog.Infof("Deleting remaining gitops-operator CSV: %s/%s", namespace, name)
+		if err := c.Delete(ctx, csv); err != nil && !apierrors.IsNotFound(err) {
+			klog.Warningf("Failed to delete remaining CSV %s/%s: %v", namespace, name, err)
 		}
 	}
 	return nil
+}
+
+// isCsvReferencedByAnySubscription returns true if any surviving OLM Subscription in
+// csvNamespace lists csvName as its status.installedCSV or status.currentCSV.
+// Scoping to the same namespace is correct by OLM invariant: a Subscription's
+// status.installedCSV always points to a CSV in the same namespace, never across
+// namespaces. This avoids a cluster-wide list and is safe to use as a deletion guard.
+func isCsvReferencedByAnySubscription(ctx context.Context, c client.Client, csvNamespace, csvName string) (bool, error) {
+	subList := &unstructured.UnstructuredList{}
+	subList.SetAPIVersion("operators.coreos.com/v1alpha1")
+	subList.SetKind("SubscriptionList")
+	if err := c.List(ctx, subList, client.InNamespace(csvNamespace)); err != nil {
+		if apierrors.IsNotFound(err) || isNoKindMatchError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for i := range subList.Items {
+		sub := &subList.Items[i]
+		if sub.GetDeletionTimestamp() != nil {
+			continue
+		}
+		installedCSV, _, _ := unstructured.NestedString(sub.Object, "status", "installedCSV")
+		currentCSV, _, _ := unstructured.NestedString(sub.Object, "status", "currentCSV")
+		if installedCSV == csvName || currentCSV == csvName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // getInstalledCSVsFromLabeledSubscriptions reads status.installedCSV from gitopsaddon-labeled

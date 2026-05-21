@@ -31,11 +31,17 @@ import (
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
-// PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters via ManifestWork
-// This function reads the argocd-agent-ca secret from the hub and creates/updates ManifestWorks
-// to deploy this secret to all managed clusters including local-cluster.
-// For local-cluster, the CA secret is placed in the cluster's own namespace (where the ArgoCD CR lives).
-// The ManifestWorks are never deleted - they persist even if the secret changes or is removed.
+// PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters.
+//
+// For local-cluster: the hub controller has direct API access, so it writes the CA secret
+// directly into the local-cluster namespace without going through a ManifestWork. ManifestWork
+// is processed asynchronously by the work-agent, which can race with agent pod startup — the
+// agent pod may attempt its first TLS connection before the CA lands, entering a long retry loop
+// that outlasts the e2e test timeout. Direct write eliminates this race.
+//
+// For remote clusters: the hub has no direct API access, so it creates/updates ManifestWorks
+// in the managed cluster namespaces; the work-agent applies them to the spoke.
+// ManifestWorks are never deleted — they persist even if the CA secret is rotated.
 func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedClusters []*spokeclusterv1.ManagedCluster) error {
 	// Hub namespace - where we read the CA cert from (use the effective ArgoCD namespace)
@@ -48,12 +54,22 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 	}
 
 	for _, managedCluster := range managedClusters {
-		// Determine the target namespace for the CA secret on managed cluster
-		// For local-cluster (hub), the ArgoCD CR is in the cluster's own namespace
-		// For remote clusters, the ArgoCD CR is in openshift-gitops
+		// Determine the target namespace for the CA secret on the managed cluster.
+		// For local-cluster (hub): the ArgoCD CR lives in the cluster's own namespace.
+		// For remote clusters: the ArgoCD CR lives in openshift-gitops.
 		managedNamespace := utils.GitOpsNamespace
 		if IsLocalCluster(managedCluster) {
 			managedNamespace = managedCluster.Name
+		}
+
+		if IsLocalCluster(managedCluster) {
+			// Direct write for local-cluster: hub controller has direct API access,
+			// no ManifestWork round-trip needed.
+			if err := r.applyCASecretDirectly(managedNamespace, caCert); err != nil {
+				klog.Errorf("failed to apply argocd-agent-ca directly to namespace %s: %v", managedNamespace, err)
+				return err
+			}
+			continue
 		}
 
 		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, managedNamespace, caCert)
@@ -119,6 +135,48 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 		}
 	}
 
+	return nil
+}
+
+// applyCASecretDirectly creates or updates the argocd-agent-ca secret directly in the given
+// namespace using the hub controller's client. Used for local-cluster where the hub has direct
+// API access, avoiding the async ManifestWork / work-agent path and the associated race condition
+// where the agent pod may start before the CA lands.
+func (r *ReconcileGitOpsCluster) applyCASecretDirectly(namespace, caCert string) error {
+	secret := &v1.Secret{}
+	err := r.Get(context.TODO(), types.NamespacedName{Name: "argocd-agent-ca", Namespace: namespace}, secret)
+	if err != nil {
+		if !k8errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get argocd-agent-ca in namespace %s: %w", namespace, err)
+		}
+		// Create the secret
+		newSecret := &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "argocd-agent-ca",
+				Namespace: namespace,
+			},
+			Type: v1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"ca.crt": []byte(caCert),
+			},
+		}
+		if err := r.Create(context.TODO(), newSecret); err != nil {
+			return fmt.Errorf("failed to create argocd-agent-ca in namespace %s: %w", namespace, err)
+		}
+		klog.Infof("created argocd-agent-ca directly in namespace %s", namespace)
+		return nil
+	}
+
+	// Update only if data changed
+	if string(secret.Data["ca.crt"]) == caCert {
+		klog.V(2).Infof("argocd-agent-ca in namespace %s is already up to date", namespace)
+		return nil
+	}
+	secret.Data = map[string][]byte{"ca.crt": []byte(caCert)}
+	if err := r.Update(context.TODO(), secret); err != nil {
+		return fmt.Errorf("failed to update argocd-agent-ca in namespace %s: %w", namespace, err)
+	}
+	klog.Infof("updated argocd-agent-ca directly in namespace %s", namespace)
 	return nil
 }
 

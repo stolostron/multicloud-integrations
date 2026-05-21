@@ -113,7 +113,7 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 		},
 		{
-			name: "local-cluster by name gets ManifestWork with own namespace as target",
+			name: "local-cluster by name gets CA secret written directly (not via ManifestWork)",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -139,15 +139,23 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 			existingObjects: []client.Object{caSecret},
 			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// local-cluster should have ManifestWork with target namespace = "local-cluster"
+				// local-cluster: CA written directly, no ManifestWork created
 				mw := &workv1.ManifestWork{}
 				err := c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "local-cluster",
 				}, mw)
-				assert.NoError(t, err, "ManifestWork should be created for local-cluster")
+				assert.True(t, err != nil, "ManifestWork should NOT be created for local-cluster (direct write used instead)")
 
-				// remote-cluster should also have ManifestWork
+				secret := &v1.Secret{}
+				err = c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca",
+					Namespace: "local-cluster",
+				}, secret)
+				assert.NoError(t, err, "argocd-agent-ca should be written directly into local-cluster namespace")
+				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
+
+				// remote-cluster: still uses ManifestWork
 				err = c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "remote-cluster",
@@ -156,7 +164,7 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 		},
 		{
-			name: "cluster with local-cluster label gets ManifestWork with own namespace as target",
+			name: "cluster with local-cluster label gets CA secret written directly (not via ManifestWork)",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -185,20 +193,81 @@ func TestPropagateHubCA(t *testing.T) {
 			},
 			existingObjects: []client.Object{caSecret},
 			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
-				// cluster with local-cluster=true label should have ManifestWork
+				// cluster with local-cluster=true label: CA written directly, no ManifestWork
 				mw := &workv1.ManifestWork{}
 				err := c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "cluster-with-label",
 				}, mw)
-				assert.NoError(t, err, "ManifestWork should be created for cluster with local-cluster=true label")
+				assert.True(t, err != nil, "ManifestWork should NOT be created for local cluster (direct write used instead)")
 
-				// normal cluster should also have ManifestWork
+				secret := &v1.Secret{}
+				err = c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca",
+					Namespace: "cluster-with-label",
+				}, secret)
+				assert.NoError(t, err, "argocd-agent-ca should be written directly into cluster-with-label namespace")
+				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"])
+
+				// normal cluster: still uses ManifestWork
 				err = c.Get(context.TODO(), types.NamespacedName{
 					Name:      "argocd-agent-ca-mw",
 					Namespace: "normal-cluster",
 				}, mw)
 				assert.NoError(t, err, "ManifestWork should be created for normal cluster")
+			},
+		},
+		{
+			name: "update existing direct CA secret for local-cluster when certificate changes",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: utils.GitOpsNamespace,
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "local-cluster",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				caSecret,
+				// Pre-existing CA secret in local-cluster namespace with stale data
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "argocd-agent-ca",
+						Namespace: "local-cluster",
+					},
+					Type: v1.SecretTypeOpaque,
+					Data: map[string][]byte{
+						"ca.crt": []byte("old-ca-certificate"),
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
+				// Secret should be updated with the new CA data
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca",
+					Namespace: "local-cluster",
+				}, secret)
+				assert.NoError(t, err)
+				assert.Equal(t, []byte("test-ca-certificate"), secret.Data["ca.crt"],
+					"CA secret should be updated with new certificate data")
+				// No ManifestWork should exist
+				mw := &workv1.ManifestWork{}
+				err = c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca-mw",
+					Namespace: "local-cluster",
+				}, mw)
+				assert.True(t, err != nil, "ManifestWork should NOT be created for local-cluster")
 			},
 		},
 		{
