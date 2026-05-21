@@ -173,6 +173,59 @@ if ! ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait --for=condition=Re
 fi
 echo "ArgoCD server is Ready"
 
+# ------- Step 3b: Wait for principal pod and create resource proxy service -------
+#
+# The argocd-agent principal binary runs TWO servers on separate ports:
+#   • Port 443 / NodePort  — gRPC server for agent connections (exposed by the operator)
+#   • Port 9090            — resource proxy (fake K8s API for ArgoCD app-controller)
+#
+# The Red Hat OpenShift GitOps operator automatically creates a ClusterIP Service
+# named "openshift-gitops-agent-principal-resource-proxy" on port 9090.  The upstream
+# argoprojlabs/argocd-operator only creates the NodePort gRPC service, leaving port 9090
+# unreachable via a Service.  Without this Service the hub controller's
+# FindArgoCDAgentResourceProxyService() lookup fails and falls back to a hardcoded service
+# name that doesn't exist, causing the cluster-secret server URL to point at a non-existent
+# endpoint and ArgoCD's app-controller to be unable to dispatch Applications to agents.
+#
+# We replicate the Red Hat operator behaviour here by creating the service explicitly once
+# the principal pod is running.  This is the same service that the controller queries when
+# building the cluster-secret server URL used by the ArgoCD app-controller.
+echo ">> Waiting for ArgoCD agent principal pod"
+for i in $(seq 1 36); do
+  POD_COUNT=$(${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops \
+    -l app.kubernetes.io/name=openshift-gitops-agent-principal --no-headers 2>/dev/null | wc -l)
+  if [ "$POD_COUNT" -gt 0 ]; then
+    echo "  Principal pod found, waiting for Ready..."
+    break
+  fi
+  echo "  Waiting for principal pod to appear... ($i/36)"
+  sleep 10
+done
+${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait \
+  --for=condition=Ready pod \
+  -l app.kubernetes.io/name=openshift-gitops-agent-principal \
+  --timeout=120s || echo "WARN: principal pod did not become Ready within 120s — will continue anyway"
+
+echo ">> Creating resource proxy service for argocd-agent principal"
+cat <<'RESOURCE_PROXY_EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshift-gitops-agent-principal-resource-proxy
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: argocd-agent
+    app.kubernetes.io/name: openshift-gitops-agent-principal-resource-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: openshift-gitops-agent-principal
+  ports:
+  - name: resource-proxy
+    port: 9090
+    targetPort: 9090
+RESOURCE_PROXY_EOF
+echo "Resource proxy service created"
+
 # Apply ArgoCD CRDs on spoke (needed for ArgoCD operator to work)
 ${KUBECTL} --context ${SPOKE_CTX} apply --server-side --force-conflicts -f "${REPO_DIR}/test/e2e/fixtures/argocd-operator-crds.yaml"
 if [ -f "${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml" ]; then

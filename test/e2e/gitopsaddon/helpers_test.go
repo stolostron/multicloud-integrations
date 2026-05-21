@@ -555,7 +555,20 @@ func verifyPrincipalServerAddress(timeout time.Duration) string {
 }
 
 func verifyClusterSecret(timeout time.Duration) {
-	By("verifying cluster secret exists on hub with valid agent server URL")
+	// The resource proxy service is created by setup_env.sh to mirror the Red Hat
+	// OpenShift GitOps operator behaviour.  Verify it exists before checking the
+	// cluster secret URL so that any setup failure is surfaced here rather than
+	// causing a confusing "sync=Unknown" failure later in deployGuestbookAgentMode.
+	By("verifying resource proxy service exists in hub ArgoCD namespace")
+	Eventually(func(g Gomega) {
+		_, err := kubectlCtx(hubContext, "get", "service",
+			"openshift-gitops-agent-principal-resource-proxy",
+			"-n", argoCDNamespace)
+		g.Expect(err).NotTo(HaveOccurred(),
+			"resource proxy service should exist (created by setup_env.sh)")
+	}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+	By("verifying cluster secret exists on hub with resource proxy server URL")
 	Eventually(func(g Gomega) {
 		out, err := kubectlCtx(hubContext, "get", "secret",
 			fmt.Sprintf("cluster-%s", spokeName),
@@ -569,6 +582,10 @@ func verifyClusterSecret(timeout time.Duration) {
 		serverURL := string(decoded)
 		g.Expect(serverURL).To(HavePrefix("https://"), "server URL should use https")
 		g.Expect(serverURL).To(ContainSubstring("agentName="), "server URL should contain agentName parameter")
+		// With the resource proxy service present, the hub controller should choose
+		// the in-cluster resource-proxy URL over the external NodePort fallback.
+		g.Expect(serverURL).To(ContainSubstring("resource-proxy"),
+			"server URL should use the resource proxy service (not NodePort fallback)")
 	}, timeout, 5*time.Second).Should(Succeed())
 }
 

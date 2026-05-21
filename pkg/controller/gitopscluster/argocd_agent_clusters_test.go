@@ -126,7 +126,9 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
-			name: "override existing traditional cluster secret",
+			// When the resource proxy service exists the controller prefers it over the external
+			// NodePort address. Verify that the cluster secret server URL uses the proxy path.
+			name: "override existing traditional cluster secret uses resource proxy when available",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -154,6 +156,18 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			orphanSecretsList: map[types.NamespacedName]string{},
 			existingObjects: []client.Object{
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// Resource proxy service present → controller should prefer proxy URL.
+				&v1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      defaultResourceProxyServiceName,
+						Namespace: "argocd",
+					},
+					Spec: v1.ServiceSpec{
+						Ports: []v1.ServicePort{
+							{Name: "resource-proxy", Port: 9090},
+						},
+					},
+				},
 				&v1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "cluster-cluster1",
@@ -179,7 +193,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
 				assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
 
-				// Verify it's a resource proxy URL now
+				// Verify the resource proxy URL is used when the service is available
 				serverURL := string(secret.Data["server"])
 				assert.Contains(t, serverURL, "agentName=cluster1")
 				assert.Contains(t, serverURL, "resource-proxy")
@@ -187,8 +201,90 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
-			// Server address is no longer needed for the cluster secret URL (uses resource proxy).
-			// The function fails here because the CA secret is missing, not due to server config.
+			// When the resource proxy service is absent the controller falls back to the external
+			// NodePort / LoadBalancer address discovered by the reconciler. This ensures the
+			// embedded e2e environment (upstream argocd-operator, no resource proxy sidecar) works.
+			name: "falls back to NodePort URL when no resource proxy service exists",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// No resource proxy service → falls back to NodePort URL
+			},
+			expectedError:        false,
+			expectedSecretsCount: 1,
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
+				assert.NoError(t, err)
+				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+
+				// Without a resource proxy service the URL should use the NodePort address
+				serverURL := string(secret.Data["server"])
+				assert.Contains(t, serverURL, "agentName=cluster1")
+				assert.Contains(t, serverURL, "test-server.example.com")
+				assert.NotContains(t, serverURL, "resource-proxy")
+			},
+		},
+		{
+			// When neither resource proxy nor external server address is configured the function
+			// must return an error rather than silently creating an invalid cluster secret.
+			name: "fails when no resource proxy and no server address configured",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							// No server address/port → fallback will fail
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+				// No resource proxy service AND no server address → must error
+			},
+			expectedError:        true,
+			expectedSecretsCount: 0,
+		},
+		{
 			name: "missing CA certificate should fail",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{

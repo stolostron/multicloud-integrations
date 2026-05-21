@@ -139,18 +139,39 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 		return fmt.Errorf("ArgoCDnamespace must not be empty")
 	}
 
-	// Discover the resource proxy service so the cluster secret server URL points to it.
-	// The hub ArgoCD UI (live manifest, resource tree) routes requests through the proxy:
+	// Determine the server URL strategy for cluster secrets.
+	//
+	// Preferred (Red Hat operator): use the in-cluster resource proxy service so the hub
+	// ArgoCD UI can forward live-manifest / resource-tree requests to the managed agent:
 	//   https://<resource-proxy-svc>.<ns>.svc:<port>?agentName=<cluster>
-	// The service name and port are read from the live service object rather than hardcoded.
-	resourceProxySvcName := defaultResourceProxyServiceName // well-known fallback
-	var resourceProxyPort int32 = 9090                      // standard fallback port
+	//
+	// Fallback (upstream / embedded argocd-operator): the resource proxy sidecar is not
+	// created by the upstream operator. In that case fall back to the external principal
+	// NodePort / LoadBalancer address that was already discovered during reconciliation:
+	//   https://<node-ip>:<nodeport>?agentName=<cluster>
+	// This keeps backward compatibility with the embedded e2e test environment.
+	var (
+		useResourceProxy     bool
+		resourceProxySvcName string
+		resourceProxyPort    int32
+		fallbackServerAddr   string
+		fallbackServerPort   string
+	)
+
 	if svc, port, svcErr := r.FindArgoCDAgentResourceProxyService(context.TODO(), argoNamespace); svcErr == nil {
 		resourceProxySvcName = svc.Name
 		resourceProxyPort = port
+		useResourceProxy = true
+		klog.Infof("Using resource proxy service %s (port %d) for cluster secret server URLs in namespace %s",
+			resourceProxySvcName, resourceProxyPort, argoNamespace)
 	} else {
-		klog.Infof("Resource proxy service not found in namespace %s, falling back to defaults (%s:%d): %v",
-			argoNamespace, resourceProxySvcName, resourceProxyPort, svcErr)
+		klog.Infof("Resource proxy service not found in namespace %s, falling back to external principal address for cluster secrets: %v",
+			argoNamespace, svcErr)
+		var addrErr error
+		fallbackServerAddr, fallbackServerPort, addrErr = r.getArgoCDAgentServerConfig(gitOpsCluster)
+		if addrErr != nil {
+			return fmt.Errorf("resource proxy unavailable and external server address not configured: %w", addrErr)
+		}
 	}
 
 	// Load the principal CA certificate for signing client certificates
@@ -226,10 +247,15 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			continue
 		}
 
-		// Construct resource proxy URL for this cluster
-		serverURL, err := constructResourceProxyURL(resourceProxySvcName, argoNamespace, resourceProxyPort, clusterName)
+		// Construct the cluster secret server URL using whichever strategy is available.
+		var serverURL string
+		if useResourceProxy {
+			serverURL, err = constructResourceProxyURL(resourceProxySvcName, argoNamespace, resourceProxyPort, clusterName)
+		} else {
+			serverURL, err = constructServerURL(fallbackServerAddr, fallbackServerPort, clusterName)
+		}
 		if err != nil {
-			klog.Errorf("Failed to construct resource proxy URL for cluster %s: %v", clusterName, err)
+			klog.Errorf("Failed to construct server URL for cluster %s: %v", clusterName, err)
 			continue
 		}
 
