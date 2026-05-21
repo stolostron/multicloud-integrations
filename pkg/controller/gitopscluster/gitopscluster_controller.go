@@ -750,6 +750,34 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			return 3, err
 		}
 
+		// Also ensure principal TLS certificate (needed for principal to start)
+		err = r.EnsureArgoCDAgentPrincipalTLSCert(context.TODO(), instance)
+		if err != nil {
+			klog.Errorf("failed to ensure ArgoCD agent principal TLS certificate: %v", err)
+
+			msg := fmt.Sprintf("Failed to generate principal TLS certificate: %v", err)
+			if len(msg) > maxStatusMsgLen {
+				msg = msg[:maxStatusMsgLen]
+			}
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				klog.Errorf("failed to update GitOpsCluster %s status after principal TLS failure: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, err
+		}
+
 		// Also ensure resource proxy TLS certificate (needed for principal to start)
 		err = r.EnsureArgoCDAgentResourceProxyTLSCert(context.TODO(), instance)
 		if err != nil {
@@ -1257,70 +1285,9 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	// 6. Ensure additional ArgoCD agent certificates if argoCDAgent is enabled
-	if argoCDAgentEnabled {
-		// CA certificate was already ensured above before cluster creation
-		// Now ensure Principal TLS certificate
-		err = r.EnsureArgoCDAgentPrincipalTLSCert(context.TODO(), instance)
-		if err != nil {
-			klog.Errorf("failed to ensure ArgoCD agent principal TLS certificate: %v", err)
-
-			msg := fmt.Sprintf("Failed to generate or rotate the TLS certificate for ArgoCD agent principal service: %v", err)
-			if len(msg) > maxStatusMsgLen {
-				msg = msg[:maxStatusMsgLen]
-			}
-
-			r.updateGitOpsClusterConditions(instance, "failed", msg,
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
-						Message: msg,
-					},
-				})
-
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
-			}
-
-			return 3, err
-		}
-
-		// 6c. Ensure Resource Proxy TLS certificate
-		err = r.EnsureArgoCDAgentResourceProxyTLSCert(context.TODO(), instance)
-		if err != nil {
-			klog.Errorf("failed to ensure ArgoCD agent resource proxy TLS certificate: %v", err)
-
-			msg := err.Error()
-			if len(msg) > maxStatusMsgLen {
-				msg = msg[:maxStatusMsgLen]
-			}
-
-			r.updateGitOpsClusterConditions(instance, "failed", msg,
-				map[string]ConditionUpdate{
-					gitopsclusterV1beta1.GitOpsClusterCertificatesReady: {
-						Status:  metav1.ConditionFalse,
-						Reason:  gitopsclusterV1beta1.ReasonCertificateSigningFailed,
-						Message: msg,
-					},
-				})
-
-			err2 := r.Client.Status().Update(context.TODO(), instance)
-
-			if err2 != nil {
-				klog.Errorf("failed to update GitOpsCluster %s status, will try again in 3 minutes: %s", instance.Namespace+"/"+instance.Name, err2)
-				return 3, err2
-			}
-
-			return 3, err
-		}
-
-		// Note: Hub ArgoCD CR must be configured by the user to use the generated TLS certificates
-		// The controller generates certificates but does NOT modify the hub ArgoCD CR
-		// See README.md for hub ArgoCD CR configuration examples
-	}
+	// Note: ArgoCD agent TLS certificates (CA, principal, resource proxy) were already ensured
+	// early in the reconcile loop (step 3b) so they are available before server discovery
+	// or any other step that may cause an early return.
 
 	managedClustersStr := strings.Join(managedClusterNames, " ")
 	if len(managedClustersStr) > 4096 {
