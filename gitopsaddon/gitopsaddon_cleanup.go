@@ -141,23 +141,22 @@ func uninstallOnHub(ctx context.Context, c client.Client) error {
 		klog.Warningf("Failed to delete pause marker (continuing): %v", err)
 	}
 
-	klog.Info("Final Step: Deleting gitops-addon ClusterRole and ClusterRoleBinding")
-	addonCR := &unstructured.Unstructured{}
-	addonCR.SetAPIVersion("rbac.authorization.k8s.io/v1")
-	addonCR.SetKind("ClusterRole")
-	addonCR.SetName(AddonDeploymentName)
-	if delErr := c.Delete(ctx, addonCR); delErr != nil && !apierrors.IsNotFound(delErr) {
-		klog.Warningf("Failed to delete gitops-addon ClusterRole: %v", delErr)
-		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRole: %w", delErr))
-	}
-
-	addonCRB := &unstructured.Unstructured{}
-	addonCRB.SetAPIVersion("rbac.authorization.k8s.io/v1")
-	addonCRB.SetKind("ClusterRoleBinding")
-	addonCRB.SetName(AddonDeploymentName)
-	if delErr := c.Delete(ctx, addonCRB); delErr != nil && !apierrors.IsNotFound(delErr) {
-		klog.Warningf("Failed to delete gitops-addon ClusterRoleBinding: %v", delErr)
-		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRoleBinding: %w", delErr))
+	klog.Info("Final Step: Deleting gitops-addon RBAC (self-referencing, best-effort)")
+	for _, name := range []string{AddonDeploymentName, AddonDeploymentName + "-cleanup"} {
+		crb := &unstructured.Unstructured{}
+		crb.SetAPIVersion("rbac.authorization.k8s.io/v1")
+		crb.SetKind("ClusterRoleBinding")
+		crb.SetName(name)
+		if delErr := c.Delete(ctx, crb); delErr != nil && !apierrors.IsNotFound(delErr) {
+			klog.Warningf("Best-effort: failed to delete %s ClusterRoleBinding: %v", name, delErr)
+		}
+		cr := &unstructured.Unstructured{}
+		cr.SetAPIVersion("rbac.authorization.k8s.io/v1")
+		cr.SetKind("ClusterRole")
+		cr.SetName(name)
+		if delErr := c.Delete(ctx, cr); delErr != nil && !apierrors.IsNotFound(delErr) {
+			klog.Warningf("Best-effort: failed to delete %s ClusterRole: %v", name, delErr)
+		}
 	}
 
 	if len(errors) > 0 {
@@ -229,23 +228,25 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 		klog.Warningf("Failed to check/delete orphaned pause marker: %v", err)
 	}
 
-	klog.Info("Final Step: Deleting gitops-addon ClusterRole and ClusterRoleBinding (self-referencing RBAC)")
-	addonCR := &unstructured.Unstructured{}
-	addonCR.SetAPIVersion("rbac.authorization.k8s.io/v1")
-	addonCR.SetKind("ClusterRole")
-	addonCR.SetName(AddonDeploymentName)
-	if delErr := c.Delete(ctx, addonCR); delErr != nil && !apierrors.IsNotFound(delErr) {
-		klog.Warningf("Failed to delete gitops-addon ClusterRole: %v", delErr)
-		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRole: %w", delErr))
-	}
-
-	addonCRB := &unstructured.Unstructured{}
-	addonCRB.SetAPIVersion("rbac.authorization.k8s.io/v1")
-	addonCRB.SetKind("ClusterRoleBinding")
-	addonCRB.SetName(AddonDeploymentName)
-	if delErr := c.Delete(ctx, addonCRB); delErr != nil && !apierrors.IsNotFound(delErr) {
-		klog.Warningf("Failed to delete gitops-addon ClusterRoleBinding: %v", delErr)
-		errors = append(errors, fmt.Errorf("failed to delete gitops-addon ClusterRoleBinding: %w", delErr))
+	klog.Info("Final Step: Deleting gitops-addon RBAC (self-referencing, best-effort)")
+	// The gitops-addon-cleanup ClusterRole/CRB (deployed by the pre-delete ManifestWork)
+	// ensures we retain permissions even after the gitops-addon CR/CRB (deployed by the
+	// regular ManifestWork) are already gone. Delete the main RBAC first, then cleanup RBAC.
+	for _, name := range []string{AddonDeploymentName, AddonDeploymentName + "-cleanup"} {
+		crb := &unstructured.Unstructured{}
+		crb.SetAPIVersion("rbac.authorization.k8s.io/v1")
+		crb.SetKind("ClusterRoleBinding")
+		crb.SetName(name)
+		if delErr := c.Delete(ctx, crb); delErr != nil && !apierrors.IsNotFound(delErr) {
+			klog.Warningf("Best-effort: failed to delete %s ClusterRoleBinding: %v", name, delErr)
+		}
+		cr := &unstructured.Unstructured{}
+		cr.SetAPIVersion("rbac.authorization.k8s.io/v1")
+		cr.SetKind("ClusterRole")
+		cr.SetName(name)
+		if delErr := c.Delete(ctx, cr); delErr != nil && !apierrors.IsNotFound(delErr) {
+			klog.Warningf("Best-effort: failed to delete %s ClusterRole: %v", name, delErr)
+		}
 	}
 
 	if len(errors) > 0 {
@@ -695,12 +696,31 @@ func deleteOperatorResources(ctx context.Context, c client.Client, gitopsOperato
 		{"ClusterRoleBinding", "rbac.authorization.k8s.io/v1"},
 	}
 
-	// Try with label first, then fallback to namespace-based deletion
+	// Delete labeled resources (both namespaced and cluster-scoped)
 	err := deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, clusterResourceTypes, gitopsOperatorNS, 4*time.Minute, true)
 	if err != nil {
-		klog.Warningf("Label-based deletion failed or incomplete, trying namespace-based deletion: %v", err)
-		// Fallback: delete all resources in namespace (without label filter)
-		err = deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, clusterResourceTypes, gitopsOperatorNS, 2*time.Minute, false)
+		clusterScopeErr := err
+		klog.Warningf("Label-based deletion failed or incomplete, trying namespace-based fallback for namespaced resources only: %v", err)
+		// Fallback: delete ALL resources in the operator namespace without requiring the
+		// gitopsaddon label. This handles resources whose labels were stripped or never set.
+		//
+		// CRITICAL: The fallback MUST NOT include cluster-scoped resources (ClusterRole,
+		// ClusterRoleBinding). Without a label filter, listing cluster-scoped resources
+		// returns EVERY ClusterRole/ClusterRoleBinding in the cluster, and deleting them
+		// destroys system RBAC (cluster-admin, system:node, etc.), making the cluster
+		// permanently inaccessible. Cluster-scoped resources are only deleted in the
+		// label-based pass above.
+		err = deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, nil, gitopsOperatorNS, 2*time.Minute, false)
+
+		// Re-check cluster-scoped resources. The namespaced fallback cannot clean these,
+		// so if any labeled ClusterRole/ClusterRoleBinding still exist, surface the error.
+		clusterCheckErr := deleteResourcesWithRetry(ctx, c, nil, clusterResourceTypes, gitopsOperatorNS, 15*time.Second, true)
+		if clusterCheckErr != nil {
+			klog.Warningf("Cluster-scoped resources still remain after fallback: %v", clusterScopeErr)
+			if err == nil {
+				err = clusterScopeErr
+			}
+		}
 	}
 	return err
 }
@@ -711,6 +731,11 @@ func deleteResourcesWithRetry(ctx context.Context, c client.Client, namespacedTy
 	elapsed := time.Duration(0)
 
 	for elapsed < maxWait {
+		if ctx.Err() != nil {
+			klog.Warningf("Context cancelled during resource deletion retry loop: %v", ctx.Err())
+			break
+		}
+
 		allDeleted := true
 
 		// Delete and check namespaced resources
@@ -793,7 +818,8 @@ func deleteResourcesByType(ctx context.Context, c client.Client, resourceTypes [
 				// operator resource cleanup. These are the addon's own RBAC — deleting them
 				// would remove the cleanup Job's permissions. They are deleted as the very
 				// last step in uninstallGitopsAgentInternal after all other resources are gone.
-				if (rt.kind == "ClusterRoleBinding" || rt.kind == "ClusterRole") && item.GetName() == AddonDeploymentName {
+				if (rt.kind == "ClusterRoleBinding" || rt.kind == "ClusterRole") &&
+					(item.GetName() == AddonDeploymentName || item.GetName() == AddonDeploymentName+"-cleanup") {
 					klog.Infof("Skipping %s %s (self-referencing RBAC, will be deleted last)", rt.kind, item.GetName())
 					continue
 				}

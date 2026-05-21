@@ -8,7 +8,7 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **Placement**: Selects which managed clusters are targeted (including `local-cluster` / hub). Requires a `ManagedClusterSetBinding` for the `default` ManagedClusterSet in the `openshift-gitops` namespace — without it, Placement cannot find any ManagedClusters.
 - **Policy**: The GitOpsCluster controller creates a Policy that deploys the ArgoCD CR to managed clusters. **This Policy is user-owned** — users can modify it to add RBAC, Applications, or customize ArgoCD settings. The controller will recreate the Policy if it is deleted (unless `skip-argocd-policy` annotation is set) and may patch the `argoCDAgent.agent.image` field during agent version drift heal, but will not overwrite other user customizations. For `local-cluster`, the ArgoCD CR is deployed to the `local-cluster` namespace (not `openshift-gitops`) using a hub template.
 - **ManagedClusterAddOn**: Created automatically for ALL managed clusters including `local-cluster`. Manages addon lifecycle.
-- **Addon RBAC**: The `gitops-addon` ServiceAccount uses a fine-grained `ClusterRole` named `gitops-addon` (not `cluster-admin`). Defined in `addonTemplates/addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic, for agent mode). Includes `escalate`/`bind` on RBAC resources (needed because the addon deploys the ArgoCD operator which creates its own Roles/ClusterRoles).
+- **Addon RBAC**: The `gitops-addon` ServiceAccount uses a fine-grained `ClusterRole` named `gitops-addon` (not `cluster-admin`). Defined in `addonTemplates/addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic, for agent mode). Includes `escalate`/`bind` on RBAC resources (needed because the addon deploys the ArgoCD operator which creates its own Roles/ClusterRoles), and `delete` on all resource types that the cleanup Job needs to remove. A separate `gitops-addon-cleanup` ClusterRole/ClusterRoleBinding is annotated with `addon-pre-delete` and included in the pre-delete ManifestWork, ensuring the cleanup Job retains RBAC even after the regular ManifestWork (which deploys the main `gitops-addon` ClusterRole) is deleted during MCA teardown. The `verify_cleanup_rbac_safety` check in `test-scenarios.sh` enforces that the ClusterRole has `delete` for every resource type in `deleteOperatorResources()`.
 - **Cluster Secrets**: For agent mode, the controller creates ArgoCD cluster secrets with proper server URLs including `agentName` query parameter
 - **DISABLE_DEFAULT_ARGOCD_INSTANCE**: On OCP managed clusters, the addon creates an OLM Subscription with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`. On non-OCP clusters, the embedded operator chart is deployed. On the hub (`local-cluster`), the operator is already present so no installation occurs.
 - **OLM Subscription Override**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, the addon agent is **forced** to use OLM subscription mode for operator installation, bypassing OCP auto-detection. This ensures OLM is used even if the cluster detection fails or the cluster is non-OCP (though OLM must be available on the cluster for the installation to succeed). Custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. When absent or disabled, the agent falls back to OCP auto-detection and uses hardcoded defaults (`channel: latest`, `source: redhat-operators`, etc.).
@@ -288,6 +288,7 @@ In agent mode, ArgoCD agents run on managed clusters and connect to a principal 
 - **Created on the hub** in the `openshift-gitops` namespace (or any namespace watched by the principal)
 - The principal uses **destination-based mapping** (`destinationBasedMapping: true` in the principal ArgoCD CR), where it routes Applications to agents based on `destination.name` matching the cluster name
 - When using ApplicationSets with `clusterDecisionResource`, use `destination.name: '{{name}}'` so the OCM cluster name is used for routing
+- **PlacementDecision score workaround**: The OCM Placement controller adds `score:0` (int64) to PlacementDecision status. ArgoCD's DuckType generator panics on non-string values (`interface conversion: interface {} is int64, not string`). Workaround: create a manual PlacementDecision with a **different label** (not matching the actual Placement name) that only has `clusterName` and `reason`, and point the ApplicationSet's `labelSelector` to that label. See `create_manual_placement_decisions()` in `test-scenarios.sh`
 - **Agents receive Applications from the principal via gRPC and create copies in their own namespace** — the agent's own namespace is `openshift-gitops` for remote clusters and `local-cluster` for the hub. This means the `local-cluster` agent stores its Application copies in the `local-cluster` namespace, where the local app controller watches
 - For ApplicationSet sync status on the hub: remote cluster apps show status in `openshift-gitops`, while `local-cluster` agent-created apps show status in the `local-cluster` namespace
 
@@ -669,66 +670,56 @@ KUBECONFIG=/path/to/managed kubectl get applications.argoproj.io -n openshift-gi
 
 ## Cleanup
 
-All cleanup operations are performed from the hub cluster. **The order matters** — see `argocd_policy.go` for the canonical reference.
+### Manual Deletion (Required Order)
 
-### Cleanup Order
-
-The proper cleanup sequence ensures the addon's pre-delete cleanup Job runs successfully on the managed cluster:
+Deleting a `GitOpsCluster` does NOT automatically cascade to other resources. You must explicitly delete resources in the correct order. **GitOpsCluster must be deleted BEFORE MCAs** — if the GitOpsCluster still exists, the controller will re-create deleted MCAs.
 
 ```bash
 export KUBECONFIG=/path/to/hub/kubeconfig
-CLUSTER_NAME="my-managed-cluster"
+NS="openshift-gitops"
 GITOPSCLUSTER_NAME="my-gitops"
-PLACEMENT_NAME="my-placement"
 
-# 1. Delete Placement (prevents GitOpsCluster controller from selecting managed clusters)
-kubectl delete placement $PLACEMENT_NAME -n openshift-gitops --ignore-not-found
+# 1. Delete ApplicationSet (removes ArgoCD apps)
+kubectl delete applicationset my-appset -n $NS --ignore-not-found
 
-# 2. Delete Applications from hub (agent mode only)
-kubectl delete applications.argoproj.io --all -n $CLUSTER_NAME --ignore-not-found
+# 2. Delete GitOpsCluster — stops the controller from re-creating MCAs.
+#    This is a no-op (no finalizer, no automated cleanup). Dynamic AddOnTemplates
+#    and ADCs are NOT owned by GitOpsCluster, so they persist.
+kubectl delete gitopscluster $GITOPSCLUSTER_NAME -n $NS --ignore-not-found
 
-# 3. Delete GitOpsCluster (stops the controller from recreating Policy/addons)
-kubectl delete gitopscluster $GITOPSCLUSTER_NAME -n openshift-gitops --ignore-not-found
+# 3. Delete Policy + PlacementBinding — stops enforcement of ArgoCD CR on managed
+#    clusters. Without this, the Policy re-creates the ArgoCD CR during cleanup.
+kubectl delete placementbinding ${GITOPSCLUSTER_NAME}-argocd-policy-binding -n $NS --ignore-not-found
+kubectl delete policy ${GITOPSCLUSTER_NAME}-argocd-policy -n $NS --ignore-not-found --wait=false
+sleep 5
 
-# 4. Delete Policy and PlacementBinding (stops enforcement on managed cluster)
-#    With GitOpsCluster already deleted, the controller can't recreate these.
-kubectl delete policy ${GITOPSCLUSTER_NAME}-argocd-policy -n openshift-gitops --ignore-not-found
-kubectl delete placementbinding ${GITOPSCLUSTER_NAME}-argocd-policy-binding -n openshift-gitops --ignore-not-found
+# 4. Delete MCAs — triggers pre-delete cleanup Job on each managed cluster.
+#    ADC and AddOnTemplate still exist (orphaned from step 2), so the addon
+#    framework can render the pre-delete ManifestWork.
+kubectl delete managedclusteraddon gitops-addon -n cluster1 --ignore-not-found
+kubectl delete managedclusteraddon gitops-addon -n cluster2 --ignore-not-found
 
-# 5. Wait for policy removal to propagate to managed cluster
-sleep 10
+# 5. Wait for MCAs to fully delete (cleanup Jobs complete, 2-5 minutes)
+kubectl get managedclusteraddon -A | grep gitops-addon   # repeat until empty
 
-# 6. Delete ManagedClusterAddOn (triggers pre-delete cleanup Job on managed cluster)
-#    The addon has a pre-delete Job that runs "gitopsaddon -cleanup" which removes:
-#      - ArgoCD CRs created by the addon
-#      - GitOpsService CR (OLM mode)
-#      - OLM Subscription/CSV
-#      - Operator resources
-#    The OCM addon framework removes its finalizer only after the Job completes.
-#    DO NOT force-remove finalizers — let the cleanup Job finish naturally.
-kubectl delete managedclusteraddon gitops-addon -n $CLUSTER_NAME
+# 6. Delete remaining hub resources (MCAs are gone, safe to remove)
+kubectl delete placement my-placement -n $NS --ignore-not-found
 
-# 7. Re-delete Policy (race fix: controller may have recreated it during finalizer processing)
-kubectl delete policy ${GITOPSCLUSTER_NAME}-argocd-policy -n openshift-gitops --ignore-not-found
-kubectl delete placementbinding ${GITOPSCLUSTER_NAME}-argocd-policy-binding -n openshift-gitops --ignore-not-found
+# 7. Clean orphaned ADCs and PlacementDecisions (optional)
+kubectl delete addondeploymentconfig gitops-addon-config -n cluster1 --ignore-not-found
+kubectl delete addondeploymentconfig gitops-addon-config -n cluster2 --ignore-not-found
 ```
 
-### Why This Order?
-
-| Step | Why |
-|------|-----|
-| Placement first | Without Placement, GitOpsCluster controller can't find managed clusters to re-create addon |
-| GitOpsCluster before Policy | Stops the controller from recreating Policy/addons during cleanup |
-| Policy before addon | Stops Policy enforcement so the cleanup Job can delete ArgoCD CR without conflict |
-| Addon with wait | The pre-delete Job needs time to clean up managed cluster resources; finalizer is removed automatically |
-| Re-delete Policy | Race fix: GitOpsCluster controller may recreate Policy during its finalizer processing |
+**Why this order matters**: GitOpsCluster must be deleted BEFORE MCAs — if the GitOpsCluster still exists, the controller re-creates deleted MCAs. Policy must be deleted BEFORE MCAs — if the Policy is still active, the governance framework re-enforces the ArgoCD CR on managed clusters while the cleanup Job tries to remove it, leaving orphaned ArgoCD CRs. ADC and AddOnTemplate must still exist when MCAs are deleted (the addon framework needs them to render the pre-delete ManifestWork). These resources are not owned by GitOpsCluster and persist after its deletion.
 
 ### Important Notes
 
-- **Cluster secrets** are managed by the GitOpsCluster controller and will be cleaned up automatically. Do NOT manually delete them.
-- **Do NOT force-remove finalizers** on ManagedClusterAddOn. If deletion hangs, check the pre-delete cleanup Job on the managed cluster: `kubectl get jobs -n open-cluster-management-agent-addon`.
-- **Guestbook namespace** (deployed by ArgoCD Application) is not cleaned up by the addon cleanup Job. Delete it manually if needed: `kubectl delete namespace guestbook`.
-- **Pause marker ConfigMap**: The pre-delete cleanup Job creates a `gitops-addon-pause` ConfigMap to pause the addon controller during cleanup. On OCP (OLM mode), the Deployment and marker are in different namespaces so the owner reference can't be set, meaning the marker won't be garbage collected. The addon controller **automatically clears stale pause markers at startup**, so this should not be an issue during normal operation.
+- **Cluster secrets** are managed by the GitOpsCluster controller. They persist as long as the `ManagedCluster` exists and are cleaned up when the `ManagedCluster` is deleted.
+- **Do NOT force-remove finalizers** on ManagedClusterAddOn. If deletion hangs, check the pre-delete cleanup Job: `kubectl get jobs -n open-cluster-management-agent-addon` on the managed cluster.
+- **Pre-delete RBAC**: The cleanup Job uses a dedicated `gitops-addon-cleanup` ClusterRole/ClusterRoleBinding annotated with `addon-pre-delete`. This ensures the cleanup Job retains RBAC permissions even after the addon framework deletes the regular ManifestWork (which removes the main `gitops-addon` ClusterRole) during MCA teardown. Without this, the cleanup Job would lose all permissions and spend its entire retry loop hitting `Forbidden` errors. The cleanup Job's last step deletes both `gitops-addon` and `gitops-addon-cleanup` ClusterRole/ClusterRoleBinding as best-effort — failures are logged as warnings but don't block the pre-delete hook completion.
+- **Guestbook namespace** and other namespaces deployed by ArgoCD Applications are not cleaned up by the addon cleanup Job. They can be deleted manually.
+- **Empty namespaces on managed cluster** (`openshift-gitops`, `openshift-gitops-operator`) may remain after cleanup. CRDs installed by the addon may also remain. These are harmless and will be recreated/reused on the next deployment.
+- **Pause marker ConfigMap**: The pre-delete cleanup Job creates a `gitops-addon-pause` ConfigMap to pause the addon controller during cleanup. The addon controller **automatically clears stale pause markers at startup**.
 
 ---
 
@@ -850,6 +841,8 @@ export OCP_CLUSTER_NAME=ocp-cluster1
 - **Between-scenario cleanup is hub-triggered ONLY.** The script deletes hub resources (Placement, Policy, GitOpsCluster, ManagedClusterAddOn) and waits for the addon's pre-delete cleanup Job to handle spoke-side cleanup. If spoke-side cleanup fails, the test reports it as a failure — it does NOT directly connect to the spoke to fix it.
 - **Initial cleanup (`cleanup_all`) IS allowed to be forceful** — it runs before any scenario to ensure a clean starting state regardless of prior failures. Direct spoke access and finalizer stripping are acceptable here only.
 - **Verification is read-only.** After cleanup, the script checks the state of hub and spoke clusters but does NOT modify anything. If resources remain, it reports `CLEANUP FAIL` and returns failure.
+- **RBAC safety check.** Each scenario calls `verify_cleanup_rbac_safety` to confirm the `gitops-addon` ClusterRole has `delete` for every resource type that `deleteOperatorResources()` targets.
+- **Post-cleanup accessibility check.** After cleanup, `verify_cluster_accessible_after_cleanup` confirms each managed cluster is still reachable and has healthy RBAC.
 
 ### Scenario Verification Details
 
@@ -986,6 +979,9 @@ After each scenario, `cleanup_scenario` performs hub-triggered deletion, then **
 - Strips Application finalizers since ArgoCD is already removed
 - Cleans up agent cluster secrets on the hub
 - This is NOT a workaround — the pre-delete Job removes ArgoCD/operator, not user applications
+
+**Step 4: Post-cleanup cluster accessibility check** (runs after Step 3):
+- Verifies each managed cluster is still accessible and has healthy RBAC
 
 **The cleanup verification does NOT:**
 - Strip finalizers on addon-managed resources
@@ -1178,7 +1174,7 @@ kubectl -n open-cluster-management rollout restart deployment/multicluster-opera
 
 1. **Policy is User-Owned**: Users must modify the Policy for RBAC/Apps. The controller recreates deleted Policies (unless `skip-argocd-policy` is set) and may patch `argoCDAgent.agent.image` during drift heal, but does not overwrite other customizations.
 
-2. **Cleanup Order Matters**: Delete Policy before ManagedClusterAddOn, and GitOpsCluster last. See [Cleanup](#cleanup) section for the full sequence.
+2. **Cleanup Order Matters**: Delete GitOpsCluster BEFORE ManagedClusterAddOn (stops the controller from re-creating MCAs). See [Cleanup](#cleanup) section for the full sequence.
 
 3. **Hub Configuration Required for Agent**: The hub ArgoCD must be configured as principal with `allowedNamespaces: ["*"]`.
 

@@ -184,7 +184,12 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	}
 
 	manifests := []workv1.Manifest{
-		// Pre-delete cleanup job - consistent across all templates, no env vars needed
+		// Pre-delete RBAC — included in the pre-delete ManifestWork so the cleanup Job
+		// retains permissions even after the regular ManifestWork (which deploys the main
+		// ClusterRole) is deleted during MCA teardown.
+		buildCleanupClusterRoleManifest(),
+		buildCleanupClusterRoleBindingManifest("open-cluster-management-agent-addon"),
+		// Pre-delete cleanup job
 		buildCleanupJobManifest(addonImage, "open-cluster-management-agent-addon"),
 		// ServiceAccount
 		buildServiceAccountManifest("open-cluster-management-agent-addon"),
@@ -197,6 +202,82 @@ func buildAddonManifests(gitOpsNamespace, addonImage string) []workv1.Manifest {
 	}
 
 	return manifests
+}
+
+// buildCleanupClusterRoleManifest creates a ClusterRole for the pre-delete cleanup Job.
+// This is annotated with addon-pre-delete so it's included in the pre-delete ManifestWork,
+// ensuring the cleanup Job retains RBAC even after the regular ManifestWork (which deploys
+// the main gitops-addon ClusterRole) is deleted during MCA teardown.
+func buildCleanupClusterRoleManifest() workv1.Manifest {
+	return newManifestWithoutStatus(&rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRole",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gitops-addon-cleanup",
+			Annotations: map[string]string{
+				"addon.open-cluster-management.io/addon-pre-delete": "",
+			},
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		Rules: cleanupClusterRoleRules(),
+	})
+}
+
+// cleanupClusterRoleRules returns the minimal RBAC rules the cleanup Job needs.
+func cleanupClusterRoleRules() []rbacv1.PolicyRule {
+	return []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
+		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		{APIGroups: []string{"apps"}, Resources: []string{"statefulsets"}, Verbs: []string{"get", "list", "watch", "delete"}},
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"roles", "rolebindings"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"clusterroles", "clusterrolebindings"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"argoproj.io"}, Resources: []string{"argocds"}, Verbs: []string{"get", "list", "watch", "delete", "patch"}},
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"subscriptions"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"clusterserviceversions"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"operators.coreos.com"}, Resources: []string{"installplans"}, Verbs: []string{"get", "list", "delete"}},
+		{APIGroups: []string{"pipelines.openshift.io"}, Resources: []string{"gitopsservices"}, Verbs: []string{"get", "delete"}},
+	}
+}
+
+// buildCleanupClusterRoleBindingManifest creates a ClusterRoleBinding for the pre-delete
+// cleanup Job, binding the gitops-addon SA to the gitops-addon-cleanup ClusterRole.
+func buildCleanupClusterRoleBindingManifest(namespace string) workv1.Manifest {
+	return newManifestWithoutStatus(&rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRoleBinding",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gitops-addon-cleanup",
+			Annotations: map[string]string{
+				"addon.open-cluster-management.io/addon-pre-delete": "",
+			},
+			Labels: map[string]string{
+				GitOpsAddonLabel: "true",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "gitops-addon-cleanup",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "gitops-addon",
+				Namespace: namespace,
+			},
+		},
+	})
 }
 
 // buildCleanupJobManifest creates the cleanup job manifest - consistent across all templates
@@ -217,9 +298,20 @@ func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
 			},
 		},
 		Spec: batchv1.JobSpec{
+			ManualSelector:        boolPtr(true),
 			BackoffLimit:          int32Ptr(3),   // Retry up to 3 times on failure
 			ActiveDeadlineSeconds: int64Ptr(600), // 10 minutes timeout
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"job-name": "gitops-addon-cleanup",
+				},
+			},
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"job-name": "gitops-addon-cleanup",
+					},
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "gitops-addon",
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -308,14 +400,14 @@ func gitopsAddonClusterRoleRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
 		// Secret management (image pull secrets, TLS certs, ArgoCD secrets)
 		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-		// ServiceAccount management (patch imagePullSecrets on ArgoCD SAs; watch needed by controller-runtime cache)
-		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// ServiceAccount management (patch imagePullSecrets on ArgoCD SAs; delete needed for cleanup; watch needed by controller-runtime cache)
+		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		// Pod management (delete pods with image pull errors; watch needed by controller-runtime cache)
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "delete"}},
 		// ConfigMap management (operator config, pause marker; watch needed by controller-runtime cache)
 		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
-		// Service management (operator metrics/webhook services via Helm chart)
-		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
+		// Service management (operator metrics/webhook services via Helm chart; delete needed for cleanup)
+		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		// Event recording (leader election events)
 		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
 		// Deployment management (operator deployment, addon deployment status)
