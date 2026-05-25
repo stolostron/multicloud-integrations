@@ -293,7 +293,10 @@ type olmCSVRef struct {
 func deleteOLMResources(ctx context.Context, c client.Client) error {
 	klog.Info("Deleting OLM resources (Subscription and CSV)")
 
-	subscriptionNamespaces := []string{"openshift-operators", "operators", GitOpsOperatorNamespace}
+	// AddonNamespace is included because some 2.16 installer builds embedded the
+	// subscription in open-cluster-management-agent-addon via the static AddOnTemplate
+	// (ManifestWork) before the namespace was moved to openshift-gitops-operator in 2.17.
+	subscriptionNamespaces := []string{"openshift-operators", "operators", GitOpsOperatorNamespace, AddonNamespace}
 
 	// Include the namespace from env var if set and not already in the list
 	if envNs := os.Getenv("OLM_SUBSCRIPTION_NAMESPACE"); envNs != "" {
@@ -696,33 +699,35 @@ func deleteOperatorResources(ctx context.Context, c client.Client, gitopsOperato
 		{"ClusterRoleBinding", "rbac.authorization.k8s.io/v1"},
 	}
 
-	// Delete labeled resources (both namespaced and cluster-scoped)
-	err := deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, clusterResourceTypes, gitopsOperatorNS, 4*time.Minute, true)
-	if err != nil {
-		clusterScopeErr := err
-		klog.Warningf("Label-based deletion failed or incomplete, trying namespace-based fallback for namespaced resources only: %v", err)
-		// Fallback: delete ALL resources in the operator namespace without requiring the
-		// gitopsaddon label. This handles resources whose labels were stripped or never set.
-		//
-		// CRITICAL: The fallback MUST NOT include cluster-scoped resources (ClusterRole,
-		// ClusterRoleBinding). Without a label filter, listing cluster-scoped resources
-		// returns EVERY ClusterRole/ClusterRoleBinding in the cluster, and deleting them
-		// destroys system RBAC (cluster-admin, system:node, etc.), making the cluster
-		// permanently inaccessible. Cluster-scoped resources are only deleted in the
-		// label-based pass above.
-		err = deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, nil, gitopsOperatorNS, 2*time.Minute, false)
+	var errs []error
 
-		// Re-check cluster-scoped resources. The namespaced fallback cannot clean these,
-		// so if any labeled ClusterRole/ClusterRoleBinding still exist, surface the error.
-		clusterCheckErr := deleteResourcesWithRetry(ctx, c, nil, clusterResourceTypes, gitopsOperatorNS, 15*time.Second, true)
-		if clusterCheckErr != nil {
-			klog.Warningf("Cluster-scoped resources still remain after fallback: %v", clusterScopeErr)
-			if err == nil {
-				err = clusterScopeErr
-			}
-		}
+	// For namespaced resources: always delete ALL resources in the operator namespace
+	// regardless of labels. The embedded Helm chart deploys resources (e.g.
+	// openshift-gitops-operator-controller-manager Deployment) with only
+	// "control-plane: gitops-operator" labels — NOT the gitopsaddon label. A
+	// label-based pass would find zero items and report "success", leaving the
+	// deployment behind.
+	//
+	// CRITICAL: Do NOT extend this label-free approach to cluster-scoped resources
+	// (ClusterRole, ClusterRoleBinding). Without a label filter, listing cluster-scoped
+	// resources returns EVERY ClusterRole/ClusterRoleBinding in the cluster, and
+	// deleting them destroys system RBAC (cluster-admin, system:node, etc.), making
+	// the cluster permanently inaccessible.
+	klog.Infof("Deleting all namespaced resources in operator namespace %s", gitopsOperatorNS)
+	if err := deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, nil, gitopsOperatorNS, 4*time.Minute, false); err != nil {
+		klog.Warningf("Namespace-based deletion incomplete for %s: %v", gitopsOperatorNS, err)
+		errs = append(errs, err)
 	}
-	return err
+
+	// For cluster-scoped resources: use label-based deletion only (safe — never deletes
+	// system RBAC that lacks the gitopsaddon label).
+	klog.Info("Deleting labeled cluster-scoped resources (ClusterRole/ClusterRoleBinding)")
+	if err := deleteResourcesWithRetry(ctx, c, nil, clusterResourceTypes, "", 2*time.Minute, true); err != nil {
+		klog.Warningf("Label-based deletion incomplete for cluster-scoped resources: %v", err)
+		errs = append(errs, err)
+	}
+
+	return stderrors.Join(errs...)
 }
 
 // deleteResourcesWithRetry deletes resources and retries until fully removed or timeout
