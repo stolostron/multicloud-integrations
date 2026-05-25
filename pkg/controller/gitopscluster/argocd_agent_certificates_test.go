@@ -233,6 +233,87 @@ func TestGetPrincipalHostNames(t *testing.T) {
 	}
 }
 
+func TestGetPrincipalHostNames_NodePort(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	// NodePort service — no LoadBalancer ingress
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "argocd-agent-principal",
+			Namespace: "test-namespace",
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}
+
+	// Node with InternalIP that agents would connect through
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeInternalIP, Address: "172.18.0.3"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(service, node).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test-namespace"},
+	}
+
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace", gitOpsCluster)
+
+	hasNodeIP := false
+	for _, h := range hostnames {
+		if h == "172.18.0.3" {
+			hasNodeIP = true
+		}
+	}
+	if !hasNodeIP {
+		t.Errorf("getPrincipalHostNames() should include node IP 172.18.0.3 for NodePort service, got: %v", hostnames)
+	}
+}
+
+func TestGetPrincipalHostNames_NoService(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	// No principal service at all (e.g. before ArgoCD operator runs)
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeInternalIP, Address: "172.18.0.5"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(node).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient}
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test-namespace"},
+	}
+
+	hostnames := r.getPrincipalHostNames(context.Background(), "test-namespace", gitOpsCluster)
+
+	hasNodeIP := false
+	for _, h := range hostnames {
+		if h == "172.18.0.5" {
+			hasNodeIP = true
+		}
+	}
+	if !hasNodeIP {
+		t.Errorf("getPrincipalHostNames() should include node IP 172.18.0.5 when no service exists, got: %v", hostnames)
+	}
+}
+
 func TestGetResourceProxyHostNames(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)

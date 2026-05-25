@@ -68,6 +68,17 @@ func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 		return nil
 	}
 
+	// On managed clusters: clean up the stale default ArgoCD instance that was created by
+	// the ACM 2.16 OLM operator (installed via the embedded subscription in the old
+	// gitops-addon-olm ManifestWork). That subscription lacked DISABLE_DEFAULT_ARGOCD_INSTANCE=true,
+	// so the operator created a default GitopsService CR and thus the openshift-gitops ArgoCD CR.
+	// The 2.17 addon agent runs with DISABLE_DEFAULT_ARGOCD_INSTANCE=true in its subscription,
+	// so the default instance should not exist. Deleting the GitopsService CR causes the operator
+	// to garbage-collect the openshift-gitops ArgoCD CR via ownerReferences.
+	if err := r.deleteDefaultGitopsServiceIfStale(ctx); err != nil {
+		klog.Warningf("Failed to clean up stale default GitopsService CR: %v", err)
+	}
+
 	// OLM override: when olmSubscription.enabled=true in GitOpsCluster spec, the hub
 	// sets OLM_SUBSCRIPTION_ENABLED=true on the agent. This forces OLM subscription
 	// mode regardless of OCP auto-detection, allowing operators to explicitly choose
@@ -117,12 +128,21 @@ func (r *GitopsAddonReconciler) installViaOLMSubscription(ctx context.Context) e
 		return fmt.Errorf("failed to ensure OperatorGroup in %s: %w", subNamespace, err)
 	}
 
-	// Migration: if a previous install left a subscription in openshift-operators
-	// (the old default), delete it now so OLM doesn't run two competing operator
-	// instances. Only migrates our own labeled subscriptions.
-	if subNamespace != "openshift-operators" {
-		if err := r.migrateSubscriptionFromNamespace(ctx, "openshift-operators"); err != nil {
-			klog.Warningf("Migration: failed to remove old subscription from openshift-operators: %v", err)
+	// Migration: if a previous install left a subscription in a stale namespace,
+	// delete it now so OLM doesn't run two competing operator instances.
+	// Only migrates our own labeled subscriptions.
+	//
+	// Namespaces checked:
+	//   openshift-operators — the pre-2.17 default for OLM mode
+	//   open-cluster-management-agent-addon — the addon agent namespace; some 2.16
+	//     installer builds embedded the subscription there in the static AddOnTemplate
+	//     (ManifestWork) before it was moved to openshift-gitops-operator in 2.17.
+	for _, oldNS := range []string{"openshift-operators", AddonNamespace} {
+		if subNamespace == oldNS {
+			continue
+		}
+		if err := r.migrateSubscriptionFromNamespace(ctx, oldNS); err != nil {
+			klog.Warningf("Migration: failed to remove old subscription from %s: %v", oldNS, err)
 		}
 	}
 
@@ -137,6 +157,18 @@ func (r *GitopsAddonReconciler) installViaOLMSubscription(ctx context.Context) e
 	// the webhook validation succeeds on the second attempt.
 	if err := r.recoverFromFailedWebhookInstallPlan(ctx); err != nil {
 		klog.Warningf("Pre-install: failed to recover from failed webhook InstallPlan: %v", err)
+	}
+
+	// Recover from a "ghost Complete" InstallPlan — the plan phase is Complete but the
+	// operator CSV was never actually created in the target namespace. This happens during
+	// namespace migration: when the subscription is first created in openshift-gitops-operator
+	// while the CSV still exists in openshift-operators, OLM finds it "Present" globally and
+	// marks the plan Complete without creating a local copy. After the old CSV is later deleted
+	// (by the migration sweep above), the CSV is absent but the InstallPlan is already done
+	// and OLM won't re-run it. Deleting the stale Complete InstallPlan forces OLM to issue a
+	// fresh one, which creates the CSV in the correct namespace.
+	if err := r.recoverFromGhostCompleteInstallPlan(ctx); err != nil {
+		klog.Warningf("Pre-install: failed to recover from ghost-complete InstallPlan: %v", err)
 	}
 
 	// Only patch the ArgoCD CRD conversion webhook when the subscription is actually
@@ -393,8 +425,117 @@ func (r *GitopsAddonReconciler) recoverFromFailedWebhookInstallPlan(ctx context.
 	return nil
 }
 
-// olmSubscriptionNeedsUpdate returns true when the OLM subscription either does not
-// exist yet (fresh install) or its spec fields differ from the desired configuration.
+// recoverFromGhostCompleteInstallPlan detects two related "ghost install" scenarios where
+// OLM believes the operator is installed but the CSV is actually absent from the target
+// namespace. In both cases the fix is to delete the subscription so the addon agent
+// recreates it fresh (no installedCSV, no installPlanRef); OLM then issues a new
+// InstallPlan that creates the CSV in the correct namespace.
+//
+// Scenario A — ghost-Present (InstallPlan Complete, CSV absent):
+//
+//  1. The subscription was first created in openshift-gitops-operator while the CSV
+//     existed in openshift-operators (from the pre-migration install).
+//  2. OLM resolved the InstallPlan, found the CSV "Present" on the cluster (in
+//     openshift-operators), and marked the plan Complete without creating a local copy
+//     in openshift-gitops-operator.
+//  3. After the old CSV in openshift-operators is later deleted by the migration sweep,
+//     the CSV is now absent everywhere — but the InstallPlan is already Complete and
+//     OLM will never re-run it.
+//
+// Scenario B — InstallPlan already deleted, installedCSV still set:
+//
+//  Same root cause as Scenario A, but the stale Complete InstallPlan has already been
+//  deleted (e.g. manually by the operator or by a previous recovery attempt). OLM still
+//  sees installedCSV set in the subscription status and considers the operator installed,
+//  so it does NOT issue a new InstallPlan. The addon is stuck waiting for the operator
+//  deployment which will never appear.
+func (r *GitopsAddonReconciler) recoverFromGhostCompleteInstallPlan(ctx context.Context) error {
+	subName := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+	subNamespace := getOLMEnvOrDefault("OLM_SUBSCRIPTION_NAMESPACE", GitOpsOperatorNamespace)
+
+	existing := &unstructured.Unstructured{}
+	existing.SetAPIVersion("operators.coreos.com/v1alpha1")
+	existing.SetKind("Subscription")
+	if err := r.Get(ctx, types.NamespacedName{Name: subName, Namespace: subNamespace}, existing); err != nil {
+		return nil // subscription not found yet — nothing to recover
+	}
+
+	labels := existing.GetLabels()
+	if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+		return nil // pre-existing subscription not managed by us — leave it alone
+	}
+
+	// Determine the CSV name the subscription expects to be installed.
+	csvName, _, _ := unstructured.NestedString(existing.Object, "status", "currentCSV")
+	if csvName == "" {
+		csvName, _, _ = unstructured.NestedString(existing.Object, "status", "installedCSV")
+	}
+	if csvName == "" {
+		return nil // subscription has no CSV name yet — nothing to check
+	}
+
+	// Check whether that CSV actually exists in the target namespace.
+	csv := &unstructured.Unstructured{}
+	csv.SetAPIVersion("operators.coreos.com/v1alpha1")
+	csv.SetKind("ClusterServiceVersion")
+	csvErr := r.Get(ctx, types.NamespacedName{Name: csvName, Namespace: subNamespace}, csv)
+	if csvErr == nil {
+		return nil // CSV is present — subscription is healthy
+	}
+	if !errors.IsNotFound(csvErr) && !isNoKindMatchError(csvErr) {
+		return fmt.Errorf("failed to check for CSV %s/%s: %w", subNamespace, csvName, csvErr)
+	}
+
+	// CSV is absent. Only act if the subscription's installedCSV is set (meaning OLM
+	// thinks it's installed) or if the referenced InstallPlan is Complete (ghost-Present).
+	// Otherwise this is just a normal pending install — leave it alone.
+	installedCSV, _, _ := unstructured.NestedString(existing.Object, "status", "installedCSV")
+
+	// Check whether there's a referenced InstallPlan and whether it's Complete.
+	ipRef, _, _ := unstructured.NestedMap(existing.Object, "status", "installPlanRef")
+	ipName, _ := ipRef["name"].(string)
+	var ip *unstructured.Unstructured
+	ipComplete := false
+	if ipName != "" {
+		ip = &unstructured.Unstructured{}
+		ip.SetAPIVersion("operators.coreos.com/v1alpha1")
+		ip.SetKind("InstallPlan")
+		if err := r.Get(ctx, types.NamespacedName{Name: ipName, Namespace: subNamespace}, ip); err == nil {
+			phase, _, _ := unstructured.NestedString(ip.Object, "status", "phase")
+			ipComplete = (phase == "Complete")
+		}
+		// If the InstallPlan is not found (already deleted), ip stays nil — handled below.
+	}
+
+	// Only delete the subscription if we're in a stuck state: either the subscription
+	// believes the CSV is installed (installedCSV is set) but it's absent, OR the
+	// InstallPlan is Complete but didn't actually create the CSV.
+	if installedCSV == "" && !ipComplete {
+		return nil // normal pending install — not stuck yet
+	}
+
+	// Stuck: CSV is absent but OLM thinks the operator is installed (installedCSV set)
+	// or the InstallPlan is Complete without having created the CSV. Deleting the
+	// InstallPlan alone is NOT enough — OLM sees installedCSV and won't issue a new
+	// plan. We must delete the subscription so the addon agent recreates it fresh
+	// (no installedCSV, no installPlanRef). OLM then issues a new InstallPlan that
+	// actually creates the CSV in the target namespace.
+	klog.Infof("Ghost install detected: CSV %s is absent in %s but subscription installedCSV=%q / InstallPlan %q Complete=%v — deleting subscription to force fresh install",
+		csvName, subNamespace, installedCSV, ipName, ipComplete)
+	if ip != nil {
+		if err := r.Delete(ctx, ip); err != nil && !errors.IsNotFound(err) {
+			klog.Warningf("Failed to delete ghost InstallPlan %s/%s (continuing with subscription delete): %v", subNamespace, ipName, err)
+		}
+	}
+	if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete subscription %s/%s to recover from ghost install: %w", subNamespace, subName, err)
+	}
+	klog.Infof("Deleted subscription %s/%s — addon agent will recreate it and OLM will issue a fresh InstallPlan",
+		subNamespace, subName)
+	return nil
+}
+
+
 // It also returns true when the subscription has the InstallPlanMissing condition,
 // which forces a delete-and-recreate cycle.
 // Returns false for pre-existing subscriptions not owned by the gitopsaddon label.
@@ -614,55 +755,58 @@ func (r *GitopsAddonReconciler) migrateSubscriptionFromNamespace(ctx context.Con
 	existing.SetAPIVersion("operators.coreos.com/v1alpha1")
 	existing.SetKind("Subscription")
 	err := r.Get(ctx, types.NamespacedName{Name: subName, Namespace: fromNamespace}, existing)
-	if err != nil {
-		if errors.IsNotFound(err) || isNoKindMatchError(err) {
-			return nil
-		}
+	if err != nil && !errors.IsNotFound(err) && !isNoKindMatchError(err) {
 		return fmt.Errorf("failed to check for old subscription in %s: %w", fromNamespace, err)
 	}
 
-	labels := existing.GetLabels()
-	if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
-		// Pre-existing subscription not owned by us — leave it alone.
-		klog.Infof("Subscription %s in %s not owned by gitopsaddon, skipping migration", subName, fromNamespace)
-		return nil
-	}
+	if err == nil {
+		// Subscription still exists in the old namespace — delete it and its CSV.
+		labels := existing.GetLabels()
+		if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+			// Pre-existing subscription not owned by us — leave it alone.
+			klog.Infof("Subscription %s in %s not owned by gitopsaddon, skipping migration", subName, fromNamespace)
+			return nil
+		}
 
-	// Read status.installedCSV BEFORE deleting the subscription. Once the
-	// subscription is gone OLM clears the status field and we can't recover it.
-	csvName, _, _ := unstructured.NestedString(existing.Object, "status", "installedCSV")
+		// Read status.installedCSV BEFORE deleting the subscription. Once the
+		// subscription is gone OLM clears the status field and we can't recover it.
+		csvName, _, _ := unstructured.NestedString(existing.Object, "status", "installedCSV")
 
-	klog.Infof("Migrating: deleting old gitopsaddon subscription %s from %s", subName, fromNamespace)
-	if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete old subscription %s/%s: %w", fromNamespace, subName, err)
-	}
+		klog.Infof("Migrating: deleting old gitopsaddon subscription %s from %s", subName, fromNamespace)
+		if err := r.Delete(ctx, existing); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete old subscription %s/%s: %w", fromNamespace, subName, err)
+		}
 
-	// Delete the CSV that was installed by the old subscription so OLM removes
-	// the operator Deployment immediately instead of waiting for async GC.
-	// Without this, two AllNamespaces operator instances can compete over the
-	// same ArgoCD CRDs for several minutes while OLM slowly GCs the old CSV.
-	//
-	// Ownership is already established by the subscription chain above: we confirmed
-	// the subscription carries our gitopsaddon label, and csvName came directly from
-	// that subscription's status.installedCSV. No additional label check on the CSV
-	// is needed — OLM provenance labels are unreliable because they are also present
-	// on OperatorHub-installed CSVs in the same namespace.
-	if csvName != "" {
-		klog.Infof("Migrating: deleting old CSV %s/%s", fromNamespace, csvName)
-		csv := &unstructured.Unstructured{}
-		csv.SetAPIVersion("operators.coreos.com/v1alpha1")
-		csv.SetKind("ClusterServiceVersion")
-		csv.SetName(csvName)
-		csv.SetNamespace(fromNamespace)
-		if err := r.Delete(ctx, csv); err != nil && !errors.IsNotFound(err) && !isNoKindMatchError(err) {
-			klog.Warningf("Migration: failed to delete old CSV %s/%s: %v", fromNamespace, csvName, err)
+		// Delete the CSV that was installed by the old subscription so OLM removes
+		// the operator Deployment immediately instead of waiting for async GC.
+		// Without this, two AllNamespaces operator instances can compete over the
+		// same ArgoCD CRDs for several minutes while OLM slowly GCs the old CSV.
+		//
+		// Ownership is already established by the subscription chain above: we confirmed
+		// the subscription carries our gitopsaddon label, and csvName came directly from
+		// that subscription's status.installedCSV. No additional label check on the CSV
+		// is needed — OLM provenance labels are unreliable because they are also present
+		// on OperatorHub-installed CSVs in the same namespace.
+		if csvName != "" {
+			klog.Infof("Migrating: deleting old CSV %s/%s", fromNamespace, csvName)
+			csv := &unstructured.Unstructured{}
+			csv.SetAPIVersion("operators.coreos.com/v1alpha1")
+			csv.SetKind("ClusterServiceVersion")
+			csv.SetName(csvName)
+			csv.SetNamespace(fromNamespace)
+			if err := r.Delete(ctx, csv); err != nil && !errors.IsNotFound(err) && !isNoKindMatchError(err) {
+				klog.Warningf("Migration: failed to delete old CSV %s/%s: %v", fromNamespace, csvName, err)
+			}
 		}
 	}
 
-	// Sweep for any remaining gitops-operator CSVs in the old namespace — e.g. a
-	// "Replacing" CSV from an in-progress OLM upgrade that isn't referenced by
-	// status.installedCSV. For these, we have no subscription-status anchor, so we
-	// only delete CSVs that no surviving subscription still references.
+	// Always sweep for any remaining gitops-operator CSVs in the old namespace,
+	// even if the subscription was already deleted before this reconcile ran.
+	// This handles the upgrade scenario where: the old subscription in openshift-operators
+	// was deleted (by a prior run or manually) but OLM left the CSV behind as an orphan,
+	// causing OLM to keep the operator pod running there and refuse to deploy a new one
+	// in openshift-gitops-operator (the correct target namespace).
+	// Only CSVs not claimed by any surviving subscription are deleted.
 	if err := deleteRemainingGitOpsCSVs(ctx, r.Client, fromNamespace, subName); err != nil {
 		klog.Warningf("Migration: failed to clean remaining CSVs in %s: %v", fromNamespace, err)
 	}
@@ -1059,4 +1203,65 @@ func secretDataEqual(a, b map[string][]byte) bool {
 		}
 	}
 	return true
+}
+
+// deleteDefaultGitopsServiceIfStale removes the cluster-scoped GitopsService CR named
+// "cluster" when it should not exist on this managed cluster.
+//
+// Background: In ACM 2.16, the OLM Subscription embedded in the gitops-addon-olm
+// ManifestWork did NOT set DISABLE_DEFAULT_ARGOCD_INSTANCE=true. As a result, the
+// openshift-gitops-operator created a default GitopsService CR ("cluster"), which in
+// turn created the openshift-gitops ArgoCD instance. After upgrading to ACM 2.17, the
+// new agent subscription carries DISABLE_DEFAULT_ARGOCD_INSTANCE=true, so the default
+// instance is no longer wanted. However, neither OLM nor the operator automatically
+// removes the existing GitopsService CR when DISABLE_DEFAULT_ARGOCD_INSTANCE is first
+// enabled.
+//
+// This function detects that condition and deletes the GitopsService CR so that the
+// operator's ownerReference-based garbage collection removes the openshift-gitops ArgoCD
+// CR, leaving only the Policy-managed acm-openshift-gitops instance.
+//
+// It is safe to call on every reconcile: the function is a no-op when the GitopsService
+// CR does not exist, when the addon-created ArgoCD CR (acm-openshift-gitops) is absent
+// (meaning the operator setup is still incomplete), or when the ArgoCD CRD itself is not
+// installed (non-OCP clusters using the embedded operator path).
+func (r *GitopsAddonReconciler) deleteDefaultGitopsServiceIfStale(ctx context.Context) error {
+	// Only act when the addon-created ArgoCD instance exists, which confirms the operator
+	// is running and the Policy has been applied. Without this guard we might delete the
+	// GitopsService CR prematurely, before the intended ArgoCD instance is up.
+	argoCDNamespace := getArgoCDNamespace()
+	acmArgoCDName := "acm-openshift-gitops"
+
+	acmArgoCD := &unstructured.Unstructured{}
+	acmArgoCD.SetAPIVersion("argoproj.io/v1beta1")
+	acmArgoCD.SetKind("ArgoCD")
+	if err := r.Get(ctx, types.NamespacedName{Name: acmArgoCDName, Namespace: argoCDNamespace}, acmArgoCD); err != nil {
+		if errors.IsNotFound(err) || isNoKindMatchError(err) {
+			// Addon-managed ArgoCD not present yet — skip cleanup to avoid racing with setup.
+			return nil
+		}
+		return fmt.Errorf("failed to check for addon-created ArgoCD CR: %w", err)
+	}
+
+	// Check whether the default GitopsService CR exists.
+	gitOpsService := &unstructured.Unstructured{}
+	gitOpsService.SetAPIVersion("pipelines.openshift.io/v1alpha1")
+	gitOpsService.SetKind("GitopsService")
+	gitOpsService.SetName("cluster")
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "cluster"}, gitOpsService); err != nil {
+		if errors.IsNotFound(err) || isNoKindMatchError(err) {
+			return nil // nothing to do
+		}
+		return fmt.Errorf("failed to check for default GitopsService CR: %w", err)
+	}
+
+	// GitopsService exists — delete it so the operator garbage-collects the default
+	// openshift-gitops ArgoCD CR via ownerReferences.
+	klog.Infof("Deleting stale default GitopsService CR 'cluster' — it was created by the 2.16 OLM operator (without DISABLE_DEFAULT_ARGOCD_INSTANCE=true) and is no longer needed")
+	if err := r.Delete(ctx, gitOpsService); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete default GitopsService CR: %w", err)
+	}
+	klog.Info("Deleted stale default GitopsService CR 'cluster'; the openshift-gitops ArgoCD CR will be garbage-collected")
+	return nil
 }

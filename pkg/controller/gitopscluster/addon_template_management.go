@@ -90,12 +90,43 @@ func getAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) str
 	return fmt.Sprintf("gitops-addon-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
 }
 
-// getLegacyOLMAddOnTemplateName returns the old-style AddOnTemplate name used by earlier versions
-// of the hub controller. These templates embedded the OLM Subscription directly and placed all
-// resources in openshift-operators. They are no longer created but may still exist on clusters
-// that were upgraded from an older version.
+// LegacyStaticOLMAddOnTemplateName is the name of the static AddOnTemplate that was shipped
+// in the ACM 2.16 installer manifests. It embedded the OLM Subscription directly in the
+// ManifestWork and placed addon resources in open-cluster-management-agent-addon. The 2.17
+// installer no longer ships this template, but it is never deleted by the installer upgrade
+// process — the hub controller must remove it to stop OCM from continuing to apply the
+// stale ManifestWork (which creates a duplicate OLM subscription).
+const LegacyStaticOLMAddOnTemplateName = "gitops-addon-olm"
+
+// getLegacyOLMAddOnTemplateName returns the name of the per-GitOpsCluster dynamic
+// AddOnTemplate created by older hub controller versions when both gitopsAddon and
+// olmSubscription were enabled. These templates embedded the OLM Subscription directly
+// and are superseded by the runtime OLM path introduced in 2.17.
 func getLegacyOLMAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) string {
 	return fmt.Sprintf("gitops-addon-olm-%s-%s", gitOpsCluster.Namespace, gitOpsCluster.Name)
+}
+
+// cleanupLegacyOLMAddOnTemplates removes both varieties of legacy OLM AddOnTemplate that
+// may be left over after a 2.16→2.17 upgrade:
+//
+//   - LegacyStaticOLMAddOnTemplateName ("gitops-addon-olm") — shipped by the 2.16 installer
+//     as a cluster-scoped manifest that embedded the OLM Subscription in the ManifestWork.
+//
+//   - getLegacyOLMAddOnTemplateName(…) ("gitops-addon-olm-{ns}-{name}") — created
+//     dynamically by the old hub controller when argoCDAgent + olmSubscription were both
+//     enabled.
+//
+// Callers must ensure the ManagedClusterAddOn no longer references these templates before
+// calling this function (EnsureManagedClusterAddon handles that). Deletion is best-effort:
+// errors are logged as warnings so that a transient API failure does not block reconciliation.
+func (r *ReconcileGitOpsCluster) cleanupLegacyOLMAddOnTemplates(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) {
+	if err := r.deleteAddOnTemplateByName(LegacyStaticOLMAddOnTemplateName); err != nil {
+		klog.Warningf("Failed to delete static legacy OLM AddOnTemplate %s: %v", LegacyStaticOLMAddOnTemplateName, err)
+	}
+	dynamicLegacyName := getLegacyOLMAddOnTemplateName(gitOpsCluster)
+	if err := r.deleteAddOnTemplateByName(dynamicLegacyName); err != nil {
+		klog.Warningf("Failed to delete dynamic legacy OLM AddOnTemplate %s: %v", dynamicLegacyName, err)
+	}
 }
 
 // EnsureAddOnTemplate creates or updates the AddOnTemplate for a GitOpsCluster with ArgoCD agent enabled
@@ -103,15 +134,11 @@ func getLegacyOLMAddOnTemplateName(gitOpsCluster *gitopsclusterV1beta1.GitOpsClu
 func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster) error {
 	templateName := getAddOnTemplateName(gitOpsCluster)
 
-	// Delete any legacy OLM-style AddOnTemplate created by older versions of this controller.
-	// Old templates (gitops-addon-olm-{ns}-{name}) embedded the OLM Subscription directly and
-	// placed all resources (Job, SA, Deployment) in openshift-operators. The new approach uses
-	// open-cluster-management-agent-addon for the addon agent, so these stale templates must be
-	// removed to avoid the ManagedClusterAddOn referencing the wrong namespace.
-	legacyName := getLegacyOLMAddOnTemplateName(gitOpsCluster)
-	if err := r.deleteAddOnTemplateByName(legacyName); err != nil {
-		klog.Warningf("Failed to delete legacy OLM AddOnTemplate %s: %v", legacyName, err)
-	}
+	// Delete any legacy OLM-style AddOnTemplates that may have been left by an older version
+	// of the controller. Both the static installer template ("gitops-addon-olm") and the
+	// per-GitOpsCluster dynamic template ("gitops-addon-olm-{ns}-{name}") must be removed so
+	// OCM stops applying the stale ManifestWork that embedded the OLM Subscription directly.
+	r.cleanupLegacyOLMAddOnTemplates(gitOpsCluster)
 
 	// Get the controller image - error out if not available
 	addonImage, err := r.getControllerImage()
@@ -611,11 +638,8 @@ func (r *ReconcileGitOpsCluster) CleanupDynamicAddOnTemplates(gitOpsCluster *git
 		klog.Warningf("Failed to delete AddOnTemplate %s: %v", templateName, err)
 	}
 
-	// Also delete any legacy OLM-style template from older versions of the controller
-	legacyName := getLegacyOLMAddOnTemplateName(gitOpsCluster)
-	if err := r.deleteAddOnTemplateByName(legacyName); err != nil {
-		klog.Warningf("Failed to delete legacy OLM AddOnTemplate %s: %v", legacyName, err)
-	}
+	// Delete legacy OLM templates (static installer template + per-GitOpsCluster dynamic template)
+	r.cleanupLegacyOLMAddOnTemplates(gitOpsCluster)
 }
 
 // deleteAddOnTemplateByName deletes an AddOnTemplate by name (best effort, doesn't wait)

@@ -225,6 +225,13 @@ spec:
 }
 
 func appProjectYAML(ns string) string {
+	// IMPORTANT: destinations must include name: '*' in addition to server: '*'.
+	// The argocd-agent principal only propagates AppProjects to managed agents
+	// when the destinations include a name wildcard.  Without name: '*', the
+	// principal skips propagation and agents can't find the AppProject for
+	// Applications that use destination.name (e.g. ApplicationSet-generated
+	// apps with destination.name: '{{name}}').  This matches the settings used
+	// by test-scenarios.sh's ensure_default_appproject_for_agents helper.
 	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
@@ -235,7 +242,8 @@ spec:
   - group: '*'
     kind: '*'
   destinations:
-  - namespace: '*'
+  - name: '*'
+    namespace: '*'
     server: '*'
   sourceRepos:
   - '*'
@@ -489,14 +497,24 @@ func ensureOperatorInspectedCluster() {
 }
 
 func ensureHubPrincipalRunning() {
-	By("ensuring hub principal pod is running")
+	By("ensuring hub principal pod is running and Ready")
+	// Check pod Ready condition (not just phase). A pod in CrashLoopBackOff has
+	// phase=Running but Ready=False. If the principal is crashing because
+	// argocd-agent-resource-proxy-tls is missing, this check catches it early.
 	Eventually(func(g Gomega) string {
 		out, err := kubectlCtx(hubContext, "get", "pods", "-n", argoCDNamespace,
 			"-l", "app.kubernetes.io/name=openshift-gitops-agent-principal",
-			"-o", "jsonpath={.items[0].status.phase}")
+			"-o", `jsonpath={.items[0].status.conditions[?(@.type=="Ready")].status}`)
 		g.Expect(err).NotTo(HaveOccurred())
+		if out != "True" {
+			// Log why the pod is not ready to aid in debugging
+			logs, _ := kubectlCtx(hubContext, "logs", "-n", argoCDNamespace,
+				"-l", "app.kubernetes.io/name=openshift-gitops-agent-principal", "--tail=10")
+			fmt.Printf("[principal-ready-check] not yet Ready (status=%q); last logs:\n%s\n", out, logs)
+		}
 		return out
-	}, 3*time.Minute, 10*time.Second).Should(Equal("Running"))
+	}, 5*time.Minute, 10*time.Second).Should(Equal("True"),
+		"hub principal pod should be Ready — if it keeps crashing, check for missing argocd-agent-resource-proxy-tls secret")
 }
 
 func verifyAddOnDeploymentConfigEnvVar(clusterName, envKey, expectedValue string, timeout time.Duration) {
@@ -736,16 +754,53 @@ subjects:
 	By(fmt.Sprintf("waiting for ApplicationSet to generate %s (local-cluster)", localClusterAppName))
 	waitForResourceExists(hubContext, "application", localClusterAppName, argoCDNamespace, 3*time.Minute)
 
+	By("waiting for principal to dispatch cluster1-guestbook to spoke agent")
+	// In agent mode the principal creates the Application in openshift-gitops on the spoke.
+	// If this never appears, the principal has not dispatched to the cluster1 agent — likely
+	// because the gRPC connection is not established.  Fail fast with diagnostic info rather
+	// than waiting the full 15-min guestbook timeout with no signal.
+	Eventually(func(g Gomega) {
+		_, err := kubectlCtx(spokeContext, "get", "application", appName, "-n", argoCDNamespace)
+		if err != nil {
+			// Gather diagnostics to understand the dispatch failure
+			hubApp, _ := kubectlCtx(hubContext, "get", "application", appName,
+				"-n", argoCDNamespace,
+				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
+			agentPhase, _ := kubectlCtx(spokeContext, "get", "pods", "-n", argoCDNamespace,
+				"-l", "app.kubernetes.io/name=acm-openshift-gitops-agent-agent",
+				"-o", "jsonpath={.items[0].status.phase}")
+			// Last 20 lines of agent pod logs (shows gRPC connect/disconnect events)
+			agentLogs, _ := kubectlCtx(spokeContext, "logs", "-n", argoCDNamespace,
+				"-l", "app.kubernetes.io/name=acm-openshift-gitops-agent-agent",
+				"--tail=20")
+			// Principal logs for connection events
+			principalLogs, _ := kubectlCtx(hubContext, "logs", "-n", argoCDNamespace,
+				"-l", "app.kubernetes.io/name=openshift-gitops-agent-principal",
+				"--tail=20")
+			fmt.Fprintf(GinkgoWriter,
+				"  [dispatch-diag] hub app: %s; agent phase: %s\n  [agent-logs]\n%s\n  [principal-logs]\n%s\n",
+				hubApp, agentPhase, agentLogs, principalLogs)
+		}
+		g.Expect(err).NotTo(HaveOccurred(),
+			"Application %s should appear in openshift-gitops on spoke once principal dispatches it", appName)
+	}, 3*time.Minute, 10*time.Second).Should(Succeed(),
+		"Principal did not dispatch %s to spoke agent within 3 minutes — check [dispatch-diag] above", appName)
+
 	By("waiting for agent to propagate guestbook to spoke")
 	Eventually(func(g Gomega) int {
 		out, err := kubectlCtx(spokeContext, "get", "deployment", "guestbook-ui",
 			"-n", "guestbook",
 			"-o", "jsonpath={.status.availableReplicas}")
 		if err != nil {
-			appInfo, _ := kubectlCtx(hubContext, "get", "application", appName,
+			appHubInfo, _ := kubectlCtx(hubContext, "get", "application", appName,
 				"-n", argoCDNamespace,
 				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
-			fmt.Fprintf(GinkgoWriter, "  [diag] guestbook-ui not found on spoke; hub app: %s\n", appInfo)
+			appSpokeInfo, _ := kubectlCtx(spokeContext, "get", "application",
+				appName, "-n", argoCDNamespace,
+				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status} message={.status.conditions[0].message}")
+			fmt.Fprintf(GinkgoWriter,
+				"  [diag] guestbook-ui not found; hub app: %s; spoke app: %s\n",
+				appHubInfo, appSpokeInfo)
 		}
 		g.Expect(err).NotTo(HaveOccurred())
 		if out == "" {

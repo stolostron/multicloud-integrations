@@ -537,3 +537,107 @@ func TestBuildAddonEnvVars(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanupLegacyOLMAddOnTemplates verifies that cleanupLegacyOLMAddOnTemplates removes
+// both the static ("gitops-addon-olm") and the dynamic ("gitops-addon-olm-{ns}-{name}")
+// legacy AddOnTemplates introduced by ACM 2.16.
+func TestCleanupLegacyOLMAddOnTemplates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mc-gitops-ocp",
+			Namespace: "openshift-gitops",
+		},
+	}
+
+	staticTemplate := &addonv1alpha1.AddOnTemplate{}
+	staticTemplate.SetName(LegacyStaticOLMAddOnTemplateName)
+
+	dynamicTemplate := &addonv1alpha1.AddOnTemplate{}
+	dynamicTemplate.SetName(getLegacyOLMAddOnTemplateName(gitOpsCluster))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(staticTemplate, dynamicTemplate).
+		Build()
+
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: scheme}
+	r.cleanupLegacyOLMAddOnTemplates(gitOpsCluster)
+
+	// Both templates should be gone.
+	check := &addonv1alpha1.AddOnTemplate{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: LegacyStaticOLMAddOnTemplateName}, check); err == nil {
+		t.Errorf("static legacy template %q should have been deleted", LegacyStaticOLMAddOnTemplateName)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: getLegacyOLMAddOnTemplateName(gitOpsCluster)}, check); err == nil {
+		t.Errorf("dynamic legacy template %q should have been deleted", getLegacyOLMAddOnTemplateName(gitOpsCluster))
+	}
+}
+
+// TestCleanupLegacyOLMAddOnTemplatesNoOp verifies that cleanupLegacyOLMAddOnTemplates is a
+// no-op when the legacy templates do not exist (e.g. fresh 2.17 install).
+func TestCleanupLegacyOLMAddOnTemplatesNoOp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mc-gitops-ocp",
+			Namespace: "openshift-gitops",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: scheme}
+
+	// Should not panic or return an error when templates are absent.
+	r.cleanupLegacyOLMAddOnTemplates(gitOpsCluster)
+}
+
+// TestEnsureAddOnTemplateDeletesLegacyStaticTemplate verifies that EnsureAddOnTemplate
+// (Mode 2 / ArgoCD-agent path) also deletes the legacy static "gitops-addon-olm" template
+// that was shipped by the ACM 2.16 installer.
+func TestEnsureAddOnTemplateDeletesLegacyStaticTemplate(t *testing.T) {
+	os.Setenv(ControllerImageEnvVar, "test-controller:v1")
+	defer os.Unsetenv(ControllerImageEnvVar)
+
+	scheme := runtime.NewScheme()
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mc-gitops-ocp",
+			Namespace: "openshift-gitops",
+		},
+	}
+
+	// Pre-create both legacy templates to simulate a 2.16→2.17 upgrade.
+	staticLegacy := &addonv1alpha1.AddOnTemplate{}
+	staticLegacy.SetName(LegacyStaticOLMAddOnTemplateName)
+
+	dynamicLegacy := &addonv1alpha1.AddOnTemplate{}
+	dynamicLegacy.SetName(getLegacyOLMAddOnTemplateName(gitOpsCluster))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(staticLegacy, dynamicLegacy).
+		Build()
+
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: scheme}
+
+	if err := r.EnsureAddOnTemplate(gitOpsCluster); err != nil {
+		t.Fatalf("EnsureAddOnTemplate() unexpected error: %v", err)
+	}
+
+	// Both legacy templates should be removed.
+	check := &addonv1alpha1.AddOnTemplate{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: LegacyStaticOLMAddOnTemplateName}, check); err == nil {
+		t.Errorf("static legacy template %q should have been deleted by EnsureAddOnTemplate", LegacyStaticOLMAddOnTemplateName)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: getLegacyOLMAddOnTemplateName(gitOpsCluster)}, check); err == nil {
+		t.Errorf("dynamic legacy template %q should have been deleted by EnsureAddOnTemplate", getLegacyOLMAddOnTemplateName(gitOpsCluster))
+	}
+}
