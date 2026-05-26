@@ -106,8 +106,13 @@ wait_for_addon governance-policy-framework local-cluster
 wait_for_addon config-policy-controller ${SPOKE_CLUSTER}
 wait_for_addon config-policy-controller local-cluster
 
-# ------- Step 3: Install ArgoCD on hub -------
-echo "===== Step 3: Installing ArgoCD on hub ====="
+# ------- Step 3: Install ArgoCD operator on hub -------
+# NOTE: We install the ArgoCD CRDs and operator here, but we do NOT create
+# the ArgoCD CR yet. The ArgoCD principal requires argocd-agent-resource-proxy-tls
+# to exist before it can start. That secret is created by the hub controller
+# when it reconciles a GitOpsCluster. We deploy the controller first (Step 4),
+# trigger cert generation via a stub GitOpsCluster, then create the ArgoCD CR.
+echo "===== Step 3: Installing ArgoCD operator on hub (CRDs + operator only) ====="
 ${KUBECTL} config use-context ${HUB_CTX}
 
 # Apply ArgoCD CRDs
@@ -120,13 +125,134 @@ sed "s|image: quay.io/argoprojlabs/argocd-operator:[^ ]*|image: ${ARGOCD_OPERATO
 echo ">> Waiting for ArgoCD operator deployment"
 ${KUBECTL} --context ${HUB_CTX} wait deployment argocd-operator-controller-manager -n argocd-operator-system --for=condition=Available --timeout=180s
 
-# Create openshift-gitops namespace
+# Create openshift-gitops namespace (needed by both the controller and ArgoCD)
 ${KUBECTL} --context ${HUB_CTX} create namespace openshift-gitops --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
 
-# Create ArgoCD instance on hub (agent principal enabled for agent tests)
+# ------- Step 4: Deploy controller -------
+# Deploy the controller BEFORE creating the ArgoCD CR so it can generate
+# argocd-agent-resource-proxy-tls before the principal pod starts.
+echo "===== Step 4: Deploying multicloud-integrations controller ====="
+${KUBECTL} config use-context ${HUB_CTX}
+
+# Apply CRDs
+for f in "${REPO_DIR}"/deploy/crds/*.yaml; do
+  ${KUBECTL} --context ${HUB_CTX} apply --server-side --force-conflicts -f "$f"
+done
+
+# Create namespace
+${KUBECTL} --context ${HUB_CTX} create namespace open-cluster-management --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
+
+# Apply RBAC and controller
+for f in "${REPO_DIR}"/deploy/controller/*.yaml; do
+  ${KUBECTL} --context ${HUB_CTX} apply -f "$f"
+done
+
+# Patch the deployment image and set operator image env var in a single rollout
+${KUBECTL} --context ${HUB_CTX} set image deployment/multicloud-integrations-gitops -n open-cluster-management manager="${E2E_IMG}"
+${KUBECTL} --context ${HUB_CTX} set env deployment/multicloud-integrations-gitops -n open-cluster-management \
+  GITOPS_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE}"
+
+echo ">> Waiting for controller rollout to complete"
+${KUBECTL} --context ${HUB_CTX} rollout status deployment/multicloud-integrations-gitops -n open-cluster-management --timeout=180s
+
+# ------- Step 5: Apply ClusterManagementAddon + AddOnTemplates -------
+echo "===== Step 5: Applying ClusterManagementAddon and AddOnTemplates ====="
+
+# Patch the AddOnTemplate image to use the e2e image
+sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" "${REPO_DIR}/gitopsaddon/addonTemplates/addonTemplates.yaml" | ${KUBECTL} --context ${HUB_CTX} apply -f -
+${KUBECTL} --context ${HUB_CTX} apply -f "${REPO_DIR}/gitopsaddon/addonTemplates/clusterManagementAddon.yaml"
+
+# ------- Step 3.5: Bootstrap argocd-agent certs before ArgoCD CR -------
+#
+# The new argocd-operator:latest requires argocd-agent-resource-proxy-tls to exist
+# when the principal pod starts (it FATALs if the secret is missing). The hub
+# controller generates all three certs (CA, principal TLS, resource proxy TLS)
+# during GitOpsCluster reconciliation.
+#
+# We create a stub GitOpsCluster here — with the same name and namespace the test
+# uses — to trigger cert generation before the ArgoCD CR is created. The test's
+# BeforeAll will later update this same object via kubectl apply with the full spec
+# (Placement, etc.). The controller will fail to process the Placement (it doesn't
+# exist yet), but cert generation happens early in the reconcile loop, before
+# Placement processing, so all three secrets will be created.
+echo "===== Step 3.5: Bootstrap argocd-agent certs via stub GitOpsCluster ====="
+
+# Create the resource proxy service now so the controller can discover it when
+# building the resource proxy cert SANs. This ensures the SANs in the generated
+# cert match the service name, avoiding a SAN-drift delete-and-recreate cycle later.
+echo ">> Pre-creating resource proxy service for SAN discovery"
+cat <<'RESOURCE_PROXY_PRESVC_EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshift-gitops-agent-principal-resource-proxy
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: argocd-agent
+    app.kubernetes.io/name: openshift-gitops-agent-principal-resource-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: openshift-gitops-agent-principal
+  ports:
+  - name: resource-proxy
+    port: 9090
+    targetPort: 9090
+RESOURCE_PROXY_PRESVC_EOF
+
+echo ">> Creating stub GitOpsCluster to trigger cert generation"
+cat <<'STUB_EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: gitops-cluster
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: all-openshift-clusters
+  gitopsAddon:
+    enabled: true
+    argoCDAgent:
+      enabled: true
+STUB_EOF
+
+echo ">> Waiting for argocd-agent-resource-proxy-tls to be created by the controller"
+for i in $(seq 1 60); do
+  if ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops get secret argocd-agent-resource-proxy-tls &>/dev/null; then
+    echo "argocd-agent-resource-proxy-tls created — all agent certs are ready"
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "ERROR: argocd-agent-resource-proxy-tls was not created within 300s"
+    echo "Controller logs (last 50 lines):"
+    CTRL_POD=$(${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management \
+      --no-headers -o name 2>/dev/null | grep multicloud-integrations-gitops | head -1)
+    if [ -n "${CTRL_POD}" ]; then
+      ${KUBECTL} --context ${HUB_CTX} logs -n open-cluster-management "${CTRL_POD}" --tail=50 || true
+    else
+      echo "  (controller pod not found — listing pods in open-cluster-management:)"
+      ${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management || true
+    fi
+    exit 1
+  fi
+  echo "  Waiting for resource proxy TLS cert... ($i/60)"
+  sleep 5
+done
+
+# ------- Step 3c: Create ArgoCD instance on hub -------
+#
+# All three argocd-agent certs now exist (argocd-agent-ca, argocd-agent-principal-tls,
+# argocd-agent-resource-proxy-tls). The principal pod will load them successfully
+# on first start without crashing or entering CrashLoopBackOff.
+#
 # Controller must be enabled: the ApplicationSet controller is embedded in the
 # application-controller process in ArgoCD 2.14+, so disabling the controller
 # also disables ApplicationSet generation.
+echo "===== Step 3c: Creating ArgoCD instance on hub ====="
 cat <<'EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
 apiVersion: argoproj.io/v1beta1
 kind: ArgoCD
@@ -173,24 +299,11 @@ if ! ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait --for=condition=Re
 fi
 echo "ArgoCD server is Ready"
 
-# ------- Step 3b: Wait for principal pod and create resource proxy service -------
+# ------- Step 3d: Wait for principal pod -------
 #
-# The argocd-agent principal binary runs TWO servers on separate ports:
-#   • Port 443 / NodePort  — gRPC server for agent connections (exposed by the operator)
-#   • Port 9090            — resource proxy (fake K8s API for ArgoCD app-controller)
-#
-# The Red Hat OpenShift GitOps operator automatically creates a ClusterIP Service
-# named "openshift-gitops-agent-principal-resource-proxy" on port 9090.  The upstream
-# argoprojlabs/argocd-operator only creates the NodePort gRPC service, leaving port 9090
-# unreachable via a Service.  Without this Service the hub controller's
-# FindArgoCDAgentResourceProxyService() lookup fails and falls back to a hardcoded service
-# name that doesn't exist, causing the cluster-secret server URL to point at a non-existent
-# endpoint and ArgoCD's app-controller to be unable to dispatch Applications to agents.
-#
-# We replicate the Red Hat operator behaviour here by creating the service explicitly once
-# the principal pod is running.  This is the same service that the controller queries when
-# building the cluster-secret server URL used by the ArgoCD app-controller.
-echo ">> Waiting for ArgoCD agent principal pod"
+# The principal should start cleanly on the first attempt since all required TLS
+# secrets exist. We no longer expect CrashLoopBackOff here.
+echo ">> Waiting for ArgoCD agent principal pod to become Ready"
 for i in $(seq 1 36); do
   POD_COUNT=$(${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops \
     -l app.kubernetes.io/name=openshift-gitops-agent-principal --no-headers 2>/dev/null | wc -l)
@@ -201,30 +314,20 @@ for i in $(seq 1 36); do
   echo "  Waiting for principal pod to appear... ($i/36)"
   sleep 10
 done
-${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait \
+if ! ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait \
   --for=condition=Ready pod \
   -l app.kubernetes.io/name=openshift-gitops-agent-principal \
-  --timeout=120s || echo "WARN: principal pod did not become Ready within 120s — will continue anyway"
+  --timeout=180s; then
+  echo "WARN: principal pod did not become Ready within 180s — checking for crashes"
+  ${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-agent-principal
+  ${KUBECTL} --context ${HUB_CTX} logs -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-agent-principal --tail=30 || true
+  echo "WARN: continuing anyway — the cert exists so principal should eventually start"
+fi
 
-echo ">> Creating resource proxy service for argocd-agent principal"
-cat <<'RESOURCE_PROXY_EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: openshift-gitops-agent-principal-resource-proxy
-  namespace: openshift-gitops
-  labels:
-    app.kubernetes.io/part-of: argocd-agent
-    app.kubernetes.io/name: openshift-gitops-agent-principal-resource-proxy
-spec:
-  selector:
-    app.kubernetes.io/name: openshift-gitops-agent-principal
-  ports:
-  - name: resource-proxy
-    port: 9090
-    targetPort: 9090
-RESOURCE_PROXY_EOF
-echo "Resource proxy service created"
+# The resource proxy service was already created in Step 3.5 (before cert bootstrap).
+# Confirm it still exists (idempotent apply is safe here).
+echo ">> Confirming resource proxy service exists"
+${KUBECTL} --context ${HUB_CTX} get service openshift-gitops-agent-principal-resource-proxy -n openshift-gitops
 
 # Apply ArgoCD CRDs on spoke (needed for ArgoCD operator to work)
 ${KUBECTL} --context ${SPOKE_CTX} apply --server-side --force-conflicts -f "${REPO_DIR}/test/e2e/fixtures/argocd-operator-crds.yaml"
@@ -238,38 +341,6 @@ fi
 # absence of Route API (logs "route.openshift.io/v1 API is not registered" and skips Route
 # creation). On managed clusters, the gitopsaddon agent installs the Route CRD stub
 # (gitopsaddon/routes-openshift-crd/) as part of the embedded chart deployment.
-
-# ------- Step 4: Deploy controller -------
-echo "===== Step 4: Deploying multicloud-integrations controller ====="
-${KUBECTL} config use-context ${HUB_CTX}
-
-# Apply CRDs
-for f in "${REPO_DIR}"/deploy/crds/*.yaml; do
-  ${KUBECTL} --context ${HUB_CTX} apply --server-side --force-conflicts -f "$f"
-done
-
-# Create namespace
-${KUBECTL} --context ${HUB_CTX} create namespace open-cluster-management --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
-
-# Apply RBAC and controller
-for f in "${REPO_DIR}"/deploy/controller/*.yaml; do
-  ${KUBECTL} --context ${HUB_CTX} apply -f "$f"
-done
-
-# Patch the deployment image and set operator image env var in a single rollout
-${KUBECTL} --context ${HUB_CTX} set image deployment/multicloud-integrations-gitops -n open-cluster-management manager="${E2E_IMG}"
-${KUBECTL} --context ${HUB_CTX} set env deployment/multicloud-integrations-gitops -n open-cluster-management \
-  GITOPS_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE}"
-
-echo ">> Waiting for controller rollout to complete"
-${KUBECTL} --context ${HUB_CTX} rollout status deployment/multicloud-integrations-gitops -n open-cluster-management --timeout=180s
-
-# ------- Step 5: Apply ClusterManagementAddon + AddOnTemplates -------
-echo "===== Step 5: Applying ClusterManagementAddon and AddOnTemplates ====="
-
-# Patch the AddOnTemplate image to use the e2e image
-sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" "${REPO_DIR}/gitopsaddon/addonTemplates/addonTemplates.yaml" | ${KUBECTL} --context ${HUB_CTX} apply -f -
-${KUBECTL} --context ${HUB_CTX} apply -f "${REPO_DIR}/gitopsaddon/addonTemplates/clusterManagementAddon.yaml"
 
 echo ""
 echo "============================================"

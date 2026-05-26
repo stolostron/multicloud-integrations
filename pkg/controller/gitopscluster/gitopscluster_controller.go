@@ -493,6 +493,31 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	annotations := instance.GetAnnotations()
 
+	// 0. Eagerly generate argocd-agent TLS certs when agent mode is requested.
+	// This MUST happen before VerifyArgocdNamespace (which requires ArgoCD to be
+	// installed) and GetManagedClusters (which requires the Placement to exist),
+	// because the ArgoCD principal pod requires argocd-agent-resource-proxy-tls to
+	// exist at startup and will enter CrashLoopBackOff if it is missing.
+	// The cert generation only needs the openshift-gitops namespace to exist.
+	// Failures here are logged as warnings and do NOT block reconciliation —
+	// the full cert generation block later in the reconcile will handle retries
+	// and set proper status conditions.
+	if instance.Spec.GitOpsAddon != nil &&
+		instance.Spec.GitOpsAddon.ArgoCDAgent != nil &&
+		instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled != nil &&
+		*instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled {
+		if err := r.EnsureArgoCDAgentCASecret(ctx, instance); err != nil {
+			klog.Warningf("[early-cert] failed to ensure CA secret for %s: %v — will retry later", instance.Namespace+"/"+instance.Name, err)
+		} else {
+			if err := r.EnsureArgoCDAgentPrincipalTLSCert(ctx, instance); err != nil {
+				klog.Warningf("[early-cert] failed to ensure principal TLS cert for %s: %v — will retry later", instance.Namespace+"/"+instance.Name, err)
+			}
+			if err := r.EnsureArgoCDAgentResourceProxyTLSCert(ctx, instance); err != nil {
+				klog.Warningf("[early-cert] failed to ensure resource proxy TLS cert for %s: %v — will retry later", instance.Namespace+"/"+instance.Name, err)
+			}
+		}
+	}
+
 	// Create default policy template
 	if err := r.CreatePolicyTemplate(instance); err != nil {
 		klog.Error("failed to create policy template: ", err)
@@ -954,8 +979,18 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
 		} else {
-			// Mode 1: Default mode without ArgoCD agent (uses static gitops-addon template)
+			// Mode 1: Default mode without ArgoCD agent (uses static gitops-addon template).
+			// Clean up any legacy OLM AddOnTemplates that were left by the 2.16 controller or
+			// installer. This must run every reconcile (not just once) so that:
+			//   1. "gitops-addon-olm" (static, installer-shipped) is removed and OCM stops
+			//      applying the old ManifestWork that embedded the OLM Subscription in
+			//      open-cluster-management-agent-addon (causing the duplicate subscription).
+			//   2. "gitops-addon-olm-{ns}-{name}" (dynamic, controller-created) is removed
+			//      in case it was left by a previous run with a different configuration.
+			// EnsureManagedClusterAddon (called below) removes the stale template config
+			// reference from the MCA before OCM can re-instantiate a ManifestWork from it.
 			klog.Infof("Default GitOps addon mode for GitOpsCluster %s/%s - using static gitops-addon template", instance.Namespace, instance.Name)
+			r.cleanupLegacyOLMAddOnTemplates(instance)
 		}
 
 		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework

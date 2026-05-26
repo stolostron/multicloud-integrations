@@ -462,16 +462,15 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 		}
 	}
 
-	// Add proxy settings from hub operator environment
-	if v := os.Getenv(utils.EnvHTTPProxy); v != "" {
-		managedVariables[utils.EnvHTTPProxy] = v
-	}
-	if v := os.Getenv(utils.EnvHTTPSProxy); v != "" {
-		managedVariables[utils.EnvHTTPSProxy] = v
-	}
-	if v := os.Getenv(utils.EnvNoProxy); v != "" {
-		managedVariables[utils.EnvNoProxy] = v
-	}
+	// Always propagate proxy settings (even as empty strings) so the AddOnTemplate
+	// {{HTTP_PROXY}} / {{HTTPS_PROXY}} / {{NO_PROXY}} placeholders are always resolved
+	// by the OCM addon framework. If these keys are absent from the ADC, OCM leaves the
+	// raw template literal in the pod env var, which Go's http client interprets as a
+	// broken proxy URL and routes all connections (including in-cluster API server calls)
+	// through it, causing leader election and every API call to fail.
+	managedVariables[utils.EnvHTTPProxy] = os.Getenv(utils.EnvHTTPProxy)
+	managedVariables[utils.EnvHTTPSProxy] = os.Getenv(utils.EnvHTTPSProxy)
+	managedVariables[utils.EnvNoProxy] = os.Getenv(utils.EnvNoProxy)
 
 	// Extract values from GitOpsAddon spec - these override environment settings
 	if gitOpsCluster.Spec.GitOpsAddon != nil {
