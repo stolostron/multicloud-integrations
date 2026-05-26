@@ -30,14 +30,16 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
+	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -595,10 +597,15 @@ func (r *ReconcileGitOpsCluster) createBlankClusterSecret(
 }
 
 // cleanupOldArgoClusterSecrets lists all ACM-managed ArgoCD cluster secrets for the given
-// managed cluster and deletes any that are stale (different name, same server URL as the new
-// secret, not an agent-mode secret). Only secrets whose server URL matches the new secret are
-// deleted — if the server URL differs the old secret may still be referenced by ArgoCD
-// Applications, and deleting it could cause those Applications to be removed by ArgoCD.
+// managed cluster and deletes stale ones (different name, not an agent-mode secret).
+//
+// Two deletion strategies are applied:
+//  1. Same server URL as the new secret → unconditionally deleted (safe: ArgoCD resolves to
+//     the same endpoint so no existing Application destinations break).
+//  2. Different server URL → "safe-mode" deletion: the secret is removed only when no ArgoCD
+//     Application in the namespace explicitly references the old server URL via
+//     spec.destination.server. If any Application still points to that URL the secret is
+//     preserved to prevent ArgoCD from deleting or erroring on those Applications.
 func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secret, managedClusterName string) {
 	secretList := &v1.SecretList{}
 
@@ -635,6 +642,7 @@ func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secr
 	for i := range secretList.Items {
 		oldSecret := &secretList.Items[i]
 
+		// Skip the new secret
 		if oldSecret.Name == newSecret.Name {
 			continue
 		}
@@ -645,17 +653,26 @@ func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secr
 			continue
 		}
 
-		// Only delete if the server URL matches the new secret. A different server URL means the
-		// old secret points to a different cluster endpoint that ArgoCD Applications may still
-		// reference — deleting it could cause ArgoCD to remove those Applications.
 		oldServer := string(oldSecret.Data["server"])
-		if oldServer != newServer {
-			klog.Infof("Skipping deletion of %s/%s: server URL %q differs from new secret %q — Applications may still reference it",
-				oldSecret.Namespace, oldSecret.Name, oldServer, newServer)
-			continue
-		}
+		oldClusterName := string(oldSecret.Data["name"])
 
-		klog.Infof("Cleaning up old ArgoCD cluster secret %s/%s (replaced by %s)", oldSecret.Namespace, oldSecret.Name, newSecret.Name)
+		if oldServer != newServer {
+			// Safe-mode: the old secret points to a different endpoint. Only delete if no
+			// ArgoCD Application explicitly references the old server URL via
+			// spec.destination.server. A destination.name reference resolves through the
+			// cluster registry: because the new secret registers the same cluster name, ArgoCD
+			// will continue to find the cluster after the old secret is removed — so
+			// destination.name references do NOT prevent deletion.
+			if r.isOldSecretReferencedByArgoApps(newSecret.Namespace, oldServer) {
+				klog.Infof("Skipping deletion of %s/%s: cluster %q / server URL %q is still referenced via spec.destination.server by ArgoCD Applications",
+					oldSecret.Namespace, oldSecret.Name, oldClusterName, oldServer)
+				continue
+			}
+			klog.Infof("Safe-deleting old ArgoCD cluster secret %s/%s: cluster %q / server URL %q not referenced by any Application (replaced by %s)",
+				oldSecret.Namespace, oldSecret.Name, oldClusterName, oldServer, newSecret.Name)
+		} else {
+			klog.Infof("Cleaning up old ArgoCD cluster secret %s/%s (replaced by %s)", oldSecret.Namespace, oldSecret.Name, newSecret.Name)
+		}
 
 		if err := r.Delete(context.TODO(), oldSecret); err != nil {
 			klog.Warningf("Failed to delete old ArgoCD cluster secret %s/%s: %v", oldSecret.Namespace, oldSecret.Name, err)
@@ -663,6 +680,45 @@ func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secr
 			klog.Infof("Successfully cleaned up old ArgoCD cluster secret %s/%s", oldSecret.Namespace, oldSecret.Name)
 		}
 	}
+}
+
+// isOldSecretReferencedByArgoApps reports whether any ArgoCD Application in the given namespace
+// has spec.destination.server equal to serverURL.
+//
+// Only the explicit server-URL reference is checked. A destination.name reference resolves
+// through ArgoCD's cluster registry: because the new secret registers the same cluster name,
+// ArgoCD continues to find the cluster after the old secret is removed. Preserving an old
+// secret solely because of destination.name references would prevent the cleanup that fixes the
+// "2 clusters with the same name" error caused by having both old and new secrets present.
+//
+// If the ArgoCD Application CRD is not installed (no-match error) the function returns false —
+// there can be no Applications referencing the secret, so deletion is safe.
+// For all other listing errors it returns true (fail-safe: do not delete).
+func (r *ReconcileGitOpsCluster) isOldSecretReferencedByArgoApps(namespace, serverURL string) bool {
+	appList := &unstructured.UnstructuredList{}
+	appList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "argoproj.io",
+		Version: "v1alpha1",
+		Kind:    "ApplicationList",
+	})
+
+	if err := r.List(context.TODO(), appList, &client.ListOptions{Namespace: namespace}); err != nil {
+		if meta.IsNoMatchError(err) {
+			// ArgoCD Application CRD is not installed — no Applications can reference the secret.
+			return false
+		}
+		klog.Warningf("Failed to list ArgoCD Applications in namespace %s: %v — treating old secret as referenced", namespace, err)
+		return true
+	}
+
+	for i := range appList.Items {
+		destServer, _, _ := unstructured.NestedString(appList.Items[i].Object, "spec", "destination", "server")
+		if destServer == serverURL {
+			return true
+		}
+	}
+
+	return false
 }
 
 // cleanupOldClusterSecrets removes old cluster secrets from the managed cluster namespace
