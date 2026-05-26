@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1293,41 +1294,48 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 						},
 					},
 				},
-				// Pre-create the traditional cluster secret that the controller would create
-				&v1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "cluster1-gitops-cluster",
-						Namespace: "argocd",
-						Labels: map[string]string{
-							argoCDTypeLabel: argoCDSecretTypeClusterValue,
-							"apps.open-cluster-management.io/acm-cluster":    "true",
-							"apps.open-cluster-management.io/cluster-name":   "cluster1",
-							"apps.open-cluster-management.io/cluster-server": "cluster1-server",
-						},
-					},
-					Data: map[string][]byte{
-						"server": []byte("https://cluster1-server"),
-						"name":   []byte("cluster1"),
+			// Pre-existing legacy secret (old naming convention, different server URL).
+			// With safe-mode cleanup, this should be deleted because no ArgoCD Applications
+			// reference its server URL.
+			&v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cluster1-gitops-cluster",
+					Namespace: "argocd",
+					Labels: map[string]string{
+						argoCDTypeLabel: argoCDSecretTypeClusterValue,
+						"apps.open-cluster-management.io/acm-cluster":    "true",
+						"apps.open-cluster-management.io/cluster-name":   "cluster1",
+						"apps.open-cluster-management.io/cluster-server": "cluster1-server",
 					},
 				},
-				createTestArgoCDServerService("argocd"),
-				createTestArgoCDServerPod("argocd"),
-				// Note: CA secret is now self-generated via certrotation, no source secret needed
+				Data: map[string][]byte{
+					"server": []byte("https://cluster1-server"),
+					"name":   []byte("cluster1"),
+				},
 			},
-			expectedCondition: string(metav1.ConditionTrue),
-			expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
-			expectedMessage:   "Successfully registered 1 managed clusters to ArgoCD",
-			validateFunc: func(t *testing.T, c client.Client) {
-				// Verify traditional cluster secret was created (without agent labels)
-				secret := &v1.Secret{}
-				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-gitops-cluster", Namespace: "argocd"}, secret)
-				assert.NoError(t, err)
-				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel])
-				// Should NOT have agent mapping label
-				_, hasAgentLabel := secret.Labels[labelKeyClusterAgentMapping]
-				assert.False(t, hasAgentLabel)
-			},
+			createTestArgoCDServerService("argocd"),
+			createTestArgoCDServerPod("argocd"),
+			// Note: CA secret is now self-generated via certrotation, no source secret needed
 		},
+		expectedCondition: string(metav1.ConditionTrue),
+		expectedReason:    gitopsclusterV1beta1.ReasonSuccess,
+		expectedMessage:   "Successfully registered 1 managed clusters to ArgoCD",
+		validateFunc: func(t *testing.T, c client.Client) {
+			// Verify the new blank pull-model secret was created (without agent labels)
+			secret := &v1.Secret{}
+			err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-application-manager-cluster-secret", Namespace: "argocd"}, secret)
+			assert.NoError(t, err)
+			assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel])
+			// Should NOT have agent mapping label
+			_, hasAgentLabel := secret.Labels[labelKeyClusterAgentMapping]
+			assert.False(t, hasAgentLabel)
+
+			// The old legacy secret should have been safe-deleted (different URL, no Apps reference it)
+			oldSecret := &v1.Secret{}
+			getErr := c.Get(context.TODO(), types.NamespacedName{Name: "cluster1-gitops-cluster", Namespace: "argocd"}, oldSecret)
+			assert.True(t, k8errors.IsNotFound(getErr), "legacy secret cluster1-gitops-cluster should have been safe-deleted")
+		},
+	},
 	}
 
 	for _, tt := range tests {
