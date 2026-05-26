@@ -16,11 +16,12 @@ package gitopscluster
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"net"
 	"strings"
 	"time"
-
-	"crypto/x509"
 
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -166,12 +167,18 @@ func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentPrincipalTLSCert(ctx context.C
 		return fmt.Errorf("failed to load CA certificate: %w", err)
 	}
 
+	desiredPrincipalHostNames := r.getPrincipalHostNames(ctx, namespace, gitOpsCluster)
+
+	// Delete the secret if its SANs no longer match what we would generate (e.g. Route hostname
+	// changed or cert was generated before the service existed).
+	r.deleteSecretIfSANsDrifted(ctx, namespace, ArgoCDAgentPrincipalTLSSecretName, desiredPrincipalHostNames)
+
 	// Create TargetRotation for the principal TLS certificate
 	principalRotation := &certrotation.TargetRotation{
 		Namespace: namespace,
 		Name:      ArgoCDAgentPrincipalTLSSecretName,
 		Validity:  TargetCertValidity,
-		HostNames: r.getPrincipalHostNames(ctx, namespace, gitOpsCluster),
+		HostNames: desiredPrincipalHostNames,
 		Lister:    secretLister,
 		Client:    kubeClient.CoreV1(),
 	}
@@ -218,12 +225,18 @@ func (r *ReconcileGitOpsCluster) EnsureArgoCDAgentResourceProxyTLSCert(ctx conte
 		return fmt.Errorf("failed to load CA certificate: %w", err)
 	}
 
+	desiredResourceProxyHostNames := r.getResourceProxyHostNames(ctx, namespace)
+
+	// Delete the secret if its SANs no longer match what we would generate.  This forces
+	// certrotation to issue a fresh cert with the correct SANs on the next call.
+	r.deleteSecretIfSANsDrifted(ctx, namespace, ArgoCDAgentResourceProxyTLSSecretName, desiredResourceProxyHostNames)
+
 	// Create TargetRotation for the resource proxy TLS certificate
 	resourceProxyRotation := &certrotation.TargetRotation{
 		Namespace: namespace,
 		Name:      ArgoCDAgentResourceProxyTLSSecretName,
 		Validity:  TargetCertValidity,
-		HostNames: r.getResourceProxyHostNames(ctx, namespace),
+		HostNames: desiredResourceProxyHostNames,
 		Lister:    secretLister,
 		Client:    kubeClient.CoreV1(),
 	}
@@ -378,6 +391,11 @@ func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, name
 			fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
 		)
 		hostnames = append(hostnames, "localhost", "127.0.0.1", "::1")
+		// Include all node InternalIPs so agents on external clusters (e.g. Kind) can
+		// connect to the principal via NodePort without a TLS SAN mismatch.  This path
+		// is hit when the stub GitOpsCluster is created before the ArgoCD operator
+		// deploys the principal service, so node IPs must be baked in from the start.
+		hostnames = r.appendNodeIPs(ctx, hostnames)
 		return hostnames
 	}
 
@@ -395,6 +413,13 @@ func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, name
 		}
 	}
 
+	// When the service has no LoadBalancer IPs (NodePort / ClusterIP), fall back to
+	// node InternalIPs so agents on external clusters can verify the principal's cert
+	// when connecting via NodePort.  LoadBalancer deployments do not reach this branch.
+	if len(service.Status.LoadBalancer.Ingress) == 0 {
+		hostnames = r.appendNodeIPs(ctx, hostnames)
+	}
+
 	// Always add internal DNS names
 	hostnames = append(hostnames,
 		fmt.Sprintf("%s.%s.svc", service.Name, namespace),
@@ -404,6 +429,27 @@ func (r *ReconcileGitOpsCluster) getPrincipalHostNames(ctx context.Context, name
 	// Add localhost for local access
 	hostnames = append(hostnames, "localhost", "127.0.0.1", "::1")
 
+	return hostnames
+}
+
+// appendNodeIPs appends the InternalIP address of every ready node to hostnames.
+// Used as SANs for the principal TLS certificate when the principal is exposed via
+// NodePort (no LoadBalancer).  Agents on external clusters verify the principal's
+// server certificate against these SANs when connecting via the node IP.
+func (r *ReconcileGitOpsCluster) appendNodeIPs(ctx context.Context, hostnames []string) []string {
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		klog.V(2).Infof("Could not list nodes for NodePort SAN discovery: %v", err)
+		return hostnames
+	}
+	for _, node := range nodeList.Items {
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP && addr.Address != "" {
+				hostnames = append(hostnames, addr.Address)
+				klog.V(2).Infof("Added node InternalIP to principal certificate SANs: %s", addr.Address)
+			}
+		}
+	}
 	return hostnames
 }
 
@@ -451,40 +497,117 @@ func (r *ReconcileGitOpsCluster) discoverRouteHostname(ctx context.Context, name
 	return "", fmt.Errorf("no route with host found")
 }
 
-// getResourceProxyHostNames returns the hostnames for the resource proxy certificate
-// For resource proxy, we need internal cluster DNS names for the resource-proxy service
+// getResourceProxyHostNames returns the hostnames for the resource proxy certificate.
+// It discovers the actual resource-proxy service directly via FindArgoCDAgentResourceProxyService
+// (which checks the well-known name openshift-gitops-agent-principal-resource-proxy first, then
+// falls back to a label+port scan), so the SAN matches the real service name rather than one
+// derived from the principal service name.
 func (r *ReconcileGitOpsCluster) getResourceProxyHostNames(ctx context.Context, namespace string) []string {
 	hostnames := []string{}
 
-	// Try to get the principal service to derive the resource-proxy service name
-	service, err := r.FindArgoCDAgentPrincipalService(ctx, namespace)
-	principalServiceName := "argocd-agent-principal"
+	// Discover the resource proxy service directly.
+	resourceProxyServiceName := "argocd-agent-principal-resource-proxy" // fallback default
+	resourceProxySvc, _, err := r.FindArgoCDAgentResourceProxyService(ctx, namespace)
 	if err == nil {
-		principalServiceName = service.Name
+		resourceProxyServiceName = resourceProxySvc.Name
+		klog.V(2).Infof("Discovered resource proxy service name: %s", resourceProxyServiceName)
+	} else {
+		klog.Warningf("Could not find resource proxy service, using default name %q: %v", resourceProxyServiceName, err)
 	}
 
-	// The resource-proxy service is named <principal-service-name>-resource-proxy
-	resourceProxyServiceName := fmt.Sprintf("%s-resource-proxy", principalServiceName)
+	// Discover the principal service for compatibility SANs.
+	principalServiceName := "argocd-agent-principal" // fallback default
+	principalSvc, err := r.FindArgoCDAgentPrincipalService(ctx, namespace)
+	if err == nil {
+		principalServiceName = principalSvc.Name
+	}
 
-	// Add internal DNS names for resource proxy service
+	// Add internal DNS names for the resource proxy service (primary SANs).
 	hostnames = append(hostnames,
 		fmt.Sprintf("%s.%s.svc", resourceProxyServiceName, namespace),
 		fmt.Sprintf("%s.%s.svc.cluster.local", resourceProxyServiceName, namespace),
 	)
 
-	// Also add the principal service names for compatibility
+	// Add principal service DNS names for compatibility.
 	hostnames = append(hostnames,
 		fmt.Sprintf("%s.%s.svc", principalServiceName, namespace),
 		fmt.Sprintf("%s.%s.svc.cluster.local", principalServiceName, namespace),
 	)
 
-	// Add localhost for local access
+	// Add localhost for local access.
 	hostnames = append(hostnames, "localhost", "127.0.0.1", "::1")
 
 	return hostnames
 }
 
 // findArgoCDAgentPrincipalService moved to server_discovery.go as FindArgoCDAgentPrincipalService
+
+// deleteSecretIfSANsDrifted reads the TLS secret identified by secretName in namespace and
+// compares its SANs (DNS names + IP addresses) against the desired hostnames.  If the cert is
+// missing any desired hostname it is stale (typically because it was generated before the
+// principal/resource-proxy services existed and fell back to default names).  Deleting the secret
+// forces the certrotation library to issue a fresh certificate on the next EnsureTargetCertKeyPair
+// call.  If the secret does not exist yet nothing is done.
+func (r *ReconcileGitOpsCluster) deleteSecretIfSANsDrifted(ctx context.Context, namespace, secretName string, desiredHostnames []string) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
+		// Secret doesn't exist yet — certrotation will create it fresh.
+		return
+	}
+
+	certPEM, ok := secret.Data["tls.crt"]
+	if !ok {
+		klog.Warningf("Secret %s/%s has no tls.crt, deleting to force regeneration", namespace, secretName)
+		_ = r.Delete(ctx, secret)
+		return
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		klog.Warningf("Secret %s/%s has unparseable tls.crt PEM, deleting to force regeneration", namespace, secretName)
+		_ = r.Delete(ctx, secret)
+		return
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		klog.Warningf("Secret %s/%s: failed to parse certificate: %v; deleting to force regeneration", namespace, secretName, err)
+		_ = r.Delete(ctx, secret)
+		return
+	}
+
+	// Build a set of SANs currently in the cert.
+	currentSANs := make(map[string]struct{}, len(cert.DNSNames)+len(cert.IPAddresses))
+	for _, dns := range cert.DNSNames {
+		currentSANs[dns] = struct{}{}
+	}
+	for _, ip := range cert.IPAddresses {
+		currentSANs[ip.String()] = struct{}{}
+	}
+
+	// Check whether all desired hostnames are covered.
+	var missing []string
+	for _, h := range desiredHostnames {
+		// Treat entries that look like IPs specially (net.ParseIP returns non-nil for IPs).
+		key := h
+		if ip := net.ParseIP(h); ip != nil {
+			key = ip.String()
+		}
+		if _, found := currentSANs[key]; !found {
+			missing = append(missing, h)
+		}
+	}
+
+	if len(missing) == 0 {
+		klog.V(4).Infof("Secret %s/%s SANs are up to date", namespace, secretName)
+		return
+	}
+
+	klog.Infof("Secret %s/%s SANs are stale (missing: %v); deleting to force re-issue with correct SANs", namespace, secretName, missing)
+	if err := r.Delete(ctx, secret); err != nil && !k8serrors.IsNotFound(err) {
+		klog.Warningf("Failed to delete stale cert secret %s/%s: %v", namespace, secretName, err)
+	}
+}
 
 // getKubernetesClientset returns the Kubernetes clientset
 func (r *ReconcileGitOpsCluster) getKubernetesClientset() (*kubernetes.Clientset, error) {

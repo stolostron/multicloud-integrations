@@ -1841,4 +1841,184 @@ func TestMigrateSubscriptionFromNamespace(t *testing.T) {
 		err := reconciler.migrateSubscriptionFromNamespace(context.Background(), "openshift-operators-nonexistent-ns")
 		g.Expect(err).ToNot(gomega.HaveOccurred())
 	})
+
+	// Regression test: 2.16→2.17 upgrade leaves a subscription in open-cluster-management-agent-addon.
+	// installViaOLMSubscription must now also migrate from that namespace.
+	t.Run("migrates from open-cluster-management-agent-addon (2.16 to 2.17 upgrade)", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			Config: getTestEnv().Config,
+		}
+
+		unsetEnvForTest(t, "OLM_SUBSCRIPTION_NAME")
+
+		addonNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: AddonNamespace}}
+		_ = reconciler.Create(ctx, addonNs)
+
+		csvName := "openshift-gitops-operator.v1.20.3"
+
+		sub := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "Subscription",
+				"metadata": map[string]interface{}{
+					"name":      "openshift-gitops-operator",
+					"namespace": AddonNamespace,
+					"labels": map[string]interface{}{
+						"apps.open-cluster-management.io/gitopsaddon": "true",
+					},
+				},
+				"spec": map[string]interface{}{
+					"name":                "openshift-gitops-operator",
+					"channel":             "latest",
+					"source":              "redhat-operators",
+					"sourceNamespace":     "openshift-marketplace",
+					"installPlanApproval": "Automatic",
+				},
+				"status": map[string]interface{}{
+					"installedCSV": csvName,
+				},
+			},
+		}
+		err := reconciler.Create(ctx, sub)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+		t.Cleanup(func() { _ = reconciler.Delete(ctx, sub) })
+
+		csv := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "operators.coreos.com/v1alpha1",
+				"kind":       "ClusterServiceVersion",
+				"metadata": map[string]interface{}{
+					"name":      csvName,
+					"namespace": AddonNamespace,
+				},
+			},
+		}
+		err = reconciler.Create(ctx, csv)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+		}
+
+		t.Setenv("OLM_SUBSCRIPTION_NAME", "openshift-gitops-operator")
+		err = reconciler.migrateSubscriptionFromNamespace(ctx, AddonNamespace)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		checkSub := &unstructured.Unstructured{}
+		checkSub.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkSub.SetKind("Subscription")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      "openshift-gitops-operator",
+			Namespace: AddonNamespace,
+		}, checkSub)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "stale subscription in open-cluster-management-agent-addon should be deleted")
+
+		checkCSV := &unstructured.Unstructured{}
+		checkCSV.SetAPIVersion("operators.coreos.com/v1alpha1")
+		checkCSV.SetKind("ClusterServiceVersion")
+		err = reconciler.Get(ctx, types.NamespacedName{
+			Name:      csvName,
+			Namespace: AddonNamespace,
+		}, checkCSV)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "CSV from stale subscription should be deleted")
+	})
+}
+
+// TestDeleteDefaultGitopsServiceIfStale exercises the upgrade cleanup that removes the
+// default GitopsService CR (and thus the openshift-gitops ArgoCD CR) when upgrading from
+// ACM 2.16 (which lacked DISABLE_DEFAULT_ARGOCD_INSTANCE=true in the embedded subscription).
+func TestDeleteDefaultGitopsServiceIfStale(t *testing.T) {
+	argoCDNamespace := "openshift-gitops"
+	t.Setenv("ARGOCD_NAMESPACE", argoCDNamespace)
+
+	makeGitopsService := func() *unstructured.Unstructured {
+		gs := &unstructured.Unstructured{}
+		gs.SetAPIVersion("pipelines.openshift.io/v1alpha1")
+		gs.SetKind("GitopsService")
+		gs.SetName("cluster")
+		return gs
+	}
+
+	makeAcmArgoCD := func() *unstructured.Unstructured {
+		a := &unstructured.Unstructured{}
+		a.SetAPIVersion("argoproj.io/v1beta1")
+		a.SetKind("ArgoCD")
+		a.SetName("acm-openshift-gitops")
+		a.SetNamespace(argoCDNamespace)
+		return a
+	}
+
+	t.Run("deletes GitopsService when acm-openshift-gitops ArgoCD exists", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		// Create GitopsService and acm-openshift-gitops ArgoCD using the test env client
+		// (the fake client from the reconciler would need dynamic scheme; use real env client)
+		testEnvClient := getTestEnv().Client
+
+		gs := makeGitopsService()
+		if err := testEnvClient.Create(ctx, gs); err != nil && !errors.IsAlreadyExists(err) {
+			t.Skipf("GitopsService CRD not available in test env: %v", err)
+		}
+		t.Cleanup(func() { _ = testEnvClient.Delete(ctx, gs) })
+
+		acm := makeAcmArgoCD()
+		if err := testEnvClient.Create(ctx, acm); err != nil && !errors.IsAlreadyExists(err) {
+			t.Skipf("ArgoCD CRD not available in test env: %v", err)
+		}
+		t.Cleanup(func() { _ = testEnvClient.Delete(ctx, acm) })
+
+		r2 := &GitopsAddonReconciler{Client: testEnvClient, Config: getTestEnv().Config}
+		err := r2.deleteDefaultGitopsServiceIfStale(ctx)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		checkGS := makeGitopsService()
+		err = testEnvClient.Get(ctx, types.NamespacedName{Name: "cluster"}, checkGS)
+		g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "GitopsService should be deleted")
+	})
+
+	t.Run("no-op when acm-openshift-gitops ArgoCD does not exist yet", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		testEnvClient := getTestEnv().Client
+
+		gs := makeGitopsService()
+		if err := testEnvClient.Create(ctx, gs); err != nil && !errors.IsAlreadyExists(err) {
+			t.Skipf("GitopsService CRD not available in test env: %v", err)
+		}
+		t.Cleanup(func() { _ = testEnvClient.Delete(ctx, gs) })
+
+		// No acm-openshift-gitops ArgoCD — cleanup should be skipped.
+		r2 := &GitopsAddonReconciler{Client: testEnvClient, Config: getTestEnv().Config}
+		err := r2.deleteDefaultGitopsServiceIfStale(ctx)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+
+		// GitopsService should still be present since the guard condition was not met.
+		checkGS := makeGitopsService()
+		err = testEnvClient.Get(ctx, types.NamespacedName{Name: "cluster"}, checkGS)
+		g.Expect(err).ToNot(gomega.HaveOccurred(), "GitopsService should NOT be deleted when acm ArgoCD is absent")
+	})
+
+	t.Run("no-op when GitopsService does not exist", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ctx := context.Background()
+
+		// Use a fresh reconciler with only the acm ArgoCD present.
+		testEnvClient := getTestEnv().Client
+
+		acm := makeAcmArgoCD()
+		if err := testEnvClient.Create(ctx, acm); err != nil && !errors.IsAlreadyExists(err) {
+			t.Skipf("ArgoCD CRD not available in test env: %v", err)
+		}
+		t.Cleanup(func() { _ = testEnvClient.Delete(ctx, acm) })
+
+		r2 := &GitopsAddonReconciler{Client: testEnvClient, Config: getTestEnv().Config}
+		err := r2.deleteDefaultGitopsServiceIfStale(ctx)
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+	})
 }
