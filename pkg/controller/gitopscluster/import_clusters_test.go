@@ -24,7 +24,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
@@ -2730,7 +2732,7 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 		}
 	}
 
-	// acmSecret creates a persisted ACM-managed ArgoCD cluster secret (server in Data).
+	// acmSecret creates a persisted ACM-managed ArgoCD cluster secret (server and name in Data).
 	acmSecret := func(name, serverURL string, extraLabels ...map[string]string) *v1.Secret {
 		s := &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2744,6 +2746,7 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 			},
 			Data: map[string][]byte{
 				"server": []byte(serverURL),
+				"name":   []byte(clusterName),
 			},
 		}
 		for _, extra := range extraLabels {
@@ -2779,10 +2782,40 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 		}
 	}
 
+	// argoApp creates an ArgoCD Application unstructured object with the given destination server.
+	argoApp := func(name, destServer string) client.Object {
+		app := &unstructured.Unstructured{}
+		app.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "argoproj.io",
+			Version: "v1alpha1",
+			Kind:    "Application",
+		})
+		app.SetName(name)
+		app.SetNamespace(argoNs)
+		_ = unstructured.SetNestedField(app.Object, destServer, "spec", "destination", "server")
+		return app
+	}
+
+	// argoAppByName creates an ArgoCD Application that references a cluster via destination.name.
+	argoAppByName := func(name, destClusterName string) client.Object {
+		app := &unstructured.Unstructured{}
+		app.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "argoproj.io",
+			Version: "v1alpha1",
+			Kind:    "Application",
+		})
+		app.SetName(name)
+		app.SetNamespace(argoNs)
+		_ = unstructured.SetNestedField(app.Object, destClusterName, "spec", "destination", "name")
+		return app
+	}
+
 	tests := []struct {
 		name            string
 		newSecret       *v1.Secret
 		existingSecrets []client.Object
+		// ArgoCD Application objects present in the namespace
+		existingApps []client.Object
 		// names of secrets expected to survive (not be deleted)
 		expectedSurvive []string
 		// names of secrets expected to be deleted
@@ -2826,11 +2859,27 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 			expectedDeleted: []string{"test-cluster-cluster-secret", "test-cluster-old-msa-cluster-secret"},
 		},
 		{
-			name:      "old secret with different server URL (proxy vs direct) - NOT deleted to protect Apps",
+			name:      "old secret with different server URL and no apps referencing it - safe-deleted",
 			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
 			existingSecrets: []client.Object{
 				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
 				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			existingApps: []client.Object{},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			name:      "old secret with different server URL referenced by ArgoCD App - preserved",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			existingApps: []client.Object{
+				argoApp("my-app", directURL),
 			},
 			expectedSurvive: []string{
 				"test-cluster-application-manager-cluster-secret",
@@ -2839,18 +2888,106 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 			expectedDeleted: []string{},
 		},
 		{
-			name:      "mixed: same-URL old secret deleted, different-URL old secret preserved",
+			name:      "old secret with different server URL and app referencing different URL - safe-deleted",
 			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
 			existingSecrets: []client.Object{
 				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
-				acmSecret("test-cluster-old-proxy-cluster-secret", proxyURL),  // same URL — safe to delete
-				acmSecret("test-cluster-cluster-secret", directURL),           // different URL — keep it
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			existingApps: []client.Object{
+				argoApp("my-app", "https://some-other-cluster.example.com:6443"),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			name:      "mixed: same-URL old secret deleted, different-URL old secret safe-deleted when no apps reference it",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-old-proxy-cluster-secret", proxyURL), // same URL — safe to delete
+				acmSecret("test-cluster-cluster-secret", directURL),          // different URL — safe-deleted (no apps reference it)
+			},
+			existingApps: []client.Object{},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-old-proxy-cluster-secret", "test-cluster-cluster-secret"},
+		},
+		{
+			name:      "mixed: same-URL old secret deleted, different-URL old secret preserved when app references it",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-old-proxy-cluster-secret", proxyURL), // same URL — safe to delete
+				acmSecret("test-cluster-cluster-secret", directURL),          // different URL — preserved (app references it)
+			},
+			existingApps: []client.Object{
+				argoApp("my-app", directURL),
 			},
 			expectedSurvive: []string{
 				"test-cluster-application-manager-cluster-secret",
 				"test-cluster-cluster-secret",
 			},
 			expectedDeleted: []string{"test-cluster-old-proxy-cluster-secret"},
+		},
+		{
+			// destination.name references resolve through ArgoCD's cluster registry: the new
+			// secret already registers the same cluster name, so ArgoCD can still find the
+			// cluster after the old secret is removed. The old secret is therefore safe to delete,
+			// which also fixes the "2 clusters with the same name" ArgoCD error.
+			name:      "old secret with different server URL referenced only via destination.name - safe-deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			existingApps: []client.Object{
+				argoAppByName("my-app", clusterName),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			name:      "old secret with different server URL referenced via destination.name with unrelated cluster name - safe-deleted",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-cluster-secret", directURL),
+			},
+			existingApps: []client.Object{
+				argoAppByName("my-app", "some-other-cluster"),
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-cluster-secret"},
+		},
+		{
+			// An app using destination.name does not prevent deletion because the new secret
+			// covers the same cluster name. An app using destination.server with the old direct
+			// URL does prevent deletion (explicit URL reference would break that app).
+			name:      "mixed: app using destination.name does not block deletion; app using destination.server does",
+			newSecret: newSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+			existingSecrets: []client.Object{
+				acmSecret("test-cluster-application-manager-cluster-secret", proxyURL),
+				acmSecret("test-cluster-old-proxy-cluster-secret", proxyURL), // same URL — unconditional delete
+				acmSecret("test-cluster-cluster-secret", directURL),          // different URL — preserved (app uses destination.server)
+				acmSecret("test-cluster-other-old-secret", directURL+"/v2"),  // different URL — safe-deleted (only destination.name app)
+			},
+			existingApps: []client.Object{
+				argoApp("server-app", directURL),       // explicitly references old directURL → preserve test-cluster-cluster-secret
+				argoAppByName("name-app", clusterName), // cluster-name ref → does NOT block deletion of test-cluster-other-old-secret
+			},
+			expectedSurvive: []string{
+				"test-cluster-application-manager-cluster-secret",
+				"test-cluster-cluster-secret",
+			},
+			expectedDeleted: []string{"test-cluster-old-proxy-cluster-secret", "test-cluster-other-old-secret"},
 		},
 		{
 			name:      "agent-mode secret coexists - not deleted regardless of server URL",
@@ -2920,9 +3057,10 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			objects := append(tt.existingSecrets, tt.existingApps...)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.existingSecrets...).
+				WithObjects(objects...).
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
