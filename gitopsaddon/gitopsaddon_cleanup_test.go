@@ -1138,6 +1138,161 @@ func TestCollectRemainingResources(t *testing.T) {
 }
 
 
+func TestDeleteResourcesByTypeSkipsUnlabeledSystemResources(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-gitops-operator"}}
+
+	// System resources (no gitopsaddon label) should be skipped
+	systemSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "openshift-gitops-operator",
+		},
+	}
+	systemCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kube-root-ca.crt",
+			Namespace: "openshift-gitops-operator",
+		},
+	}
+
+	// Addon-labeled resource should be deleted
+	labeledDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "openshift-gitops-operator-controller-manager",
+			Namespace: "openshift-gitops-operator",
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopsaddon": "true",
+			},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ns, systemSA, systemCM, labeledDeploy).
+		Build()
+
+	resourceTypes := []resourceType{
+		{"Deployment", "apps/v1"},
+		{"ConfigMap", "v1"},
+		{"ServiceAccount", "v1"},
+	}
+
+	allDeleted := deleteResourcesByType(context.TODO(), testClient, resourceTypes, "openshift-gitops-operator", true)
+	// Not all deleted on first pass (just triggered delete on deployment)
+	g.Expect(allDeleted).To(gomega.BeFalse())
+
+	// System resources should still exist (not deleted because no label)
+	var saList corev1.ServiceAccountList
+	err = testClient.List(context.TODO(), &saList, client.InNamespace("openshift-gitops-operator"))
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(saList.Items).To(gomega.HaveLen(1))
+	g.Expect(saList.Items[0].Name).To(gomega.Equal("default"))
+
+	var cmList corev1.ConfigMapList
+	err = testClient.List(context.TODO(), &cmList, client.InNamespace("openshift-gitops-operator"))
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(cmList.Items).To(gomega.HaveLen(1))
+	g.Expect(cmList.Items[0].Name).To(gomega.Equal("kube-root-ca.crt"))
+}
+
+func TestDeleteResourcesByTypeLabelBasedOnlyDeletesLabeled(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-ns"}}
+
+	// Labeled resource
+	labeledSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "operator-sa",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				"apps.open-cluster-management.io/gitopsaddon": "true",
+			},
+		},
+	}
+	// Unlabeled resource (e.g. system-managed)
+	unlabeledSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "test-ns",
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ns, labeledSA, unlabeledSA).
+		Build()
+
+	resourceTypes := []resourceType{{"ServiceAccount", "v1"}}
+
+	deleteResourcesByType(context.TODO(), testClient, resourceTypes, "test-ns", true)
+
+	// After deletion, only the unlabeled SA should remain
+	var saList corev1.ServiceAccountList
+	err = testClient.List(context.TODO(), &saList, client.InNamespace("test-ns"))
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(saList.Items).To(gomega.HaveLen(1))
+	g.Expect(saList.Items[0].Name).To(gomega.Equal("default"))
+}
+
+func TestCollectRemainingResourcesIgnoresUnlabeled(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test-ns"}}
+	unlabeledCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-root-ca.crt", Namespace: "test-ns"},
+	}
+	labeledCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "operator-config",
+			Namespace: "test-ns",
+			Labels:    map[string]string{"apps.open-cluster-management.io/gitopsaddon": "true"},
+		},
+	}
+
+	testClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ns, unlabeledCM, labeledCM).
+		Build()
+
+	remaining := collectRemainingResources(
+		context.TODO(), testClient,
+		[]resourceType{{"ConfigMap", "v1"}}, nil,
+		"test-ns", true,
+	)
+	// Only the labeled one should be reported as remaining
+	g.Expect(remaining).To(gomega.HaveLen(1))
+	g.Expect(remaining[0]).To(gomega.Equal("ConfigMap/operator-config"))
+}
+
+func TestDeleteOLMResourcesAndReportDetectsOLMMode(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	err := clientgoscheme.AddToScheme(scheme)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+
+	// No OLM resources — should return false
+	testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	found, err := deleteOLMResourcesAndReport(context.TODO(), testClient)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeFalse())
+}
+
 func TestIsHubClusterForCleanup(t *testing.T) {
 	g := gomega.NewWithT(t)
 

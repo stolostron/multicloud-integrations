@@ -431,12 +431,7 @@ func (r *ReconcileGitOpsCluster) initializeConditions(instance *gitopsclusterV1b
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterArgoCDAgentPrereqsReady)
 		r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterCertificatesReady)
 
-		// Check if CA propagation is enabled (default true)
-		propagateHubCA := true
-		if instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA != nil {
-			propagateHubCA = *instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA
-		}
-		if propagateHubCA {
+		if !hasSkipHubCAPropagationAnnotation(instance) {
 			r.initializeCondition(instance, gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
 		}
 	}
@@ -448,6 +443,13 @@ func (r *ReconcileGitOpsCluster) initializeCondition(instance *gitopsclusterV1be
 	if condition == nil {
 		instance.SetCondition(conditionType, metav1.ConditionUnknown, gitopsclusterV1beta1.ReasonReconciling, "Reconciliation in progress")
 	}
+}
+
+func isObjectGoneError(err error) bool {
+	if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
+		return true
+	}
+	return strings.Contains(err.Error(), "StorageError") || strings.Contains(err.Error(), "UID in precondition")
 }
 
 func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
@@ -462,8 +464,11 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 	// Update status with initialized conditions
 	if err := r.Client.Status().Update(context.TODO(), instance); err != nil {
+		if isObjectGoneError(err) {
+			klog.Infof("GitOpsCluster %s was deleted during reconcile, aborting", instance.Namespace+"/"+instance.Name)
+			return 0, nil
+		}
 		klog.Errorf("failed to initialize GitOpsCluster %s conditions: %s", instance.Namespace+"/"+instance.Name, err)
-		// Don't return error, continue with reconciliation
 	}
 
 	// Validate GitOpsAddon and ArgoCDAgent spec fields
@@ -889,11 +894,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			instance.Spec.GitOpsAddon.ArgoCDAgent.ServerPort)
 	}
 
-	// Check if Hub CA propagation is enabled (default true)
-	propagateHubCA := true
-	if instance.Spec.GitOpsAddon != nil && instance.Spec.GitOpsAddon.ArgoCDAgent != nil && instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA != nil {
-		propagateHubCA = *instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA
-	}
+	propagateHubCA := !hasSkipHubCAPropagationAnnotation(instance)
 
 	// 4. Copy secret contents from the managed cluster namespaces and create the secret in spec.argoServer.argoNamespace
 	// if spec.createBlankClusterSecrets is true then do err on missing secret from the managed cluster namespace
@@ -976,6 +977,10 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
+				if isObjectGoneError(err2) {
+					klog.Infof("GitOpsCluster %s was deleted during reconcile, aborting", instance.Namespace+"/"+instance.Name)
+					return 0, nil
+				}
 				klog.Warningf("failed to update GitOpsCluster %s status after AddOnTemplate success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
 		} else {
@@ -1041,6 +1046,10 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				})
 			err2 := r.Client.Status().Update(context.TODO(), instance)
 			if err2 != nil {
+				if isObjectGoneError(err2) {
+					klog.Infof("GitOpsCluster %s was deleted during reconcile, aborting", instance.Namespace+"/"+instance.Name)
+					return 0, nil
+				}
 				klog.Warningf("failed to update GitOpsCluster %s status after ArgoCD Policy success: %s", instance.Namespace+"/"+instance.Name, err2)
 			}
 		}
@@ -1161,6 +1170,10 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		// Update status
 		err3 := r.Client.Status().Update(context.TODO(), instance)
 		if err3 != nil {
+			if isObjectGoneError(err3) {
+				klog.Infof("GitOpsCluster %s was deleted during reconcile, aborting", instance.Namespace+"/"+instance.Name)
+				return 0, nil
+			}
 			klog.Warningf("failed to update GitOpsCluster %s status after addon creation: %s", instance.Namespace+"/"+instance.Name, err3)
 		}
 
@@ -1285,8 +1298,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 	}
 
 	// 5. Propagate ArgoCD agent CA secret to managed clusters via ManifestWork
-	if argoCDAgentEnabled {
-		// Always propagate the CA secret when it exists - ManifestWorks are never deleted
+	if argoCDAgentEnabled && propagateHubCA {
 		err = r.PropagateHubCA(instance, managedClusters)
 		if err != nil {
 			klog.Errorf("failed to propagate ArgoCD agent CA to managed clusters: %v", err)
@@ -1380,10 +1392,11 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				Message: "CA propagation ManifestWorks successfully applied to managed clusters",
 			}
 		} else {
+			klog.Infof("Hub CA propagation skipped for GitOpsCluster %s/%s (skip-hub-ca-propagation annotation)", instance.Namespace, instance.Name)
 			conditionUpdates[gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied] = ConditionUpdate{
 				Status:  metav1.ConditionTrue,
-				Reason:  gitopsclusterV1beta1.ReasonNotRequired,
-				Message: "CA propagation is disabled, ManifestWorks not required",
+				Reason:  gitopsclusterV1beta1.ReasonSkipped,
+				Message: "Hub CA propagation skipped (skip-hub-ca-propagation annotation set)",
 			}
 		}
 
@@ -1626,14 +1639,7 @@ func (r *ReconcileGitOpsCluster) updateReadyCondition(instance *gitopsclusterV1b
 			gitopsclusterV1beta1.GitOpsClusterCertificatesReady,
 		)
 
-		// Check if CA propagation is enabled
-		propagateHubCA := true
-		if instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA != nil {
-			propagateHubCA = *instance.Spec.GitOpsAddon.ArgoCDAgent.PropagateHubCA
-		}
-
-		// Only require ManifestWorks if CA propagation is enabled
-		if propagateHubCA {
+		if !hasSkipHubCAPropagationAnnotation(instance) {
 			criticalConditions = append(criticalConditions, gitopsclusterV1beta1.GitOpsClusterManifestWorksApplied)
 		}
 	}

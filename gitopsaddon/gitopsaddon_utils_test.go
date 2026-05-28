@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	utils "open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // Test embedded file system for tests
@@ -550,4 +551,67 @@ func TestApplyManifestSkipsPreExistingResources(t *testing.T) {
 		g.Expect(existing.Data["original"]).To(gomega.Equal("data"))
 		g.Expect(existing.Data).NotTo(gomega.HaveKey("updated"))
 	})
+}
+
+func TestTemplateAndApplyChartLabelsAllResources(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+		AddonConfig: &utils.GitOpsAddonConfig{
+			OperatorImages: map[string]string{
+				utils.EnvGitOpsOperatorImage: "quay.io/test/operator:latest",
+			},
+		},
+	}
+
+	testNS := "label-inject-test"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
+	err := reconciler.Create(context.TODO(), ns)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("failed to create test namespace: %v", err)
+	}
+	defer func() {
+		_ = reconciler.Delete(context.TODO(), ns)
+	}()
+
+	err = reconciler.templateAndApplyChart("charts/openshift-gitops-operator", testNS, "openshift-gitops-operator")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify Deployment has the gitopsaddon label
+	deploy := &unstructured.Unstructured{}
+	deploy.SetAPIVersion("apps/v1")
+	deploy.SetKind("Deployment")
+	err = reconciler.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator-controller-manager", Namespace: testNS,
+	}, deploy)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "Deployment should exist")
+	g.Expect(deploy.GetLabels()).To(gomega.HaveKeyWithValue(
+		"apps.open-cluster-management.io/gitopsaddon", "true",
+	), "Deployment must have gitopsaddon label")
+
+	// Verify ServiceAccount has the gitopsaddon label
+	sa := &unstructured.Unstructured{}
+	sa.SetAPIVersion("v1")
+	sa.SetKind("ServiceAccount")
+	err = reconciler.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator-controller-manager", Namespace: testNS,
+	}, sa)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "ServiceAccount should exist")
+	g.Expect(sa.GetLabels()).To(gomega.HaveKeyWithValue(
+		"apps.open-cluster-management.io/gitopsaddon", "true",
+	), "ServiceAccount must have gitopsaddon label")
+
+	// Verify a ConfigMap deployed by the chart also has the label
+	cm := &unstructured.Unstructured{}
+	cm.SetAPIVersion("v1")
+	cm.SetKind("ConfigMap")
+	err = reconciler.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator-manager-config", Namespace: testNS,
+	}, cm)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "ConfigMap should exist")
+	g.Expect(cm.GetLabels()).To(gomega.HaveKeyWithValue(
+		"apps.open-cluster-management.io/gitopsaddon", "true",
+	), "ConfigMap must have gitopsaddon label")
 }

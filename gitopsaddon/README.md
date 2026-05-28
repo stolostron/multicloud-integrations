@@ -8,26 +8,27 @@ This guide explains how to configure and test the GitOps Addon functionality usi
 - **Placement**: Selects which managed clusters are targeted (including `local-cluster` / hub). Requires a `ManagedClusterSetBinding` for the `default` ManagedClusterSet in the `openshift-gitops` namespace — without it, Placement cannot find any ManagedClusters.
 - **Policy**: The GitOpsCluster controller creates a Policy that deploys the ArgoCD CR to managed clusters. **This Policy is user-owned** — users can modify it to add RBAC, Applications, or customize ArgoCD settings. The controller will recreate the Policy if it is deleted (unless `skip-argocd-policy` annotation is set) and may patch the `argoCDAgent.agent.image` field during agent version drift heal, but will not overwrite other user customizations. For `local-cluster`, the ArgoCD CR is deployed to the `local-cluster` namespace (not `openshift-gitops`) using a hub template.
 - **ManagedClusterAddOn**: Created automatically for ALL managed clusters including `local-cluster`. Manages addon lifecycle.
-- **Addon RBAC**: The `gitops-addon` ServiceAccount uses a fine-grained `ClusterRole` named `gitops-addon` (not `cluster-admin`). Defined in `addonTemplates/addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic, for agent mode). Includes `escalate`/`bind` on RBAC resources (needed because the addon deploys the ArgoCD operator which creates its own Roles/ClusterRoles), and `delete` on all resource types that the cleanup Job needs to remove. A separate `gitops-addon-cleanup` ClusterRole/ClusterRoleBinding is annotated with `addon-pre-delete` and included in the pre-delete ManifestWork, ensuring the cleanup Job retains RBAC even after the regular ManifestWork (which deploys the main `gitops-addon` ClusterRole) is deleted during MCA teardown. The `verify_cleanup_rbac_safety` check in `test-scenarios.sh` enforces that the ClusterRole has `delete` for every resource type in `deleteOperatorResources()`.
+- **Addon RBAC**: The `gitops-addon` ServiceAccount uses a fine-grained `ClusterRole` named `gitops-addon` (not `cluster-admin`). Defined in `addonTemplates/addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic, for agent mode). Includes `escalate`/`bind` on RBAC resources (needed because the addon deploys the ArgoCD operator which creates its own Roles/ClusterRoles), and `delete` on all resource types that the cleanup Job needs to remove. A separate `gitops-addon-cleanup` ClusterRole/ClusterRoleBinding is annotated with `addon-pre-delete` and included in the pre-delete ManifestWork, ensuring the cleanup Job retains RBAC even after the regular ManifestWork (which deploys the main `gitops-addon` ClusterRole) is deleted during MCA teardown.
 - **Cluster Secrets**: For agent mode, the controller creates ArgoCD cluster secrets with proper server URLs including `agentName` query parameter
 - **DISABLE_DEFAULT_ARGOCD_INSTANCE**: On OCP managed clusters, the addon creates an OLM Subscription with `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`. On non-OCP clusters, the embedded operator chart is deployed. On the hub (`local-cluster`), the operator is already present so no installation occurs.
 - **OLM Subscription Override**: When `olmSubscription.enabled: true` is set in the GitOpsCluster spec, the addon agent is **forced** to use OLM subscription mode for operator installation, bypassing OCP auto-detection. This ensures OLM is used even if the cluster detection fails or the cluster is non-OCP (though OLM must be available on the cluster for the installation to succeed). Custom subscription values (channel, source, namespace, etc.) are passed to the addon agent via `AddOnDeploymentConfig` environment variables. When absent or disabled, the agent falls back to OCP auto-detection and uses hardcoded defaults (`channel: latest`, `source: redhat-operators`, etc.).
 - **AppProject Propagation (Agent Mode)**: In managed agent mode, the ArgoCD principal propagates AppProjects from the hub to managed clusters. In autonomous agent mode, AppProjects are created locally on the spoke and synced back to the hub with the agent name prefixed (e.g., `default` becomes `ocp-cluster1-default`). The `default` AppProject is included in the generated Policy for autonomous mode to ensure local reconciliation works before any agent sync occurs.
-- **Default AppProject Wildcard Settings (Agent Mode Prerequisite)**: The `default` AppProject in `openshift-gitops` on the hub must have wildcard settings: `sourceNamespaces: ["*"]`, `destinations: [{name:"*", namespace:"*", server:"*"}]`, `clusterResourceWhitelist: [{group:"*", kind:"*"}]`, `sourceRepos: ["*"]`. The principal only propagates AppProjects whose destinations and sourceNamespaces match the agent's configuration. Without wildcards, propagation is skipped and agents fail with "project not found". The `test-scenarios.sh` helper `ensure_default_appproject_for_agents` patches this.
+- **Default AppProject Wildcard Settings (Agent Mode Prerequisite)**: The `default` AppProject in `openshift-gitops` on the hub must have wildcard settings: `sourceNamespaces: ["*"]`, `destinations: [{name:"*", namespace:"*", server:"*"}]`, `clusterResourceWhitelist: [{group:"*", kind:"*"}]`, `sourceRepos: ["*"]`. The principal only propagates AppProjects whose destinations and sourceNamespaces match the agent's configuration. Without wildcards, propagation is skipped and agents fail with "project not found".
 - **Destination-Based Mapping (Agent Architecture)**: The principal keeps `destinationBasedMapping: true` for **routing** — it dispatches Applications to agents based on `spec.destination.name`. The **agents** have `destinationBasedMapping` disabled (not set in the ArgoCD CR). This is critical for `local-cluster`: the agent's `getTargetNamespaceForApp()` returns its own namespace (`local-cluster`), so agent-created Application copies go to the `local-cluster` namespace where the app controller watches. For remote clusters (Kind/OCP), the agent's namespace IS `openshift-gitops`, so the behavior is identical whether DBM is enabled or disabled on the agent. If agent DBM were enabled, the agent would keep the original namespace (`openshift-gitops`) from the hub — this fails on `local-cluster` because the app controller runs in `local-cluster`, not `openshift-gitops`, and it conflicts with existing ApplicationSet-generated apps in `openshift-gitops`. **Critical gotcha**: For OCP remote clusters in managed mode where you want live manifest in the ArgoCD UI, the agent's `destinationBasedMapping` must match the principal's. If they differ, the Redis cache key format diverges (`|` vs `_` separator) and the UI shows `"Resource not found in cluster: <resource>"` with agent log error `"unexpected key format, missing '_': 'app|resources-tree|...'`. Fix by setting `spec.argoCDAgent.agent.client.destinationBasedMapping: true` in the agent's ArgoCD CR template inside the Policy.
 - **Cluster Secret Resource Proxy URL**: In agent mode, the hub controller creates ArgoCD cluster secrets whose `server` field uses the resource proxy service URL format: `https://openshift-gitops-agent-principal-resource-proxy.<argocd-ns>.svc:9090?agentName=<cluster-name>`. This is an in-cluster URL pointing to the resource proxy sidecar in the principal pod; the `agentName` query parameter tells the proxy which agent cluster to route API requests to for live manifest and resource tree lookups. Verify with: `kubectl get secret cluster-<cluster-name> -n openshift-gitops -o jsonpath='{.data.server}' | base64 -d`.
 - **Agent SA View ClusterRole (Live Manifest)**: For the ArgoCD UI live manifest view to work, the ArgoCD agent ServiceAccount on the managed cluster must have read access to cluster resources. Create a ClusterRoleBinding on the managed cluster: `kubectl create clusterrolebinding acm-openshift-gitops-argocd-agent-cluster-reader --clusterrole=view --serviceaccount=openshift-gitops:acm-openshift-gitops-agent-agent`. Without this, the resource proxy cannot query the managed cluster and the UI shows `"Resource not found in cluster: <resource-name>"`. This can be added to the Policy's object templates so it is applied via OCM governance.
 - **Image Pull Secret Handling**: Two mechanisms work together:
   1. **Secret copying (OCM klusterlet)**: The addon agent labels namespaces it creates (`openshift-gitops-operator`, `openshift-gitops`) with `addon.open-cluster-management.io/namespace: true`. This label tells the OCM klusterlet to automatically copy the `open-cluster-management-image-pull-credentials` secret into those namespaces. No custom propagation code is needed for this step.
   2. **ServiceAccount patching (addon agent)**: On non-OCP clusters, the ArgoCD operator creates ServiceAccounts without `imagePullSecrets` references. Since the ArgoCD CRD has no native `imagePullSecrets` field, the addon agent patches all ServiceAccounts in the ArgoCD namespace to reference `open-cluster-management-image-pull-credentials` (via `patchArgoCDServiceAccountsWithImagePullSecrets`). It also deletes pods stuck in `ImagePullBackOff`/`ErrImagePull` so they restart with the patched SAs. On OCP clusters, node-level pull secrets handle registry authentication, so this patching is skipped.
+  3. **CRITICAL: Hub `multiclusterhub-operator-pull-secret` MUST include `registry.redhat.io`**: The entire chain above works correctly — but ONLY if the source secret has the right registries. This secret exists in **TWO namespaces** on the hub: `open-cluster-management` AND `multicluster-engine`. The `managedcluster-import-controller` reads from the `multicluster-engine` copy (env var `DEFAULT_IMAGE_PULL_SECRET`), bakes it into the `{cluster}-import` secret, which feeds into the klusterlet ManifestWork. The klusterlet copies it to managed clusters as `open-cluster-management-image-pull-credentials`. If EITHER copy is missing `registry.redhat.io`, ALL non-OCP managed clusters (EKS, Kind, etc.) will fail with `ImagePullBackOff` / `401 Unauthorized`. The OCP hub is unaffected because OCP nodes have `registry.redhat.io` at the node level (via `openshift-config/pull-secret`), which masks this issue entirely. **Fix**: Merge the OCP global pull-secret into BOTH copies of the MCH pull-secret, then delete `{cluster}-import` secrets to force regeneration. The addon framework handles everything else. **This is the #1 root cause of EKS/non-OCP clusters failing to deploy ArgoCD. Non-OCP support is the entire point of gitopsaddon. Always verify this before testing.**
 - **Smart Cluster Detection**: The addon agent detects the cluster type at runtime:
   - **OCP detection**: Checks for `clusterversions.config.openshift.io` CRD, `infrastructures.config.openshift.io` CRD, `version.openshift.io` ClusterClaim, or `product.open-cluster-management.io` ClusterClaim with value "OpenShift"
   - **Hub detection**: Checks for `ClusterManager` resources or a `ManagedCluster` with name `local-cluster` or label `local-cluster=true`
 - **ARGOCD_NAMESPACE**: Environment variable passed to the addon agent via `AddOnDeploymentConfig`. Set to `local-cluster` for the hub and `openshift-gitops` for remote clusters. Controls where ArgoCD CR lives and where client certs are copied.
-- **ARGOCD_CLUSTER_CONFIG_NAMESPACES**: Environment variable on the `openshift-gitops-operator` Deployment (set via OLM Subscription). Controls which namespaces get cluster-scoped RBAC for their ArgoCD instances. When a namespace is listed, the operator creates ClusterRoles/ClusterRoleBindings granting cluster-scope `list`/`watch` on `namespaces` and other resources to the ArgoCD application-controller, agent, and principal ServiceAccounts. **Must be set to `openshift-gitops,local-cluster`** for agent mode — `openshift-gitops` for the principal and remote agents, `local-cluster` for the hub-local agent. Without this, agent/principal pods crash with `"namespaces is forbidden"` errors because only namespace-scoped Roles are created. The `test-scenarios.sh` helper `ensure_cluster_config_namespaces` patches the Subscription to set this. On a fresh ACM hub, the default is typically `openshift-gitops` only.
+- **ARGOCD_CLUSTER_CONFIG_NAMESPACES**: Environment variable on the `openshift-gitops-operator` Deployment (set via OLM Subscription). Controls which namespaces get cluster-scoped RBAC for their ArgoCD instances. When a namespace is listed, the operator creates ClusterRoles/ClusterRoleBindings granting cluster-scope `list`/`watch` on `namespaces` and other resources to the ArgoCD application-controller, agent, and principal ServiceAccounts. **Must be set to `openshift-gitops,local-cluster`** for agent mode — `openshift-gitops` for the principal and remote agents, `local-cluster` for the hub-local agent. Without this, agent/principal pods crash with `"namespaces is forbidden"` errors because only namespace-scoped Roles are created. On a fresh ACM hub, the default is typically `openshift-gitops` only.
 - **Agent Version Drift Heal**: In agent mode, the hub controller **watches** the ArgoCD principal Deployment for container image changes. When the OpenShift GitOps Operator upgrades the principal (changing the image), the controller is automatically triggered and patches the ArgoCD Policy to enforce the correct `spec.argoCDAgent.agent.image` on managed clusters, ensuring spoke agents stay compatible with the hub principal without waiting for another reconciliation event. Only the addon-managed ArgoCD template named `acm-openshift-gitops` is patched; user-added ArgoCD templates in the Policy are left untouched. This is disabled with the `apps.open-cluster-management.io/skip-agent-version-heal: "true"` annotation on the GitOpsCluster CR.
 - **Policy Recreation Control**: The ArgoCD Policy is created once and left for users to customize. If a user deletes the Policy intentionally, the controller will recreate it on the next reconcile. To prevent this, set `apps.open-cluster-management.io/skip-argocd-policy: "true"` on the GitOpsCluster CR. When skipped, the `ArgoCDPolicyReady` condition is set to `True` with `Reason=Skipped`.
-- **Custom ArgoCD Namespace**: The `GitOpsCluster` CR supports `spec.argoServer.argoNamespace` to specify a custom namespace for the hub ArgoCD instance. The hub controller uses `GetEffectiveArgoNamespace()` to resolve the correct namespace for cert generation, CA propagation, AddOnTemplate signing CA, and service discovery. A `ManagedClusterSetBinding` for `default` must also exist in the custom namespace. Scenario 7 in `test-scenarios.sh` validates this.
+- **Custom ArgoCD Namespace**: The `GitOpsCluster` CR supports `spec.argoServer.argoNamespace` to specify a custom namespace for the hub ArgoCD instance. The hub controller uses `GetEffectiveArgoNamespace()` to resolve the correct namespace for cert generation, CA propagation, AddOnTemplate signing CA, and service discovery. A `ManagedClusterSetBinding` for `default` must also exist in the custom namespace.
 - **Cert Rotation & Autorefresh**: The `argocd-agent-client-tls` cert has a 24-hour validity. The OCM `ClientCertController` (klusterlet-agent) rotates the cert at ~80% of lifetime by creating a new CSR, and updates the source secret in the addon namespace. The `SecretReconciler` (`secret_controller.go`) propagates this to the ArgoCD namespace via: (1) source secret update watch (immediate copy), (2) target secret deletion watch (instant re-copy if deleted), (3) **periodic requeue every 5 minutes** (`SecretResyncInterval`) as a safety net against missed watch events. The `secretDataEqual()` helper avoids unnecessary API calls during periodic checks. **When cert data actually changes**, the reconciler automatically **rolling-restarts** all ArgoCD agent Deployments (`app.kubernetes.io/part-of=argocd-agent`) in the target namespace by annotating the pod template. This is required because the argocd-agent binary reads TLS certs at startup and does not hot-reload — without the restart, the agent keeps the expired cert in memory and loses connection. The restart is only triggered on actual cert changes, not on periodic resyncs where data is already in sync. No manual `kubectl rollout restart` is needed.
 
 ## Architecture
@@ -81,35 +82,28 @@ All scenarios target `local-cluster` (hub), `ocp-cluster1` (OCP), and `kind-clus
 
 - An ACM (Advanced Cluster Management) hub OpenShift cluster
 - Managed clusters registered to the hub with proper labels
-- A `ManagedClusterSetBinding` for `default` in the `openshift-gitops` namespace (without this, Placement finds zero clusters). See `ensure_clusterset_binding` in `test-scenarios.sh`.
-- For Agent mode: Hub ArgoCD configured as principal with `allowedNamespaces: ["*"]`
+- **OpenShift GitOps operator installed on hub** via OLM Subscription in `openshift-gitops-operator` namespace. **Do NOT set `DISABLE_DEFAULT_ARGOCD_INSTANCE=true`** — the `GitopsService` CR creates the default ArgoCD instance, and disabling it prevents ArgoCD from starting.
+- **ArgoCD instance with principal enabled**: The hub ArgoCD CR must include `spec.argoCDAgent.principal.enabled: true`. Without the principal pod, agent-mode managed clusters cannot connect. The gitopscluster controller's `VerifyArgocdNamespace` requires the ArgoCD server pod to be running — if it's not, the controller loops forever on `"invalid argocd namespace because argo server pod was not found"` and never creates MCAs, Policies, or AddOnTemplates. This is the #1 cause of "MCA stuck at Pending" on a fresh hub.
+- A `ManagedClusterSetBinding` for `default` in the `openshift-gitops` namespace (without this, Placement finds zero clusters).
 - For Agent mode: `ARGOCD_CLUSTER_CONFIG_NAMESPACES` set to `openshift-gitops,local-cluster` on the `openshift-gitops-operator` Subscription (see Key Concepts above). Without this, agent/principal pods in non-default namespaces (e.g., `local-cluster`) lack cluster-scoped RBAC and crash.
-- For Agent mode: The `default` AppProject in `openshift-gitops` patched with wildcard `destinations`, `sourceNamespaces`, `clusterResourceWhitelist`, and `sourceRepos`. Without this, the principal won't propagate AppProjects to agents. See `ensure_default_appproject_for_agents` in `test-scenarios.sh`.
+- For Agent mode: The `default` AppProject in `openshift-gitops` patched with wildcard `destinations`, `sourceNamespaces`, `clusterResourceWhitelist`, and `sourceRepos`. Without this, the principal won't propagate AppProjects to agents.
 
 ### Kind Managed Cluster Setup
 
-To use a Kind cluster as a managed cluster for `test-scenarios.sh`:
+To use a Kind cluster as a managed cluster for integration testing:
 
 1. Create the Kind cluster: `kind create cluster --name kind-cluster1`
 2. Export kubeconfig: `kind get kubeconfig --name kind-cluster1 > ~/Desktop/kind-cluster1`
 3. Register as ManagedCluster on the hub (create ManagedCluster resource with `hubAcceptsClient: true`)
 4. Extract import manifests from the auto-generated hub secret (`kind-cluster1-import`) and apply to the Kind cluster
 5. Wait for `AVAILABLE=True` on the hub
-6. **Critical**: Create `governance-policy-framework` and `config-policy-controller` ManagedClusterAddOns in the `kind-cluster1` namespace on the hub. Without these, the OCM Policy framework cannot enforce Policies on the Kind cluster, and `test-scenarios.sh` will fail with Policy compliance timeouts.
+6. **Critical**: Create `governance-policy-framework` and `config-policy-controller` ManagedClusterAddOns in the `kind-cluster1` namespace on the hub. Without these, the OCM Policy framework cannot enforce Policies on the Kind cluster, and Policy compliance will time out.
 
 See `CLAUDE.md` for the full step-by-step commands.
 
 ### Running Test Scenarios
 
-**WARNING: Scenarios must run sequentially, NEVER in parallel.** Each scenario modifies shared hub state (GitOpsCluster, Policy, ManagedClusterAddOn, ArgoCD CRs). Parallel execution causes resource conflicts, duplicate ArgoCD CRs, and unpredictable failures.
-
-```bash
-# Run all scenarios sequentially
-bash test-scenarios.sh all
-
-# Run a single scenario
-bash test-scenarios.sh 2
-```
+Scenarios can be run individually or all together. When running multiple scenarios, run them sequentially — each scenario modifies shared hub state (GitOpsCluster, Policy, ManagedClusterAddOn, ArgoCD CRs).
 
 ---
 
@@ -288,11 +282,13 @@ In agent mode, ArgoCD agents run on managed clusters and connect to a principal 
 - **Created on the hub** in the `openshift-gitops` namespace (or any namespace watched by the principal)
 - The principal uses **destination-based mapping** (`destinationBasedMapping: true` in the principal ArgoCD CR), where it routes Applications to agents based on `destination.name` matching the cluster name
 - When using ApplicationSets with `clusterDecisionResource`, use `destination.name: '{{name}}'` so the OCM cluster name is used for routing
-- **PlacementDecision score workaround**: The OCM Placement controller adds `score:0` (int64) to PlacementDecision status. ArgoCD's DuckType generator panics on non-string values (`interface conversion: interface {} is int64, not string`). Workaround: create a manual PlacementDecision with a **different label** (not matching the actual Placement name) that only has `clusterName` and `reason`, and point the ApplicationSet's `labelSelector` to that label. See `create_manual_placement_decisions()` in `test-scenarios.sh`
+- **PlacementDecision**: The ApplicationSet's `clusterDecisionResource` generator uses the Placement controller's PlacementDecisions directly via `labelSelector: cluster.open-cluster-management.io/placement: <placement-name>`. No manual PlacementDecision workaround is needed — the `score` field bug (int64 panic in ArgoCD's DuckType processor) was fixed in OCM 2.17+
 - **Agents receive Applications from the principal via gRPC and create copies in their own namespace** — the agent's own namespace is `openshift-gitops` for remote clusters and `local-cluster` for the hub. This means the `local-cluster` agent stores its Application copies in the `local-cluster` namespace, where the local app controller watches
 - For ApplicationSet sync status on the hub: remote cluster apps show status in `openshift-gitops`, while `local-cluster` agent-created apps show status in the `local-cluster` namespace
 
 ### Hub Prerequisites for Agent Mode
+
+**CRITICAL: Ensure `multiclusterhub-operator-pull-secret` includes `registry.redhat.io`** before proceeding. Without this, ALL non-OCP managed clusters will fail with `ImagePullBackOff`. See "Image Pull Secret Handling" above for details and the merge command.
 
 ```bash
 export KUBECONFIG=/path/to/hub/kubeconfig
@@ -307,6 +303,7 @@ kubectl patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{
       "principal": {
         "enabled": true,
         "auth": "mtls:CN=system:open-cluster-management:cluster:([^:]+):addon:gitops-addon:agent:gitops-addon-agent",
+        "destinationBasedMapping": true,
         "namespace": {
           "allowedNamespaces": ["*"]
         },
@@ -720,12 +717,16 @@ kubectl delete addondeploymentconfig gitops-addon-config -n cluster2 --ignore-no
 - **Guestbook namespace** and other namespaces deployed by ArgoCD Applications are not cleaned up by the addon cleanup Job. They can be deleted manually.
 - **Empty namespaces on managed cluster** (`openshift-gitops`, `openshift-gitops-operator`) may remain after cleanup. CRDs installed by the addon may also remain. These are harmless and will be recreated/reused on the next deployment.
 - **Pause marker ConfigMap**: The pre-delete cleanup Job creates a `gitops-addon-pause` ConfigMap to pause the addon controller during cleanup. The addon controller **automatically clears stale pause markers at startup**.
+- **Cleanup only deletes what gitopsaddon laid down**: **CRITICAL RULE — NEVER list-and-delete resources blindly in any namespace. Never do a "list all Deployments and delete them" pattern.** The cleanup code only deletes: (1) gitopsaddon-labeled ArgoCD CRs (step 2 — waits indefinitely for the operator to process the finalizer and clean up its own workloads like redis, repo-server, app-controller, etc.), (2) OLM Subscription/CSV on OCP (step 3 — only after ArgoCD CR is fully gone), (3) gitopsaddon-labeled operator resources on embedded/EKS (step 4). ArgoCD workloads are the operator's responsibility — cleaned up via the ArgoCD CR finalizer. The cleanup NEVER force-strips the ArgoCD CR finalizer. If the finalizer hangs, that's a real bug in the operator.
+- **OCP cleanup skips operator namespace resource deletion**: On OCP clusters with OLM, `deleteOperatorResources` is skipped entirely — OLM handles operator teardown via CSV deletion.
+- **GitOpsAddon label on all deployed resources**: `templateAndApplyChart` injects `apps.open-cluster-management.io/gitopsaddon: "true"` on every resource before applying. The cleanup function `deleteOperatorResources` uses `requireLabel=true`, so it only deletes what gitopsaddon created — system resources (`kube-root-ca.crt`, `default` SA, etc.) are never touched. The test script verifies this with `verify_gitopsaddon_labels` after each deploy.
+- **Post-cleanup verification**: `verify_cleanup` in `test-cycle-eks-ocp.sh` checks: hub resources (GitOpsCluster, Policy, MCA), ArgoCD CR removed (operator finalizer processed), ArgoCD workloads cleaned by operator, operator namespace clean, OLM subscription/CSV removed (OCP), addon deployment removed, and cluster accessibility.
 
 ---
 
 ## Automated Testing
 
-There are two test systems: **Go/Ginkgo e2e tests** (CI-ready, Kind-only) and **test-scenarios.sh** (manual/integration, real clusters).
+There are two test systems: **Go/Ginkgo e2e tests** (CI-ready, Kind-only) and **integration test scripts** (manual, real clusters).
 
 ### Go/Ginkgo E2E Tests (CI and Local Development)
 
@@ -788,7 +789,7 @@ make test-e2e-gitopsaddon-all
 
 **Local-cluster testing in e2e:**
 - **Embedded (non-agent):** Fully tested — MCA, ArgoCD CR in `local-cluster` namespace, no duplicate ArgoCD, guestbook deployment + sync, controller namespace verification, environment health
-- **Embedded-agent:** Fully tested — MCA, ArgoCD CR in `local-cluster` namespace, no duplicate ArgoCD, guestbook deployment + sync via ApplicationSet/agent pipeline, controller namespace verification (lenient: accepts `local-cluster` or `openshift-gitops`), environment health, agent version drift auto-heal. The Kind e2e uses the upstream `argocd-operator` which supports agent mode. The `controllerNamespace` assertion is lenient because the upstream operator may report either the hub ArgoCD namespace or the local-cluster namespace depending on version. Note: the controller namespace test does NOT assert `Synced` status — ArgoCD sync can take minutes on CI runners, and sync is already validated by the guestbook deployment check. The **drift heal e2e test** differs from `test-scenarios.sh` Scenario 5: since Kind has no real OpenShift GitOps operator to scale, the e2e injects a fake agent image directly into the ArgoCD Policy, toggles `spec.gitopsAddon.overrideExistingConfigs` to trigger reconciliation, and verifies the controller restores the principal image — it does NOT patch the principal Deployment or scale the operator. `test-scenarios.sh` also tests this path against real OCP clusters with a more production-like approach (patches the principal Deployment + scales operator).
+- **Embedded-agent:** Fully tested — MCA, ArgoCD CR in `local-cluster` namespace, no duplicate ArgoCD, guestbook deployment + sync via ApplicationSet/agent pipeline, controller namespace verification (lenient: accepts `local-cluster` or `openshift-gitops`), environment health, agent version drift auto-heal. The Kind e2e uses the upstream `argocd-operator` which supports agent mode. The `controllerNamespace` assertion is lenient because the upstream operator may report either the hub ArgoCD namespace or the local-cluster namespace depending on version. Note: the controller namespace test does NOT assert `Synced` status — ArgoCD sync can take minutes on CI runners, and sync is already validated by the guestbook deployment check. The **drift heal e2e test** injects a fake agent image directly into the ArgoCD Policy, toggles `spec.gitopsAddon.overrideExistingConfigs` to trigger reconciliation, and verifies the controller restores the principal image.
 
 **Key files:**
 - `test/e2e/gitopsaddon/suite_test.go` — constants (cluster names, namespaces)
@@ -807,36 +808,9 @@ make test-e2e-gitopsaddon-all
 - `HUB_CLUSTER` — Kind hub cluster name (default: `hub`)
 - `SPOKE_CLUSTER` — Kind spoke cluster name (default: `cluster1`)
 
-### test-scenarios.sh (Manual/Integration Testing)
-
-This script tests against real clusters (ACM hub + OCP-managed cluster + Kind-managed cluster) and exercises the full production path including OLM, agent mode with Red Hat operator, and local-cluster with agent support.
-
-```bash
-export HUB_KUBECONFIG=~/Desktop/hub
-export KIND_KUBECONFIG=~/Desktop/kind-cluster1
-export OCP_KUBECONFIG=~/Desktop/ocp-cluster1
-export KIND_CLUSTER_NAME=kind-cluster1
-export OCP_CLUSTER_NAME=ocp-cluster1
-
-# Run all scenarios
-./gitopsaddon/test-scenarios.sh all
-
-# Run individual scenarios
-./gitopsaddon/test-scenarios.sh 1  # No Agent (OCP + Kind + local-cluster)
-./gitopsaddon/test-scenarios.sh 2  # Agent Mode (OCP + Kind + local-cluster)
-./gitopsaddon/test-scenarios.sh 3  # Custom OLM (OCP only)
-./gitopsaddon/test-scenarios.sh 4  # OLM Override on Kind (Kind only)
-./gitopsaddon/test-scenarios.sh 5  # Agent Version Drift Heal (deploys S2 first)
-./gitopsaddon/test-scenarios.sh 6  # Autonomous Agent Mode (OCP + Kind + local-cluster)
-./gitopsaddon/test-scenarios.sh 7  # Custom Hub ArgoCD Namespace (Kind + local-cluster)
-
-# Cleanup only
-./gitopsaddon/test-scenarios.sh cleanup
-```
-
 ### Testing Philosophy
 
-**The test script (`test-scenarios.sh`) must NEVER contain hacks or workarounds.** If a verification check fails, the test fails — this means there is a real bug in the code. The entire purpose of the test is to detect problems. Masking failures with workarounds (e.g., force-deleting stuck resources, stripping finalizers, directly fixing state on spoke clusters) defeats the purpose because it hides bugs that users will hit in production.
+**Test scripts must NEVER contain hacks or workarounds.** If a verification check fails, the test fails — this means there is a real bug in the code. The entire purpose of the test is to detect problems. Masking failures with workarounds (e.g., force-deleting stuck resources, stripping finalizers, directly fixing state on spoke clusters) defeats the purpose because it hides bugs that users will hit in production.
 
 - **Between-scenario cleanup is hub-triggered ONLY.** The script deletes hub resources (Placement, Policy, GitOpsCluster, ManagedClusterAddOn) and waits for the addon's pre-delete cleanup Job to handle spoke-side cleanup. If spoke-side cleanup fails, the test reports it as a failure — it does NOT directly connect to the spoke to fix it.
 - **Initial cleanup (`cleanup_all`) IS allowed to be forceful** — it runs before any scenario to ensure a clean starting state regardless of prior failures. Direct spoke access and finalizer stripping are acceptable here only.
@@ -1197,3 +1171,44 @@ kubectl -n open-cluster-management rollout restart deployment/multicluster-opera
 12. **Destination-Based Mapping Must Match Principal and Agent**: The `destinationBasedMapping` setting controls the Redis key format for resource tree data. If the principal has it enabled but the agent does not (or vice versa), the Redis keys use different separators (`_` vs `|`) and the ArgoCD UI live manifest shows `"Resource not found in cluster"`. Always keep `destinationBasedMapping` consistent across principal and all agents. The agent setting is `spec.argoCDAgent.agent.client.destinationBasedMapping` in the ArgoCD CR.
 
 13. **Agent SA View ClusterRole Not Auto-Provisioned**: The ArgoCD agent ServiceAccount (`acm-openshift-gitops-agent-agent`) on OCP managed clusters is not automatically granted cluster read access. Without a `view` ClusterRoleBinding, the resource proxy cannot serve live manifest requests to the ArgoCD UI. This must be added manually or included in the Policy's object templates.
+
+---
+
+## Updating the Embedded Operator Manifests
+
+The `charts/openshift-gitops-operator/` Helm chart contains the embedded operator used on non-OCP clusters (Kind, EKS). When the OpenShift GitOps Operator is updated to a new version, these manifests must be synced.
+
+### Source of Truth
+
+The **hub cluster** with the target operator version installed via OLM is the authoritative source. Upstream repos and the `orb` tool are supplementary:
+
+| Source | Use For |
+|--------|---------|
+| Hub cluster (`~/Desktop/hub`) | CRDs, ClusterRole rules, image SHAs, Deployment structure — **primary source** |
+| `orb` tool | Extracting image SHAs from Red Hat catalog bundles when hub is unavailable |
+| [redhat-developer/gitops-operator](https://github.com/redhat-developer/gitops-operator) | Cross-referencing RBAC changes, understanding feature additions |
+| [argoproj-labs/argocd-operator](https://github.com/argoproj-labs/argocd-operator) | Understanding upstream operator behavior (embedded chart uses this operator) |
+
+### Quick Reference
+
+1. **CRDs**: Extract from hub (`kubectl get crd <name> -o yaml`), strip runtime metadata, disable conversion webhooks (`strategy: None`), escape Go templates (`{{ }}` → `{{ "{{" }}`), place in `charts/.../templates/crds/` and `deploy/crds/`
+2. **Manager ClusterRole**: Extract rules from hub CSV (`spec.install.spec.clusterPermissions[0].rules`), update `templates/openshift-gitops-operator-manager-role.clusterrole.yaml`
+3. **Image SHAs**: Extract from hub CSV env vars or use `orb bundle convert plain`, update `pkg/utils/config.go` `DefaultOperatorImages`
+4. **Chart.yaml**: Bump `version` field
+5. **Check for removed resources**: e.g., `argocdexports.argoproj.io` was removed in v1.20.4
+6. **Build and test**: `make build && make test`, then build/push image and run test cycles
+
+### Detailed Procedure
+
+See `CLAUDE.md` section "Manifest Update Procedure" for the full step-by-step with exact commands.
+
+### orb Tool
+
+Install: `go install github.com/joelanford/orb@latest`
+
+The `orb` tool converts OLM bundles from container registries into plain YAML. It requires Red Hat registry auth (`DOCKER_CONFIG` pointing to a dir with `config.json`). Useful primarily for extracting image SHAs — the OLM bundle format is *transformed* (aggregated RBAC, OLM-modified Deployments) and not directly usable as chart input.
+
+```bash
+orb bundle convert plain registry.redhat.io/openshift-gitops-1/gitops-operator-bundle:v1.20.4 /tmp/orb-output/
+# Output: /tmp/orb-output/manifests.yaml (CSV + CRDs)
+```
