@@ -15,11 +15,16 @@
 package main
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
@@ -196,6 +201,57 @@ func TestConstantsAndVariables(t *testing.T) {
 		g.Expect(config.OperatorImages[utils.EnvArgoCDImage]).To(gomega.ContainSubstring("registry.redhat.io"))
 		g.Expect(config.OperatorImages[utils.EnvArgoCDRedisImage]).To(gomega.ContainSubstring("registry.redhat.io"))
 		g.Expect(config.OperatorImages[utils.EnvArgoCDPrincipalImage]).To(gomega.ContainSubstring("registry.redhat.io"))
+	})
+}
+
+func TestDeleteStaleClusterRoleBinding(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("DeletesStaleRoleRef", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		staleCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "gitops-addon"},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     "cluster-admin", // stale: ACM 2.16 value
+			},
+		}
+		fakeClient := k8sfake.NewSimpleClientset(staleCRB)
+
+		err := deleteStaleClusterRoleBinding(ctx, fakeClient, "gitops-addon")
+		g.Expect(err).To(gomega.BeNil())
+
+		_, getErr := fakeClient.RbacV1().ClusterRoleBindings().Get(ctx, "gitops-addon", metav1.GetOptions{})
+		g.Expect(apierrors.IsNotFound(getErr)).To(gomega.BeTrue())
+	})
+
+	t.Run("SkipsUpToDateRoleRef", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		correctCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "gitops-addon"},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     "gitops-addon", // correct: ACM 2.17+ value
+			},
+		}
+		fakeClient := k8sfake.NewSimpleClientset(correctCRB)
+
+		err := deleteStaleClusterRoleBinding(ctx, fakeClient, "gitops-addon")
+		g.Expect(err).To(gomega.BeNil())
+
+		crb, getErr := fakeClient.RbacV1().ClusterRoleBindings().Get(ctx, "gitops-addon", metav1.GetOptions{})
+		g.Expect(getErr).To(gomega.BeNil())
+		g.Expect(crb.RoleRef.Name).To(gomega.Equal("gitops-addon"))
+	})
+
+	t.Run("HandlesNotFound", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		fakeClient := k8sfake.NewSimpleClientset()
+
+		err := deleteStaleClusterRoleBinding(ctx, fakeClient, "gitops-addon")
+		g.Expect(err).To(gomega.BeNil())
 	})
 }
 

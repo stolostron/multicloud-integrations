@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -29,8 +30,11 @@ import (
 	"k8s.io/klog"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"open-cluster-management.io/multicloud-integrations/gitopsaddon"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
@@ -190,12 +194,55 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Handle ACM 2.16→2.17 upgrade: delete stale gitops-addon ClusterRoleBinding if
+	// its roleRef still points to cluster-admin. Kubernetes forbids changing roleRef
+	// in-place, so the OCM work-agent cannot apply the updated ClusterRoleBinding and
+	// the pod ends up with no effective RBAC. Deleting it here lets the work-agent
+	// recreate it with the correct fine-grained roleRef on its next reconcile.
+	// Exit on failure so Kubernetes restarts the pod and retries — continuing would
+	// leave the pod spinning in a broken leader election loop indefinitely.
+	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes client for startup RBAC check")
+		os.Exit(1)
+	}
+	if err := deleteStaleClusterRoleBinding(context.Background(), kubeClient, "gitops-addon"); err != nil {
+		setupLog.Error(err, "failed to delete stale gitops-addon ClusterRoleBinding; exiting so Kubernetes restarts the pod and retries")
+		os.Exit(1)
+	}
+
 	setupLog.Info("starting gitops addon agent")
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// deleteStaleClusterRoleBinding deletes the named ClusterRoleBinding if its roleRef
+// does not self-reference (roleRef.Name != name). This is the self-healing fix for
+// the ACM 2.16→2.17 upgrade path: the 2.16 CRB had roleRef pointing to cluster-admin,
+// but 2.17 switches to a fine-grained ClusterRole with the same name as the binding.
+// Kubernetes forbids updating roleRef, so the OCM work-agent fails to apply the new
+// CRB and the old stale binding persists (also with the wrong SA namespace). Deleting
+// it here allows the work-agent to recreate it correctly on the next ManifestWork reconcile.
+func deleteStaleClusterRoleBinding(ctx context.Context, kubeClient kubernetes.Interface, name string) error {
+	crb, err := kubeClient.RbacV1().ClusterRoleBindings().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if crb.RoleRef.Name == name {
+		return nil
+	}
+	setupLog.Info("Deleting stale ClusterRoleBinding with outdated roleRef; ManifestWork will recreate it with the correct roleRef",
+		"clusterRoleBinding", name,
+		"staleRoleRef", crb.RoleRef.Name,
+		"expectedRoleRef", name,
+	)
+	return kubeClient.RbacV1().ClusterRoleBindings().Delete(ctx, name, metav1.DeleteOptions{})
 }
 
 // runCleanupMode runs the application in cleanup mode for pre-delete hook
