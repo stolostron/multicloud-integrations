@@ -38,6 +38,7 @@ import (
 const (
 	skipAgentVersionHealAnnotation = "apps.open-cluster-management.io/skip-agent-version-heal"
 	skipArgoCDPolicyAnnotation     = "apps.open-cluster-management.io/skip-argocd-policy"
+	skipHubCAPropagationAnnotation = "apps.open-cluster-management.io/skip-hub-ca-propagation"
 	principalComponentLabel        = "app.kubernetes.io/component"
 	principalComponentValue        = "principal"
 	principalContainerName         = "principal"

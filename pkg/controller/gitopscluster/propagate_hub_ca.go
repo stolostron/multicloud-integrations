@@ -31,6 +31,14 @@ import (
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
+// hasSkipHubCAPropagationAnnotation returns true when the GitOpsCluster has the
+// skip-hub-ca-propagation annotation set to "true". When set, the controller will
+// not create ManifestWorks for the CA secret, and ManifestWorksApplied is not a
+// critical condition. The user is responsible for distributing the CA to managed clusters.
+func hasSkipHubCAPropagationAnnotation(instance *gitopsclusterV1beta1.GitOpsCluster) bool {
+	return instance.GetAnnotations()[skipHubCAPropagationAnnotation] == "true"
+}
+
 // PropagateHubCA propagates the ArgoCD agent CA certificate from hub to managed clusters.
 //
 // For local-cluster: the hub controller has direct API access, so it writes the CA secret

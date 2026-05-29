@@ -47,6 +47,16 @@ const (
 	GitOpsAddonLabel = "apps.open-cluster-management.io/gitopsaddon"
 )
 
+// imagePullPolicyForImage returns PullAlways for :latest tags (which change
+// frequently during dev/test and must never be cached), PullIfNotPresent for
+// digest-pinned or versioned images.
+func imagePullPolicyForImage(image string) corev1.PullPolicy {
+	if strings.HasSuffix(image, ":latest") {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
+
 // getControllerImage retrieves the controller's image from environment variable or auto-detects it
 // Auto-detection: queries the Kubernetes API to find its own pod and reads the image
 // Returns an error if the image cannot be determined
@@ -346,7 +356,7 @@ func buildCleanupJobManifest(addonImage, namespace string) workv1.Manifest {
 						{
 							Name:            "cleanup",
 							Image:           addonImage,
-							ImagePullPolicy: corev1.PullIfNotPresent,
+							ImagePullPolicy: imagePullPolicyForImage(addonImage),
 							Command:         []string{"/usr/local/bin/gitopsaddon"},
 							Args:            []string{"-cleanup"},
 							Env:             buildCleanupEnvVars(),
@@ -527,7 +537,7 @@ func buildDeploymentManifest(addonImage, namespace string) workv1.Manifest {
 						{
 							Name:            "gitops-addon",
 							Image:           addonImage,
-							ImagePullPolicy: corev1.PullIfNotPresent,
+							ImagePullPolicy: imagePullPolicyForImage(addonImage),
 							Command:         []string{"/usr/local/bin/gitopsaddon"},
 							Env:             buildAddonEnvVars(),
 							SecurityContext: &corev1.SecurityContext{

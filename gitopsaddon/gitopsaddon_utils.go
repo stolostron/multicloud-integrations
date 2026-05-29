@@ -146,6 +146,15 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 				obj.SetNamespace(namespace)
 			}
 
+			// Stamp every resource with the gitopsaddon ownership label so cleanup
+			// can identify exactly what we deployed (vs system-managed resources).
+			labels := obj.GetLabels()
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+			labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
+			obj.SetLabels(labels)
+
 			// Apply the manifest
 			if err := r.applyManifest(&obj); err != nil {
 				klog.Errorf("Failed to apply manifest %s/%s %s: %v",
@@ -232,7 +241,7 @@ func (r *GitopsAddonReconciler) applyManifestSelectively(obj *unstructured.Unstr
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+	labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
 	obj.SetLabels(labels)
 
 	// Apply the manifest directly
@@ -271,7 +280,7 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 		}
 
 		existingLabels := existing.GetLabels()
-		if existingLabels == nil || existingLabels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+		if existingLabels == nil || existingLabels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue {
 			klog.Infof("Skipping %s/%s %s: pre-existing resource without gitopsaddon label", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 			return nil
 		}
@@ -282,7 +291,7 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+	labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
 	obj.SetLabels(labels)
 
 	if err != nil && errors.IsNotFound(err) {
@@ -352,7 +361,7 @@ func (r *GitopsAddonReconciler) applyCRDIfNotExists(fs embed.FS, resource, apiVe
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+	labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
 	crd.SetLabels(labels)
 
 	err = r.Create(context.TODO(), &crd)
