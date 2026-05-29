@@ -34,7 +34,6 @@ MAX_CYCLES="${1:-5}"
 
 GITOPSCLUSTER_NAME="cycle-agent-gitops"
 PLACEMENT_NAME="cycle-agent-placement"
-APPSET_PLACEMENT_LABEL="cycle-agent-appset"
 APPSET_NAME="cycle-agent-guestbook-appset"
 ARGOCD_NS="openshift-gitops"
 
@@ -121,7 +120,7 @@ for item in d.get('items',[]):
 
     # Delete addon RBAC (both main and pre-delete cleanup)
     on_cluster "$cluster" delete clusterrole gitops-addon gitops-addon-cleanup --ignore-not-found 2>/dev/null || true
-    on_cluster "$cluster" delete clusterrolebinding gitops-addon gitops-addon-cleanup --ignore-not-found 2>/dev/null || true
+    on_cluster "$cluster" delete clusterrolebinding gitops-addon gitops-addon-cleanup acm-openshift-gitops-appcontroller-cluster-admin --ignore-not-found 2>/dev/null || true
 
     # Delete stale cleanup jobs and addon pods
     on_cluster "$cluster" delete jobs -n open-cluster-management-agent-addon --all --ignore-not-found --force --grace-period=0 2>/dev/null || true
@@ -139,6 +138,27 @@ for item in d.get('items',[]):
     else
         log "  $cluster is OCP, keeping CRDs (managed by OLM)"
     fi
+
+    if [ -z "$has_clusterversion" ]; then
+        on_cluster "$cluster" apply -f - >/dev/null 2>&1 <<EORBAC || true
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: acm-openshift-gitops-appcontroller-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: acm-openshift-gitops-argocd-application-controller
+  namespace: openshift-gitops
+EORBAC
+        log "  $cluster pre-created app-controller cluster-admin binding"
+    fi
+
+    on_cluster "$cluster" delete deploy,svc --all -n guestbook --force --grace-period=0 --ignore-not-found 2>/dev/null || true
+    on_cluster "$cluster" delete namespace guestbook --ignore-not-found 2>/dev/null || true
 
     log "  $cluster force-clean done"
 }
@@ -233,7 +253,7 @@ spec:
         configMapRef: acm-placement
         labelSelector:
           matchLabels:
-            cluster.open-cluster-management.io/placement: ${APPSET_PLACEMENT_LABEL}
+            cluster.open-cluster-management.io/placement: ${PLACEMENT_NAME}
         requeueAfterSeconds: 180
   template:
     metadata:
@@ -255,36 +275,32 @@ spec:
           - CreateNamespace=true
 EOF
 
-    # Workaround: The Placement controller adds score:0 (int64) to PlacementDecisions.
-    # ArgoCD's DuckType generator type-asserts all values as strings and panics on int64.
-    # Create a manual PlacementDecision with a DIFFERENT label (APPSET_PLACEMENT_LABEL)
-    # so the ApplicationSet only sees our manual decisions (no score), not the
-    # Placement controller's decisions (which have score:0).
-    sleep 5
-    local decisions="["
-    local first=true
-    for cluster in "${CLUSTER_NAMES[@]}"; do
-        [ "$first" = true ] && first=false || decisions="${decisions},"
-        decisions="${decisions}{\"clusterName\":\"${cluster}\",\"reason\":\"\"}"
-    done
-    decisions="${decisions}]"
-
-    hub apply -f - <<EOF
-apiVersion: cluster.open-cluster-management.io/v1beta1
-kind: PlacementDecision
-metadata:
-  name: ${APPSET_PLACEMENT_LABEL}-decision-1
-  namespace: ${ARGOCD_NS}
-  labels:
-    cluster.open-cluster-management.io/placement: ${APPSET_PLACEMENT_LABEL}
-    cluster.open-cluster-management.io/decision-group-index: "0"
-    cluster.open-cluster-management.io/decision-group-name: ""
-EOF
-    hub patch placementdecision "${APPSET_PLACEMENT_LABEL}-decision-1" -n "${ARGOCD_NS}" \
-        --type merge --subresource status \
-        -p "{\"status\":{\"decisions\":${decisions}}}" 2>&1
-
     log "Deploy manifests applied"
+}
+
+# --- Ensure app-controller has cluster-admin on non-OCP clusters ---
+# The upstream argocd-operator creates ClusterRoles with only read (get/list/watch)
+# on core resources. Without ARGOCD_CLUSTER_CONFIG_NAMESPACES, the app-controller
+# cannot create Services/Deployments in target namespaces like "guestbook".
+ensure_appcontroller_rbac() {
+    local rbac_applied=false
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        if on_cluster "$cluster" get crd clusterversions.config.openshift.io --no-headers >/dev/null 2>&1; then
+            continue
+        fi
+        local sa_exists
+        sa_exists=$(on_cluster "$cluster" get sa -n openshift-gitops acm-openshift-gitops-argocd-application-controller --no-headers 2>/dev/null || echo "")
+        if [ -z "$sa_exists" ]; then
+            continue
+        fi
+        on_cluster "$cluster" create clusterrolebinding acm-openshift-gitops-appcontroller-cluster-admin \
+            --clusterrole=cluster-admin \
+            --serviceaccount=openshift-gitops:acm-openshift-gitops-argocd-application-controller \
+            --dry-run=client -o yaml | on_cluster "$cluster" apply -f - >/dev/null 2>&1
+        log "  Granted cluster-admin to app-controller on $cluster"
+        rbac_applied=true
+    done
+    [ "$rbac_applied" = true ] && log "  App-controller RBAC ensured on non-OCP clusters"
 }
 
 # --- Wait for deploy ---
@@ -351,6 +367,137 @@ verify_managed() {
     done
 }
 
+# --- Verify ArgoCD agent end-to-end: app dispatch + status sync ---
+# Polls for up to AGENT_VERIFY_SECS (default 300s) waiting for:
+#   1. App dispatched to spoke (Application exists in openshift-gitops on spoke)
+#   2. App reconciled (resources created in guestbook namespace on spoke)
+#   3. Status synced back (hub Application has non-Unknown sync status)
+# At least one cluster must pass all 3 checks for this to PASS.
+verify_agent_e2e() {
+    local timeout=${AGENT_VERIFY_SECS:-300}
+    log "Verifying ArgoCD agent end-to-end (up to ${timeout}s)..."
+    local elapsed=0
+    local any_cluster_ok=false
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        any_cluster_ok=false
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            local cluster_ok=true
+
+            # 1. App dispatched to spoke
+            local spoke_app
+            spoke_app=$(on_cluster "$cluster" get application.argoproj.io "guestbook-${cluster}" \
+                -n openshift-gitops -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+            [ -z "$spoke_app" ] && cluster_ok=false
+
+            # 2. App reconciled on spoke (resources created)
+            local spoke_resources=0
+            if [ "$cluster_ok" = "true" ]; then
+                spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l)
+                [ "$spoke_resources" -lt 1 ] && cluster_ok=false
+            fi
+
+            # 3. Hub app has real sync status (not Unknown = principal relayed agent status)
+            local hub_sync=""
+            if [ "$cluster_ok" = "true" ]; then
+                hub_sync=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
+                    -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+                [ "$hub_sync" = "Unknown" ] || [ -z "$hub_sync" ] && cluster_ok=false
+            fi
+
+            if [ "$cluster_ok" = "true" ]; then
+                local hub_health
+                hub_health=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
+                    -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+                pass "$cluster agent e2e OK: spoke app dispatched, ${spoke_resources} resources, hub sync=$hub_sync health=$hub_health"
+                any_cluster_ok=true
+            fi
+        done
+
+        if [ "$any_cluster_ok" = "true" ]; then
+            pass "ArgoCD agent e2e verified: at least 1 cluster fully working"
+            return 0
+        fi
+
+        sleep 30
+        elapsed=$((elapsed + 30))
+        log "  Agent e2e: waiting for app dispatch + reconcile + status sync (${elapsed}s)"
+    done
+
+    # Timeout — report per-cluster status as warnings
+    log "WARNING: Agent e2e verification timed out after ${timeout}s. Per-cluster status:"
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local spoke_app
+        spoke_app=$(on_cluster "$cluster" get application.argoproj.io "guestbook-${cluster}" \
+            -n openshift-gitops -o jsonpath='{.metadata.name}' 2>/dev/null || echo "none")
+        local spoke_resources
+        spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l)
+        local hub_sync
+        hub_sync=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
+            -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "none")
+        local hub_health
+        hub_health=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
+            -o jsonpath='{.status.health.status}' 2>/dev/null || echo "none")
+        log "  $cluster: spokeApp=$spoke_app spokeResources=$spoke_resources hubSync=$hub_sync hubHealth=$hub_health"
+
+        # Check agent pod status for diagnostics
+        local agent_status
+        agent_status=$(on_cluster "$cluster" get pods -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent \
+            -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.conditions 2>/dev/null | head -3)
+        log "  $cluster agent pods: $agent_status"
+    done
+}
+
+# --- Verify gitopsaddon label on deployed resources (non-OCP clusters only) ---
+verify_gitopsaddon_labels() {
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local is_ocp
+        is_ocp=$(on_cluster "$cluster" get crd clusterversions.config.openshift.io --no-headers 2>/dev/null && echo "yes" || echo "no")
+        if [ "$is_ocp" = "yes" ]; then
+            log "$cluster is OCP (OLM mode), skipping embedded label check"
+            continue
+        fi
+
+        local label_ok=true
+
+        # Check Deployment in operator namespace
+        local deploy_label
+        deploy_label=$(on_cluster "$cluster" get deploy -n openshift-gitops-operator -l "apps.open-cluster-management.io/gitopsaddon=true" --no-headers 2>/dev/null | wc -l)
+        if [ "$deploy_label" -ge 1 ]; then
+            pass "$cluster operator Deployment has gitopsaddon label"
+        else
+            log "WARNING: $cluster operator Deployment missing gitopsaddon label"
+            label_ok=false
+        fi
+
+        # Check ServiceAccount in operator namespace
+        local sa_label
+        sa_label=$(on_cluster "$cluster" get sa -n openshift-gitops-operator -l "apps.open-cluster-management.io/gitopsaddon=true" --no-headers 2>/dev/null | wc -l)
+        if [ "$sa_label" -ge 1 ]; then
+            pass "$cluster operator ServiceAccount has gitopsaddon label"
+        else
+            log "WARNING: $cluster operator ServiceAccount missing gitopsaddon label"
+            label_ok=false
+        fi
+
+        # Check ConfigMap in operator namespace (should be labeled, system ones should NOT)
+        local cm_unlabeled
+        cm_unlabeled=$(on_cluster "$cluster" get cm -n openshift-gitops-operator --no-headers 2>/dev/null | wc -l)
+        local cm_labeled
+        cm_labeled=$(on_cluster "$cluster" get cm -n openshift-gitops-operator -l "apps.open-cluster-management.io/gitopsaddon=true" --no-headers 2>/dev/null | wc -l)
+        if [ "$cm_labeled" -ge 1 ]; then
+            pass "$cluster operator ConfigMap(s) labeled ($cm_labeled labeled, $cm_unlabeled total)"
+        else
+            log "WARNING: $cluster no labeled ConfigMaps in operator namespace"
+            label_ok=false
+        fi
+
+        if [ "$label_ok" = "true" ]; then
+            pass "$cluster all embedded operator resources have gitopsaddon label"
+        fi
+    done
+}
+
 # --- Delete from hub (explicit manual ordering) ---
 delete_from_hub() {
     log "Deleting from hub..."
@@ -361,11 +508,72 @@ delete_from_hub() {
     hub delete gitopscluster "$GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
 
     # 2. Delete Policy + PlacementBinding — stops enforcement of ArgoCD CR on managed
-    #    clusters. Without this, the Policy re-creates the ArgoCD CR during cleanup.
+    #    clusters. Without this, the ConfigurationPolicy re-creates the ArgoCD CR
+    #    during cleanup, causing a race: cleanup Job deletes ArgoCD CR (step 2),
+    #    ConfigurationPolicy re-creates it, cleanup Job kills operator (step 3),
+    #    re-created ArgoCD CR has unprocessable finalizer → orphaned CR + workloads.
     local policy_name="${GITOPSCLUSTER_NAME}-argocd-policy"
     hub delete placementbinding "${policy_name}-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "$policy_name" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
-    sleep 5
+
+    # Wait for ConfigurationPolicy to be fully removed from ALL managed clusters.
+    # The chain: Hub Policy deleted → replicated Policy removed from managed
+    # cluster namespace → governance framework removes ConfigurationPolicy from
+    # managed cluster → config-policy-controller stops enforcing ArgoCD CR.
+    # This chain takes 30-60s. If we check immediately, we might see 0
+    # ConfigurationPolicies because propagation hasn't started yet (false positive).
+    # Strategy: wait for replicated policies to be removed from hub first (ensures
+    # propagation has started), then verify ConfigurationPolicies are gone.
+    log "Waiting for replicated Policies to be removed from hub..."
+    local rp_timeout=120
+    local rp_elapsed=0
+    local rp_all_gone=false
+    while [ "$rp_elapsed" -lt "$rp_timeout" ]; do
+        rp_all_gone=true
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            if hub get policy -n "$cluster" --no-headers 2>/dev/null | grep -q "argocd" 2>/dev/null; then
+                rp_all_gone=false
+                break
+            fi
+        done
+        if $rp_all_gone; then
+            pass "Replicated Policies removed from hub (${rp_elapsed}s)"
+            break
+        fi
+        sleep 5
+        rp_elapsed=$((rp_elapsed + 5))
+    done
+    if ! $rp_all_gone; then
+        log "WARNING: replicated Policies still on hub after ${rp_timeout}s"
+    fi
+
+    # Now wait for ConfigurationPolicies to be removed from managed clusters
+    log "Waiting for ConfigurationPolicy to be removed from managed clusters..."
+    local cp_timeout=120
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local cp_elapsed=0
+        while [ "$cp_elapsed" -lt "$cp_timeout" ]; do
+            local cp_count
+            cp_count=$(on_cluster "$cluster" get configurationpolicy -A --no-headers 2>/dev/null | grep -c "argocd" || true)
+            if [ "$cp_count" -eq 0 ]; then
+                pass "ConfigurationPolicy removed from $cluster (${cp_elapsed}s)"
+                break
+            fi
+            sleep 10
+            cp_elapsed=$((cp_elapsed + 10))
+            [ $((cp_elapsed % 30)) -eq 0 ] && log "  $cluster still has ConfigurationPolicy (${cp_elapsed}s)"
+        done
+        if [ "$cp_elapsed" -ge "$cp_timeout" ]; then
+            log "WARNING: $cluster ConfigurationPolicy not removed after ${cp_timeout}s — proceeding anyway"
+        fi
+    done
+
+    # Wait for config-policy-controller queued reconciliations to drain.
+    # Even after the ConfigurationPolicy is deleted from the API, the controller
+    # may have a queued reconciliation that fires using cached state, re-creating
+    # the ArgoCD CR one final time. The reconciliation queue drains within ~10s.
+    log "Waiting 30s for config-policy-controller reconciliation queue to drain..."
+    sleep 30
 
     # 3. Delete MCAs — triggers pre-delete cleanup Job on each managed cluster.
     #    ADC and AddOnTemplate still exist (orphaned from step 1), so the addon
@@ -396,7 +604,6 @@ delete_from_hub() {
 
     # 6. Delete remaining hub resources
     hub delete placement "$PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
-    hub delete placementdecision "${APPSET_PLACEMENT_LABEL}-decision-1" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "$policy_name" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
 
     # 7. Clean up orphaned ADCs
@@ -429,6 +636,7 @@ wait_for_mca_cleanup() {
 # --- Verify cleanup on hub + managed clusters ---
 verify_cleanup() {
     local issues=0
+    local warnings=0
 
     # Hub: GitOpsCluster gone
     if hub get gitopscluster "$GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" &>/dev/null; then
@@ -453,19 +661,14 @@ verify_cleanup() {
             pass "Hub: MCA deleted for $cluster"
         fi
 
-        # Managed cluster: ArgoCD CR removed (wait up to 120s).
-        # The CR may linger if the Policy re-created it during the brief window
-        # between hub-side Policy deletion and spoke-side ConfigurationPolicy removal.
-        # With the operator already gone, the CR is an inert orphan (no finalizer processing).
-        local aw=0
-        while [ "$aw" -lt 120 ]; do
-            on_cluster "$cluster" get argocd acm-openshift-gitops -n openshift-gitops &>/dev/null || break
-            sleep 10; aw=$((aw+10))
-        done
+        # Managed cluster: ArgoCD CR removed. The cleanup job now waits for the
+        # operator to process the ArgoCD CR finalizer before removing the operator.
+        # If the CR is still present, the operator failed to process the finalizer.
         if on_cluster "$cluster" get argocd acm-openshift-gitops -n openshift-gitops &>/dev/null; then
-            log "WARNING: $cluster ArgoCD CR still present (orphaned — operator removed, harmless)"
+            log "CLEANUP ISSUE: $cluster ArgoCD CR still present — operator finalizer did not complete"
+            issues=$((issues+1))
         else
-            pass "$cluster: ArgoCD CR removed"
+            pass "$cluster: ArgoCD CR removed (operator finalizer processed)"
         fi
 
         # Managed cluster: addon deployment removed
@@ -475,10 +678,67 @@ verify_cleanup() {
             pass "$cluster: addon deployment removed"
         fi
 
-        # Force-delete any stuck terminating pods in guestbook namespace to prevent
-        # them from keeping the app at Progressing in the next cycle.
-        # Do NOT delete the namespace itself — a terminating namespace blocks ArgoCD
-        # from recreating resources in subsequent deploys.
+        # Managed cluster: ArgoCD workloads in openshift-gitops namespace.
+        # Only check for gitopsaddon-created workloads (acm-openshift-gitops-* prefix).
+        # On OCP, 'cluster' and 'gitops-plugin' deployments are owned by the built-in
+        # GitopsService CR (pipelines.openshift.io) and are NOT from gitopsaddon.
+        local addon_deploys
+        addon_deploys=$(on_cluster "$cluster" get deploy -n openshift-gitops --no-headers 2>/dev/null | grep -c "acm-openshift-gitops" || true)
+        local addon_sts
+        addon_sts=$(on_cluster "$cluster" get statefulset -n openshift-gitops --no-headers 2>/dev/null | grep -c "acm-openshift-gitops" || true)
+        if [ "$addon_deploys" -gt 0 ] || [ "$addon_sts" -gt 0 ]; then
+            log "CLEANUP ISSUE: $cluster still has addon ArgoCD workloads in openshift-gitops (deploys=$addon_deploys sts=$addon_sts)"
+            on_cluster "$cluster" get deploy,statefulset -n openshift-gitops 2>/dev/null || true
+            issues=$((issues+1))
+        else
+            pass "$cluster: addon ArgoCD workloads cleaned (operator finalizer processed)"
+        fi
+
+        # Managed cluster: operator namespace (openshift-gitops-operator).
+        # On OCP, OLM manages the operator deployment — skip if OLM mode (OLM handles cleanup).
+        # On non-OCP (embedded), gitopsaddon lays down the operator, so it must be cleaned.
+        if ! on_cluster "$cluster" get crd clusterversions.config.openshift.io >/dev/null 2>&1; then
+            local op_deploys
+            op_deploys=$(on_cluster "$cluster" get deploy -n openshift-gitops-operator --no-headers 2>/dev/null | wc -l)
+            if [ "$op_deploys" -gt 0 ]; then
+                log "CLEANUP ISSUE: $cluster still has operator deployment in openshift-gitops-operator"
+                on_cluster "$cluster" get deploy -n openshift-gitops-operator 2>/dev/null || true
+                issues=$((issues+1))
+            else
+                pass "$cluster: operator namespace clean (embedded)"
+            fi
+        else
+            pass "$cluster: operator namespace managed by OLM (OCP)"
+        fi
+
+        # OCP-specific: OLM subscription and CSV should be removed
+        # OLM deletion is async — wait up to 60s for subscription/CSV to be fully removed
+        if on_cluster "$cluster" get crd clusterversions.config.openshift.io >/dev/null 2>&1; then
+            local olm_wait=0
+            while [ "$olm_wait" -lt 60 ]; do
+                local olm_subs
+                olm_subs=$(on_cluster "$cluster" get subscriptions.operators -A --no-headers 2>/dev/null | grep -c gitops || true)
+                local olm_csvs
+                olm_csvs=$(on_cluster "$cluster" get csv -A --no-headers 2>/dev/null | grep -c gitops || true)
+                if [ "$olm_subs" -eq 0 ] && [ "$olm_csvs" -eq 0 ]; then
+                    break
+                fi
+                sleep 5
+                olm_wait=$((olm_wait+5))
+            done
+            if [ "$olm_subs" -gt 0 ]; then
+                log "CLEANUP ISSUE: $cluster OLM Subscription still exists after ${olm_wait}s"; issues=$((issues+1))
+            else
+                pass "$cluster: OLM Subscription removed"
+            fi
+            if [ "$olm_csvs" -gt 0 ]; then
+                log "CLEANUP ISSUE: $cluster OLM CSV still exists after ${olm_wait}s"; issues=$((issues+1))
+            else
+                pass "$cluster: OLM CSV removed"
+            fi
+        fi
+
+        # Force-delete any stuck terminating pods in guestbook namespace
         on_cluster "$cluster" delete pod --all -n guestbook --force --grace-period=0 --ignore-not-found 2>/dev/null || true
 
         # Cluster still accessible (critical check)
@@ -492,7 +752,11 @@ verify_cleanup() {
     done
 
     if [ $issues -gt 0 ]; then
+        log "Cleanup verification: $issues issue(s), $warnings warning(s)"
         fail "Cleanup verification found $issues issue(s)"
+    fi
+    if [ $warnings -gt 0 ]; then
+        log "Cleanup verification: $warnings warning(s) (non-fatal)"
     fi
 }
 
@@ -527,6 +791,8 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
     deploy
     wait_for_deploy
     verify_managed
+    verify_agent_e2e
+    verify_gitopsaddon_labels
 
     delete_from_hub
     verify_cleanup
@@ -538,9 +804,39 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
     # blocking app dispatch indefinitely.
     if [ "$cycle" -lt "$MAX_CYCLES" ]; then
         log "Resetting between cycles..."
+
+        # Delete stale CSRs to prevent "too many CSR" throttling
         hub get csr -o name 2>/dev/null | grep gitops-addon | xargs hub delete --ignore-not-found 2>/dev/null || true
+
+        # Delete stale pre-delete ManifestWorks on hub
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            hub delete manifestwork -n "$cluster" addon-gitops-addon-pre-delete --ignore-not-found 2>/dev/null || true
+        done
+
+        # Clean up stale resources on managed clusters
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            # Kill stale cleanup Jobs
+            on_cluster "$cluster" delete job gitops-addon-cleanup -n open-cluster-management-agent-addon --ignore-not-found 2>/dev/null || true
+            # Delete residual ArgoCD CRs (wait briefly, then strip finalizers)
+            on_cluster "$cluster" delete argocd --all -n openshift-gitops --timeout=30s 2>/dev/null || \
+                on_cluster "$cluster" patch argocd -n openshift-gitops --type=merge -p '{"metadata":{"finalizers":[]}}' --all 2>/dev/null || true
+            # Delete guestbook namespace
+            on_cluster "$cluster" delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+        done
+
+        # Restart principal to clear gRPC event queue
         hub -n "$ARGOCD_NS" rollout restart deploy -l app.kubernetes.io/component=principal 2>/dev/null || true
         hub -n "$ARGOCD_NS" rollout status deploy -l app.kubernetes.io/component=principal --timeout=60s 2>/dev/null || true
+
+        sleep 10
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            ns_gone=false
+            for _ in $(seq 1 6); do
+                on_cluster "$cluster" get namespace guestbook &>/dev/null || { ns_gone=true; break; }
+                sleep 5
+            done
+            [ "$ns_gone" = true ] || log "WARNING: $cluster guestbook namespace still terminating"
+        done
     fi
 
     log "CYCLE $cycle COMPLETE"
