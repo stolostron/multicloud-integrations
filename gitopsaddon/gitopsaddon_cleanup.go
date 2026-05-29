@@ -43,6 +43,10 @@ const (
 	AddonNamespace = "open-cluster-management-agent-addon"
 	// AddonDeploymentName is the name of the gitops-addon deployment
 	AddonDeploymentName = "gitops-addon"
+	// GitOpsAddonLabelKey is the label key used to mark all resources created by gitopsaddon
+	GitOpsAddonLabelKey = "apps.open-cluster-management.io/gitopsaddon"
+	// GitOpsAddonLabelValue is the label value for resources owned by gitopsaddon
+	GitOpsAddonLabelValue = "true"
 )
 
 // uninstallGitopsAgent uninstalls the Gitops agent addon for cleanup reconciler
@@ -167,24 +171,28 @@ func uninstallOnHub(ctx context.Context, c client.Client) error {
 }
 
 // uninstallOnManagedCluster performs a full cleanup on remote managed clusters.
+// The cleanup strategy depends on how the operator was installed:
+//   - OLM mode (OCP): delete Subscription + CSV and let OLM handle operator teardown.
+//     Manual resource deletion is skipped because OLM cleans up its own resources,
+//     and OpenShift auto-recreates system resources (kube-root-ca.crt, default SA, etc.)
+//     that would cause the retry loop to fight pointlessly for minutes.
+//   - Embedded mode (Kind/EKS): manually delete all operator resources since there is
+//     no OLM to handle cleanup.
 func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOperatorNS string) error {
 	klog.Info("Managed cluster cleanup: full uninstall")
 	var errors []error
 
-	klog.Infof("Step 0: Creating pause marker in namespace: %s", AddonNamespace)
+	klog.Infof("Step 0a: Creating pause marker in namespace: %s", AddonNamespace)
 	if err := createPauseMarker(ctx, c); err != nil {
 		klog.Errorf("Error creating pause marker (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to create pause marker: %w", err))
 	}
 
-	// Wait for the addon agent's informer cache to pick up the pause marker.
-	// The addon agent runs in a separate process; its informer receives watch events
-	// within 1-3 seconds. Without this delay, the agent may be mid-reconciliation
-	// (not yet paused) and recreate the operator deployment after we delete it.
-	// The operator deployment is NOT in the ManifestWork, so ManifestWork deletion
-	// can't remove it — this Job is the only mechanism.
+	klog.Info("Step 0b: Scaling down addon agent to prevent reconciliation during cleanup")
+	scaleDownAddonAgent(ctx, c)
+
 	pauseSettleDuration := getPauseSettleDuration()
-	klog.Infof("Waiting %v for addon agent to observe pause marker...", pauseSettleDuration)
+	klog.Infof("Waiting %v for addon agent pod termination...", pauseSettleDuration)
 	time.Sleep(pauseSettleDuration)
 
 	klog.Info("Step 1: Deleting GitOpsService CR (if exists)")
@@ -192,28 +200,53 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 		klog.Errorf("Error deleting GitOpsService CR (continuing with cleanup): %v", err)
 	}
 
-	klog.Info("Step 2: Deleting ArgoCD CRs with gitopsaddon label (all namespaces)")
+	// Step 2: Delete ArgoCD CRs with gitopsaddon label. The operator processes the
+	// ArgoCD CR finalizer and cleans up all workloads it created (redis, repo-server,
+	// app-controller, server, etc.). We wait as long as needed — the operator MUST
+	// finish processing the finalizer before we remove the operator in step 3.
+	// NEVER force-strip the finalizer. NEVER blindly delete ArgoCD workloads.
+	klog.Info("Step 2: Deleting ArgoCD CRs with gitopsaddon label (all namespaces) — waiting for operator to process finalizer")
 	if err := deleteArgoCDCR(ctx, c); err != nil {
 		klog.Errorf("Error deleting ArgoCD CR (continuing with cleanup): %v", err)
 		errors = append(errors, fmt.Errorf("failed to delete ArgoCD CR: %w", err))
 	}
 
-	klog.Info("Step 3: Deleting OLM Subscription and CSV (if exists)")
-	if err := deleteOLMResources(ctx, c); err != nil {
-		klog.Errorf("Error deleting OLM resources (continuing with cleanup): %v", err)
-		errors = append(errors, fmt.Errorf("failed to delete OLM resources: %w", err))
+	// Step 3: Remove the operator. Only runs AFTER ArgoCD CR is fully gone (step 2
+	// waited for the finalizer). This ordering is critical — if we remove the operator
+	// before the ArgoCD CR finalizer is processed, the operator can't clean up its
+	// own workloads and they become orphaned.
+	klog.Info("Step 3: Removing operator installation")
+	olmFound, olmErr := deleteOLMResourcesAndReport(ctx, c)
+	if olmErr != nil {
+		klog.Errorf("Error deleting OLM resources (continuing with cleanup): %v", olmErr)
+		errors = append(errors, fmt.Errorf("failed to delete OLM resources: %w", olmErr))
 	}
 
-	klog.Info("Step 4: Deleting openshift-gitops-operator resources from namespace: " + gitopsOperatorNS)
-	if err := deleteOperatorResources(ctx, c, gitopsOperatorNS); err != nil {
-		klog.Errorf("Error deleting openshift-gitops-operator resources (continuing with cleanup): %v", err)
-		errors = append(errors, fmt.Errorf("failed to delete openshift-gitops-operator resources: %w", err))
-	}
+	if olmFound {
+		// OLM mode (OCP): OLM handles operator resource cleanup when the CSV is deleted.
+		// The ArgoCD workloads were already cleaned up by the operator in step 2 (finalizer).
+		// Skip manual operator namespace deletion — it would fight OpenShift auto-recreated
+		// system resources (kube-root-ca.crt, default/builder/deployer SAs, system RoleBindings).
+		klog.Info("Step 4: SKIPPED operator namespace cleanup — OLM mode detected")
+	} else {
+		// Embedded mode (Kind/EKS): no OLM to clean up, must delete labeled resources manually.
+		// Only deletes resources with the gitopsaddon label — never touches system resources.
+		klog.Info("Step 4: Deleting gitopsaddon-labeled operator resources from namespace: " + gitopsOperatorNS)
+		if err := deleteOperatorResources(ctx, c, gitopsOperatorNS); err != nil {
+			klog.Errorf("Error deleting openshift-gitops-operator resources (continuing with cleanup): %v", err)
+			errors = append(errors, fmt.Errorf("failed to delete openshift-gitops-operator resources: %w", err))
+		}
 
-	waitDuration := getCleanupVerificationWaitDuration()
-	if waitDuration > 0 {
-		klog.Infof("Step 5: Best-effort re-sweep for resources recreated by in-flight reconciliation (%v)...", waitDuration)
-		waitAndVerifyCleanup(ctx, c, gitopsOperatorNS, waitDuration)
+		// The OCM work-agent may temporarily restore the addon agent Deployment (from the
+		// regular ManifestWork) before the ManifestWork deletion takes effect. The restored
+		// agent can reconcile and recreate operator resources. Re-scale down the addon agent
+		// and run a final cleanup pass to catch any late recreations.
+		klog.Info("Step 5: Re-scaling down addon agent + final operator cleanup pass")
+		scaleDownAddonAgent(ctx, c)
+		time.Sleep(15 * time.Second)
+		if err := deleteOperatorResources(ctx, c, gitopsOperatorNS); err != nil {
+			klog.Warningf("Final operator cleanup pass: %v", err)
+		}
 	}
 
 	// If the pause marker has an ownerReference to the addon Deployment, leave it for
@@ -287,10 +320,26 @@ type olmCSVRef struct {
 	namespace string
 }
 
-// deleteOLMResources deletes OLM Subscription and CSV resources owned by gitopsaddon.
+// deleteOLMResources deletes OLM Subscription and CSV resources, discarding the
+// "found" signal. Retained for backward compatibility with tests.
+func deleteOLMResources(ctx context.Context, c client.Client) error {
+	_, err := deleteOLMResourcesAndReport(ctx, c)
+	return err
+}
+
+// deleteOLMResourcesAndReport deletes OLM resources and also reports whether any
+// OLM resources (subscriptions or CSVs) were found and deleted. This signal tells the
+// caller whether the operator was installed via OLM (so OLM handles operator teardown)
+// or via the embedded chart (so manual resource deletion is needed).
+func deleteOLMResourcesAndReport(ctx context.Context, c client.Client) (bool, error) {
+	return deleteOLMResourcesInternal(ctx, c)
+}
+
+// deleteOLMResourcesInternal deletes OLM Subscription and CSV resources owned by gitopsaddon.
 // CSVs are identified via the subscription's status.installedCSV field BEFORE deleting
 // the subscription, so we only delete CSVs that we installed — never pre-existing ones.
-func deleteOLMResources(ctx context.Context, c client.Client) error {
+// Returns true if any OLM subscriptions or CSVs were found (indicating OLM mode).
+func deleteOLMResourcesInternal(ctx context.Context, c client.Client) (bool, error) {
 	klog.Info("Deleting OLM resources (Subscription and CSV)")
 
 	// AddonNamespace is included because some 2.16 installer builds embedded the
@@ -313,6 +362,7 @@ func deleteOLMResources(ctx context.Context, c client.Client) error {
 	}
 
 	var errs []error
+	olmFound := false
 
 	// Step 1: Collect CSV names from our labeled subscriptions BEFORE deleting them.
 	var csvsToDelete []olmCSVRef
@@ -323,14 +373,21 @@ func deleteOLMResources(ctx context.Context, c client.Client) error {
 			klog.Warningf("Error collecting CSVs from subscriptions in %s: %v", ns, err)
 			errs = append(errs, fmt.Errorf("failed to collect CSVs in %s: %w", ns, err))
 		}
+		if len(refs) > 0 {
+			olmFound = true
+		}
 		csvsToDelete = append(csvsToDelete, refs...)
 	}
 
 	// Step 2: Delete our labeled subscriptions
 	for _, ns := range subscriptionNamespaces {
-		if err := deleteSubscriptionsInNamespace(ctx, c, ns); err != nil {
+		deleted, err := deleteSubscriptionsInNamespaceAndReport(ctx, c, ns)
+		if err != nil {
 			klog.Warningf("Error deleting subscriptions in %s: %v", ns, err)
 			errs = append(errs, fmt.Errorf("failed to delete subscriptions in %s: %w", ns, err))
+		}
+		if deleted {
+			olmFound = true
 		}
 	}
 
@@ -368,10 +425,16 @@ func deleteOLMResources(ctx context.Context, c client.Client) error {
 		errs = append(errs, fmt.Errorf("failed to patch ArgoCD CRD conversion webhook: %w", err))
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("OLM resource cleanup had %d error(s): %w", len(errs), errs[0])
+	if olmFound {
+		klog.Info("OLM resources were found and deleted — operator cleanup will be handled by OLM")
+	} else {
+		klog.Info("No OLM resources found — operator was installed via embedded chart")
 	}
-	return nil
+
+	if len(errs) > 0 {
+		return olmFound, fmt.Errorf("OLM resource cleanup had %d error(s): %w", len(errs), errs[0])
+	}
+	return olmFound, nil
 }
 
 // patchArgoCDCRDConversionWebhook patches the argocds.argoproj.io CRD to remove
@@ -567,7 +630,7 @@ func getInstalledCSVsFromLabeledSubscriptions(ctx context.Context, c client.Clie
 
 	err := c.List(ctx, subscriptions,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+		client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 	if err != nil {
 		if apierrors.IsNotFound(err) || isNoKindMatchError(err) {
 			return nil, nil
@@ -587,21 +650,24 @@ func getInstalledCSVsFromLabeledSubscriptions(ctx context.Context, c client.Clie
 	return refs, nil
 }
 
-// deleteSubscriptionsInNamespace deletes OLM Subscriptions with gitopsaddon label
-func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namespace string) error {
+// deleteSubscriptionsInNamespaceAndReport deletes gitopsaddon-labeled subscriptions
+// and returns true if any were found (regardless of whether deletion succeeded).
+func deleteSubscriptionsInNamespaceAndReport(ctx context.Context, c client.Client, namespace string) (bool, error) {
 	subscriptions := &unstructured.UnstructuredList{}
 	subscriptions.SetAPIVersion("operators.coreos.com/v1alpha1")
 	subscriptions.SetKind("SubscriptionList")
 
 	err := c.List(ctx, subscriptions,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+		client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 	if err != nil {
 		if apierrors.IsNotFound(err) || isNoKindMatchError(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
+
+	found := len(subscriptions.Items) > 0
 
 	for _, sub := range subscriptions.Items {
 		klog.Infof("Deleting Subscription: %s/%s", namespace, sub.GetName())
@@ -610,7 +676,7 @@ func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namesp
 		}
 	}
 
-	return nil
+	return found, nil
 }
 
 // deleteArgoCDCR deletes ArgoCD CRs with the gitopsaddon label across ALL namespaces
@@ -618,16 +684,22 @@ func deleteSubscriptionsInNamespace(ctx context.Context, c client.Client, namesp
 func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 	klog.Info("Deleting ArgoCD CRs with gitopsaddon label (all namespaces)")
 
-	maxWait := 2 * time.Minute
 	checkInterval := 5 * time.Second
-	elapsed := time.Duration(0)
+	// After seeing 0 CRs, require stability for this duration before returning.
+	// This guards against the ConfigurationPolicy race: the config-policy-controller
+	// may have a queued reconciliation that re-creates the ArgoCD CR after the
+	// ConfigurationPolicy is deleted. Waiting ensures any stale enforcement has settled.
+	// Keep this short (15s) to avoid approaching the Job's activeDeadlineSeconds (600s).
+	stabilityDuration := 15 * time.Second
 	deleted := false
+	startTime := time.Now()
+	var zeroSince time.Time
 
 	labelSelector := client.MatchingLabels{
-		"apps.open-cluster-management.io/gitopsaddon": "true",
+		GitOpsAddonLabelKey: GitOpsAddonLabelValue,
 	}
 
-	for elapsed < maxWait {
+	for {
 		argoCDList := &unstructured.UnstructuredList{}
 		argoCDList.SetAPIVersion("argoproj.io/v1beta1")
 		argoCDList.SetKind("ArgoCDList")
@@ -639,18 +711,30 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 				return nil
 			}
 			klog.Warningf("Error listing ArgoCD CRs: %v", err)
+			zeroSince = time.Time{}
 		} else if len(argoCDList.Items) == 0 {
-			if deleted {
-				klog.Info("All gitopsaddon-labeled ArgoCD CRs have been fully deleted")
-			} else {
-				klog.Info("No gitopsaddon-labeled ArgoCD CRs found (already deleted or never existed)")
+			if zeroSince.IsZero() {
+				zeroSince = time.Now()
+				if !deleted {
+					klog.Info("No gitopsaddon-labeled ArgoCD CRs found, verifying stability...")
+				} else {
+					klog.Info("ArgoCD CRs deleted, verifying stability (checking for re-creation)...")
+				}
 			}
-			return nil
+			if time.Since(zeroSince) >= stabilityDuration {
+				klog.Infof("ArgoCD CR deletion confirmed stable for %v (total elapsed: %v)", stabilityDuration, time.Since(startTime))
+				return nil
+			}
 		} else {
+			if !zeroSince.IsZero() {
+				klog.Warning("ArgoCD CR re-appeared after deletion — likely stale ConfigurationPolicy enforcement, re-deleting")
+				zeroSince = time.Time{}
+			}
 			for _, argoCD := range argoCDList.Items {
 				name := argoCD.GetName()
 				ns := argoCD.GetNamespace()
-				klog.Infof("Deleting ArgoCD CR: %s/%s (elapsed: %v)", ns, name, elapsed)
+				elapsed := time.Since(startTime).Truncate(time.Second)
+				klog.Infof("Deleting ArgoCD CR: %s/%s (waiting for operator finalizer, elapsed: %v)", ns, name, elapsed)
 				if err := c.Delete(ctx, &argoCD); err != nil && !apierrors.IsNotFound(err) {
 					klog.Warningf("Failed to delete ArgoCD CR %s/%s: %v", ns, name, err)
 				} else {
@@ -660,23 +744,7 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 		}
 
 		time.Sleep(checkInterval)
-		elapsed += checkInterval
 	}
-
-	argoCDList := &unstructured.UnstructuredList{}
-	argoCDList.SetAPIVersion("argoproj.io/v1beta1")
-	argoCDList.SetKind("ArgoCDList")
-	err := c.List(ctx, argoCDList, labelSelector)
-	if err != nil && isNoKindMatchError(err) {
-		klog.Info("ArgoCD CRD not installed — nothing to clean up")
-		return nil
-	}
-	if err == nil && len(argoCDList.Items) == 0 {
-		klog.Warning("ArgoCD CRs deleted after timeout")
-		return nil
-	}
-
-	return fmt.Errorf("timeout: gitopsaddon-labeled ArgoCD CRs still exist after %v", maxWait)
 }
 
 // deleteOperatorResources deletes openshift-gitops-operator resources
@@ -701,27 +769,17 @@ func deleteOperatorResources(ctx context.Context, c client.Client, gitopsOperato
 
 	var errs []error
 
-	// For namespaced resources: always delete ALL resources in the operator namespace
-	// regardless of labels. The embedded Helm chart deploys resources (e.g.
-	// openshift-gitops-operator-controller-manager Deployment) with only
-	// "control-plane: gitops-operator" labels — NOT the gitopsaddon label. A
-	// label-based pass would find zero items and report "success", leaving the
-	// deployment behind.
-	//
-	// CRITICAL: Do NOT extend this label-free approach to cluster-scoped resources
-	// (ClusterRole, ClusterRoleBinding). Without a label filter, listing cluster-scoped
-	// resources returns EVERY ClusterRole/ClusterRoleBinding in the cluster, and
-	// deleting them destroys system RBAC (cluster-admin, system:node, etc.), making
-	// the cluster permanently inaccessible.
-	klog.Infof("Deleting all namespaced resources in operator namespace %s", gitopsOperatorNS)
-	if err := deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, nil, gitopsOperatorNS, 4*time.Minute, false); err != nil {
-		klog.Warningf("Namespace-based deletion incomplete for %s: %v", gitopsOperatorNS, err)
+	// All resources deployed by the embedded Helm chart are stamped with the
+	// gitopsaddon label at apply time (in templateAndApplyChart). Use label-based
+	// deletion for everything — this only removes resources we created, leaving
+	// Kubernetes system-managed resources (kube-root-ca.crt, default SA, etc.) untouched.
+	klog.Infof("Deleting gitopsaddon-labeled namespaced resources in operator namespace %s", gitopsOperatorNS)
+	if err := deleteResourcesWithRetry(ctx, c, namespacedResourceTypes, nil, gitopsOperatorNS, 4*time.Minute, true); err != nil {
+		klog.Warningf("Label-based deletion incomplete for %s: %v", gitopsOperatorNS, err)
 		errs = append(errs, err)
 	}
 
-	// For cluster-scoped resources: use label-based deletion only (safe — never deletes
-	// system RBAC that lacks the gitopsaddon label).
-	klog.Info("Deleting labeled cluster-scoped resources (ClusterRole/ClusterRoleBinding)")
+	klog.Info("Deleting gitopsaddon-labeled cluster-scoped resources (ClusterRole/ClusterRoleBinding)")
 	if err := deleteResourcesWithRetry(ctx, c, nil, clusterResourceTypes, "", 2*time.Minute, true); err != nil {
 		klog.Warningf("Label-based deletion incomplete for cluster-scoped resources: %v", err)
 		errs = append(errs, err)
@@ -796,7 +854,7 @@ func deleteResourcesByType(ctx context.Context, c client.Client, resourceTypes [
 
 		listOpts := []client.ListOption{}
 		if requireLabel {
-			listOpts = append(listOpts, client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+			listOpts = append(listOpts, client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 		}
 		if namespace != "" {
 			listOpts = append(listOpts, client.InNamespace(namespace))
@@ -856,7 +914,7 @@ func collectRemainingResources(ctx context.Context, c client.Client, namespacedT
 
 		listOpts := []client.ListOption{client.InNamespace(namespace)}
 		if requireLabel {
-			listOpts = append(listOpts, client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+			listOpts = append(listOpts, client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 		}
 
 		err := c.List(ctx, list, listOpts...)
@@ -875,7 +933,7 @@ func collectRemainingResources(ctx context.Context, c client.Client, namespacedT
 
 		listOpts := []client.ListOption{}
 		if requireLabel {
-			listOpts = append(listOpts, client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+			listOpts = append(listOpts, client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 		}
 
 		err := c.List(ctx, list, listOpts...)
@@ -1037,6 +1095,36 @@ func ClearStalePauseMarker(ctx context.Context, c client.Client, readers ...clie
 	}
 }
 
+// scaleDownAddonAgent scales the addon agent Deployment to 0 replicas so the
+// agent's reconciler cannot recreate operator resources during cleanup. The
+// regular ManifestWork deletion also removes the Deployment, but there's a race
+// window where the agent pod is still running. Scaling to 0 triggers immediate
+// pod termination without waiting for the ManifestWork controller.
+func scaleDownAddonAgent(ctx context.Context, c client.Client) {
+	deploy := &appsv1.Deployment{}
+	key := types.NamespacedName{Name: AddonDeploymentName, Namespace: AddonNamespace}
+
+	if err := c.Get(ctx, key, deploy); err != nil {
+		if !apierrors.IsNotFound(err) {
+			klog.Warningf("Failed to get addon agent Deployment: %v", err)
+		}
+		return
+	}
+
+	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas == 0 {
+		klog.Info("Addon agent Deployment already scaled to 0")
+		return
+	}
+
+	zero := int32(0)
+	deploy.Spec.Replicas = &zero
+	if err := c.Update(ctx, deploy); err != nil {
+		klog.Warningf("Failed to scale down addon agent Deployment: %v", err)
+	} else {
+		klog.Info("Addon agent Deployment scaled to 0 — agent pod terminating")
+	}
+}
+
 // IsPaused checks if the gitops-addon controller should be paused
 // This is exported so the controller can use it
 // The pause marker is checked in the addon namespace
@@ -1116,7 +1204,7 @@ func verifyNamespaceCleanup(ctx context.Context, c client.Client, namespace stri
 
 	err := c.List(ctx, deployments,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"apps.open-cluster-management.io/gitopsaddon": "true"})
+		client.MatchingLabels{GitOpsAddonLabelKey: GitOpsAddonLabelValue})
 
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, err

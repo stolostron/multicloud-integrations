@@ -219,6 +219,13 @@ func (r *GitopsAddonReconciler) installViaEmbeddedManifests() error {
 	}
 	klog.Info("Successfully templated and applied openshift-gitops-operator")
 
+	if err := r.patchServiceAccountsWithImagePullSecrets(GitOpsOperatorNamespace); err != nil {
+		klog.Warningf("Failed to patch operator ServiceAccounts with imagePullSecrets: %v", err)
+	}
+	if err := r.deletePodsWithImagePullIssuesInNamespace(GitOpsOperatorNamespace); err != nil {
+		klog.Warningf("Failed to delete pods with image pull issues in namespace %s: %v", GitOpsOperatorNamespace, err)
+	}
+
 	klog.Info("Waiting for ArgoCD operator deployment to be ready...")
 	if err := r.waitForOperatorReady(2 * time.Minute); err != nil {
 		klog.Errorf("Failed to wait for ArgoCD operator: %v", err)
@@ -381,7 +388,7 @@ func (r *GitopsAddonReconciler) recoverFromFailedWebhookInstallPlan(ctx context.
 	}
 
 	labels := existing.GetLabels()
-	if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+	if labels == nil || labels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue {
 		return nil // pre-existing subscription not managed by us — leave it alone
 	}
 
@@ -461,7 +468,7 @@ func (r *GitopsAddonReconciler) recoverFromGhostCompleteInstallPlan(ctx context.
 	}
 
 	labels := existing.GetLabels()
-	if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+	if labels == nil || labels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue {
 		return nil // pre-existing subscription not managed by us — leave it alone
 	}
 
@@ -557,7 +564,7 @@ func (r *GitopsAddonReconciler) olmSubscriptionNeedsUpdate(ctx context.Context) 
 	}
 
 	labels := existing.GetLabels()
-	if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+	if labels == nil || labels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue {
 		// Pre-existing subscription not managed by gitopsaddon — leave it alone.
 		klog.Infof("OLM subscription %s not managed by gitopsaddon, skipping", subName)
 		return false
@@ -599,7 +606,7 @@ func (r *GitopsAddonReconciler) createOrUpdateOLMSubscription(ctx context.Contex
 				"name":      subName,
 				"namespace": subNamespace,
 				"labels": map[string]interface{}{
-					"apps.open-cluster-management.io/gitopsaddon": "true",
+					GitOpsAddonLabelKey: GitOpsAddonLabelValue,
 				},
 			},
 			"spec": map[string]interface{}{
@@ -649,7 +656,7 @@ func (r *GitopsAddonReconciler) createOrUpdateOLMSubscription(ctx context.Contex
 	}
 
 	labels := existing.GetLabels()
-	if labels != nil && labels["apps.open-cluster-management.io/gitopsaddon"] == "true" {
+	if labels != nil && labels[GitOpsAddonLabelKey] == GitOpsAddonLabelValue {
 		// Check for InstallPlanMissing condition — if present, delete and recreate
 		// to force OLM to generate a new install plan
 		conditions, _, _ := unstructured.NestedSlice(existing.Object, "status", "conditions")
@@ -725,7 +732,7 @@ func (r *GitopsAddonReconciler) createOrUpdateOperatorGroup(ctx context.Context,
 				"name":      "gitops-addon-operator-group",
 				"namespace": namespace,
 				"labels": map[string]interface{}{
-					"apps.open-cluster-management.io/gitopsaddon": "true",
+					GitOpsAddonLabelKey: GitOpsAddonLabelValue,
 				},
 			},
 			"spec": map[string]interface{}{
@@ -762,7 +769,7 @@ func (r *GitopsAddonReconciler) migrateSubscriptionFromNamespace(ctx context.Con
 	if err == nil {
 		// Subscription still exists in the old namespace — delete it and its CSV.
 		labels := existing.GetLabels()
-		if labels == nil || labels["apps.open-cluster-management.io/gitopsaddon"] != "true" {
+		if labels == nil || labels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue {
 			// Pre-existing subscription not owned by us — leave it alone.
 			klog.Infof("Subscription %s in %s not owned by gitopsaddon, skipping migration", subName, fromNamespace)
 			return nil
@@ -885,8 +892,8 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 				ObjectMeta: metav1.ObjectMeta{
 					Name: nameSpaceKey.Name,
 					Labels: map[string]string{
-						"addon.open-cluster-management.io/namespace":  "true", //enable copying the image pull secret to the NS
-						"apps.open-cluster-management.io/gitopsaddon": "true",
+						"addon.open-cluster-management.io/namespace": "true",
+						GitOpsAddonLabelKey:                          GitOpsAddonLabelValue,
 					},
 				},
 			}
@@ -914,14 +921,14 @@ func (r *GitopsAddonReconciler) CreateUpdateNamespace(nameSpaceKey types.Namespa
 	// on every reconcile (which triggers unnecessary watch events).
 	needsLabelUpdate := namespace.Labels == nil ||
 		namespace.Labels["addon.open-cluster-management.io/namespace"] != "true" ||
-		namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] != "true"
+		namespace.Labels[GitOpsAddonLabelKey] != GitOpsAddonLabelValue
 
 	if needsLabelUpdate {
 		if namespace.Labels == nil {
 			namespace.Labels = make(map[string]string)
 		}
 		namespace.Labels["addon.open-cluster-management.io/namespace"] = "true"
-		namespace.Labels["apps.open-cluster-management.io/gitopsaddon"] = "true"
+		namespace.Labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
 
 		if err := r.Update(context.TODO(), namespace); err != nil {
 			klog.Errorf("Failed to update the labels to the %s namespace, err: %v", nameSpaceKey.Name, err)
@@ -1074,31 +1081,22 @@ func (r *GitopsAddonReconciler) WaitForImagePullSecret(nameSpaceKey types.Namesp
 	return fmt.Errorf("timeout waiting for secret %s in namespace %s", secretName, nameSpaceKey.Name)
 }
 
-// patchArgoCDServiceAccountsWithImagePullSecrets patches ArgoCD ServiceAccounts with imagePullSecrets
-// This is needed for non-OCP clusters (like Kind, EKS) where node-level pull secrets don't exist.
-// The ArgoCD operator creates ServiceAccounts without imagePullSecrets, so pods can't authenticate
-// to registry.redhat.io. This function adds the pull secret reference to allow image pulls.
-//
-// Note: The ArgoCD CRD does NOT have an imagePullSecrets field, so SA patching is the only option.
-// We dynamically list all SAs in the namespace to catch all ArgoCD-managed SAs including:
-// - application-controller, server, repo-server, redis, redis-ha, redis-ha-haproxy
-// - dex-server (if SSO enabled), applicationset-controller, notifications-controller
-func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets() error {
+// patchServiceAccountsWithImagePullSecrets patches all ServiceAccounts in the given namespace
+// with imagePullSecrets. This is needed for non-OCP clusters (like Kind, EKS) where node-level
+// pull secrets don't exist. Without this, pods can't authenticate to registry.redhat.io.
+func (r *GitopsAddonReconciler) patchServiceAccountsWithImagePullSecrets(targetNS string) error {
 	secretName := "open-cluster-management-image-pull-credentials"
-	targetNS := getArgoCDNamespace()
 
-	// First check if the secret exists in the namespace
 	secret := &corev1.Secret{}
 	err := r.Get(context.TODO(), types.NamespacedName{Name: secretName, Namespace: targetNS}, secret)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			klog.V(2).Infof("Image pull secret %s not found in namespace %s, skipping SA patching", secretName, targetNS)
-			return nil // Not an error - secret might not exist in OCP environments where node-level secrets work
+			return nil
 		}
 		return fmt.Errorf("failed to check for image pull secret: %v", err)
 	}
 
-	// List all ServiceAccounts in the namespace
 	saList := &corev1.ServiceAccountList{}
 	if err := r.List(context.TODO(), saList, &client.ListOptions{Namespace: targetNS}); err != nil {
 		return fmt.Errorf("failed to list ServiceAccounts: %v", err)
@@ -1110,7 +1108,6 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 	for i := range saList.Items {
 		sa := &saList.Items[i]
 
-		// Check if the secret is already in imagePullSecrets
 		found := false
 		for _, ref := range sa.ImagePullSecrets {
 			if ref.Name == secretName {
@@ -1120,7 +1117,6 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 		}
 
 		if !found {
-			// Add the secret reference
 			sa.ImagePullSecrets = append(sa.ImagePullSecrets, secretRef)
 			if err := r.Update(context.TODO(), sa); err != nil {
 				klog.Warningf("Failed to patch ServiceAccount %s/%s: %v", targetNS, sa.Name, err)
@@ -1132,16 +1128,30 @@ func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets()
 	}
 
 	if patchedCount > 0 {
-		klog.Infof("Patched %d ServiceAccounts with imagePullSecrets", patchedCount)
+		klog.Infof("Patched %d ServiceAccounts with imagePullSecrets in %s", patchedCount, targetNS)
 	}
 
 	return nil
 }
 
+// patchArgoCDServiceAccountsWithImagePullSecrets patches SAs in both the ArgoCD namespace and
+// the operator namespace. On non-OCP clusters neither namespace has node-level pull secrets,
+// so all SAs need the explicit imagePullSecrets reference.
+func (r *GitopsAddonReconciler) patchArgoCDServiceAccountsWithImagePullSecrets() error {
+	if err := r.patchServiceAccountsWithImagePullSecrets(getArgoCDNamespace()); err != nil {
+		return err
+	}
+	return r.patchServiceAccountsWithImagePullSecrets(GitOpsOperatorNamespace)
+}
+
 // deletePodsWithImagePullIssues deletes pods in the ArgoCD namespace that have ImagePullBackOff or ErrImagePull status.
-// This forces Kubernetes to recreate them, and the new pods will use the patched ServiceAccounts with imagePullSecrets.
 func (r *GitopsAddonReconciler) deletePodsWithImagePullIssues() error {
-	targetNS := getArgoCDNamespace()
+	return r.deletePodsWithImagePullIssuesInNamespace(getArgoCDNamespace())
+}
+
+// deletePodsWithImagePullIssuesInNamespace deletes pods with ImagePullBackOff or ErrImagePull status
+// in the given namespace, forcing Kubernetes to recreate them with the patched ServiceAccounts.
+func (r *GitopsAddonReconciler) deletePodsWithImagePullIssuesInNamespace(targetNS string) error {
 	podList := &corev1.PodList{}
 	if err := r.List(context.TODO(), podList, &client.ListOptions{Namespace: targetNS}); err != nil {
 		return fmt.Errorf("failed to list pods: %v", err)
