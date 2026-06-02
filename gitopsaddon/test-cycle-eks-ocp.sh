@@ -353,6 +353,25 @@ verify_managed() {
         argocd=$(on_cluster "$cluster" get argocd -n openshift-gitops -o name 2>/dev/null || echo "")
         if [ -n "$argocd" ]; then
             pass "$cluster ArgoCD CR exists"
+            local phase="" argocd_ok=false
+            for attempt in $(seq 1 12); do
+                phase=$(on_cluster "$cluster" get argocd -n openshift-gitops -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+                if [ "$phase" = "Available" ] || [ "$phase" = "Running" ]; then
+                    argocd_ok=true
+                    break
+                fi
+                log "  $cluster ArgoCD CR phase=$phase, waiting... (attempt $attempt/12)"
+                sleep 10
+            done
+            if [ "$argocd_ok" = true ]; then
+                pass "$cluster ArgoCD CR phase=$phase"
+            else
+                local condition_msg
+                condition_msg=$(on_cluster "$cluster" get argocd -n openshift-gitops -o jsonpath='{.items[0].status.conditions[?(@.type=="Reconciled")].message}' 2>/dev/null || echo "")
+                local full_status
+                full_status=$(on_cluster "$cluster" get argocd -n openshift-gitops -o jsonpath='{.items[0].status}' 2>/dev/null || echo "")
+                fail "$cluster ArgoCD CR phase=$phase (expected Available/Running). Condition: $condition_msg. Full status: $full_status"
+            fi
         else
             log "WARNING: $cluster no ArgoCD CR (may need Policy enforcement or OLM)"
         fi
@@ -446,6 +465,49 @@ verify_agent_e2e() {
             -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,READY:.status.conditions 2>/dev/null | head -3)
         log "  $cluster agent pods: $agent_status"
     done
+}
+
+# --- Verify pod stability (no restarts) across all key namespaces ---
+verify_pods_stable() {
+    local settle_secs=${POD_STABLE_SETTLE_SECS:-30}
+    log "Waiting ${settle_secs}s for pods to settle before checking restart counts..."
+    sleep "$settle_secs"
+
+    local all_stable=true
+    local namespaces=("openshift-gitops" "openshift-gitops-operator" "open-cluster-management-agent-addon")
+
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        for ns in "${namespaces[@]}"; do
+            local pods_output
+            pods_output=$(on_cluster "$cluster" get pods -n "$ns" --no-headers \
+                -o custom-columns='NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,PHASE:.status.phase' 2>/dev/null || echo "")
+            if [ -z "$pods_output" ]; then
+                continue
+            fi
+
+            while IFS= read -r line; do
+                local pod_name restarts phase
+                pod_name=$(echo "$line" | awk '{print $1}')
+                restarts=$(echo "$line" | awk '{print $2}')
+                phase=$(echo "$line" | awk '{print $3}')
+
+                [ "$phase" != "Running" ] && continue
+                [ "$restarts" = "<none>" ] && restarts=0
+
+                if [ "$restarts" -gt 0 ] 2>/dev/null; then
+                    log "FAIL: $cluster pod $pod_name in $ns has $restarts restarts"
+                    on_cluster "$cluster" logs -n "$ns" "$pod_name" --previous --tail=10 2>/dev/null || true
+                    all_stable=false
+                fi
+            done <<< "$pods_output"
+        done
+    done
+
+    if [ "$all_stable" = "true" ]; then
+        pass "All pods stable (zero restarts) across all managed clusters"
+    else
+        fail "Some pods have restarts — indicates crash loops (see logs above)"
+    fi
 }
 
 # --- Verify gitopsaddon label on deployed resources (non-OCP clusters only) ---
@@ -791,6 +853,7 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
     deploy
     wait_for_deploy
     verify_managed
+    verify_pods_stable
     verify_agent_e2e
     verify_gitopsaddon_labels
 

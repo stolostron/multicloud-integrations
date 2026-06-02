@@ -464,6 +464,86 @@ func TestNewManifestWithoutStatus(t *testing.T) {
 	}
 }
 
+func TestGitopsAddonClusterRoleRulesRBACVerbs(t *testing.T) {
+	rules := gitopsAddonClusterRoleRules()
+
+	findRule := func(resource string) []string {
+		for _, r := range rules {
+			for _, res := range r.Resources {
+				if res == resource {
+					return r.Verbs
+				}
+			}
+		}
+		return nil
+	}
+
+	findRuleForGroup := func(apiGroup, resource string) []string {
+		for _, r := range rules {
+			for _, g := range r.APIGroups {
+				if g != apiGroup {
+					continue
+				}
+				for _, res := range r.Resources {
+					if res == resource {
+						return r.Verbs
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	containsAll := func(verbs []string, required ...string) bool {
+		set := map[string]bool{}
+		for _, v := range verbs {
+			set[v] = true
+		}
+		for _, r := range required {
+			if !set[r] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// roles must have escalate and bind
+	rolesVerbs := findRuleForGroup("rbac.authorization.k8s.io", "roles")
+	if rolesVerbs == nil {
+		t.Fatal("No rule found for rbac.authorization.k8s.io/roles")
+	}
+	if !containsAll(rolesVerbs, "escalate", "bind") {
+		t.Errorf("roles verbs missing escalate/bind, got: %v", rolesVerbs)
+	}
+
+	// rolebindings must have escalate and bind
+	rbVerbs := findRuleForGroup("rbac.authorization.k8s.io", "rolebindings")
+	if rbVerbs == nil {
+		t.Fatal("No rule found for rbac.authorization.k8s.io/rolebindings")
+	}
+	if !containsAll(rbVerbs, "escalate", "bind") {
+		t.Errorf("rolebindings verbs missing escalate/bind, got: %v", rbVerbs)
+	}
+
+	// configmaps must have patch
+	cmVerbs := findRule("configmaps")
+	if cmVerbs == nil {
+		t.Fatal("No rule found for configmaps")
+	}
+	if !containsAll(cmVerbs, "patch") {
+		t.Errorf("configmaps verbs missing patch, got: %v", cmVerbs)
+	}
+
+	// leases must have patch and delete
+	leaseVerbs := findRuleForGroup("coordination.k8s.io", "leases")
+	if leaseVerbs == nil {
+		t.Fatal("No rule found for coordination.k8s.io/leases")
+	}
+	if !containsAll(leaseVerbs, "patch", "delete") {
+		t.Errorf("leases verbs missing patch/delete, got: %v", leaseVerbs)
+	}
+}
+
 func TestDefaultOperatorImages(t *testing.T) {
 	// Verify the default images are set (defined in pkg/utils/config.go)
 	if utils.DefaultOperatorImages[utils.EnvArgoCDPrincipalImage] == "" {
