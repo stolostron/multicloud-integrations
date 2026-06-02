@@ -208,6 +208,19 @@ func (r *GitopsAddonReconciler) installViaEmbeddedManifests() error {
 		return err
 	}
 
+	monitoringCRDs := []struct {
+		resource, apiVersion, path string
+	}{
+		{"servicemonitors", "monitoring.coreos.com/v1", "monitoring-crds/servicemonitors.monitoring.coreos.com.crd.yaml"},
+		{"prometheuses", "monitoring.coreos.com/v1", "monitoring-crds/prometheuses.monitoring.coreos.com.crd.yaml"},
+		{"prometheusrules", "monitoring.coreos.com/v1", "monitoring-crds/prometheusrules.monitoring.coreos.com.crd.yaml"},
+	}
+	for _, crd := range monitoringCRDs {
+		if err := r.applyCRDIfNotExists(MonitoringCRDFS, crd.resource, crd.apiVersion, crd.path); err != nil {
+			return err
+		}
+	}
+
 	gitopsOperatorNsKey := types.NamespacedName{Name: GitOpsOperatorNamespace}
 	if err := r.CreateUpdateNamespace(gitopsOperatorNsKey); err != nil {
 		return fmt.Errorf("failed to create/update %s namespace: %w", GitOpsOperatorNamespace, err)

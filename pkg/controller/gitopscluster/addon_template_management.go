@@ -441,8 +441,8 @@ func gitopsAddonClusterRoleRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		// Pod management (delete pods with image pull errors; watch needed by controller-runtime cache)
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "delete"}},
-		// ConfigMap management (operator config, pause marker; watch needed by controller-runtime cache)
-		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		// ConfigMap management (operator config, pause marker, leader election; watch needed by controller-runtime cache)
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		// Service management (operator metrics/webhook services via Helm chart; delete needed for cleanup)
 		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		// Event recording (leader election events)
@@ -452,9 +452,9 @@ func gitopsAddonClusterRoleRules() []rbacv1.PolicyRule {
 		// Deployment finalizers (needed for blockOwnerDeletion in pause marker ownerReference)
 		{APIGroups: []string{"apps"}, Resources: []string{"deployments/finalizers"}, Verbs: []string{"update"}},
 		// RBAC management (operator roles/bindings created by Helm chart, cleanup)
-		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"roles", "rolebindings"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-		// "escalate" and "bind" allow the addon to create ClusterRoles that grant
-		// permissions the addon itself does not hold (needed for the ArgoCD operator's RBAC)
+		// "escalate" and "bind" allow the addon to create Roles/ClusterRoles that grant
+		// permissions the addon itself does not hold (needed for the ArgoCD operator's leader-election Role and RBAC)
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"roles", "rolebindings"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"}},
 		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"clusterroles", "clusterrolebindings"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"}},
 		// CRD management (install ArgoCD CRDs, Route CRD stub, patch conversion webhook; watch needed by controller-runtime cache)
 		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch"}},
@@ -470,8 +470,8 @@ func gitopsAddonClusterRoleRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{"cluster.open-cluster-management.io"}, Resources: []string{"managedclusters"}, Verbs: []string{"list"}},
 		{APIGroups: []string{"cluster.open-cluster-management.io"}, Resources: []string{"clusterclaims"}, Verbs: []string{"get"}},
 		{APIGroups: []string{"operator.open-cluster-management.io"}, Resources: []string{"clustermanagers"}, Verbs: []string{"list"}},
-		// Leader election
-		{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update"}},
+		// Leader election (patch and delete needed for operator's leader-election Role via escalate)
+		{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 	}
 }
 

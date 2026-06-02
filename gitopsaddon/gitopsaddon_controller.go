@@ -39,6 +39,9 @@ var ChartFS embed.FS
 //go:embed routes-openshift-crd/**
 var RouteCRDFS embed.FS
 
+//go:embed monitoring-crds/**
+var MonitoringCRDFS embed.FS
+
 // GitOpsNamespace is exported from pkg/utils for backward compatibility
 const GitOpsNamespace = utils.GitOpsNamespace
 
