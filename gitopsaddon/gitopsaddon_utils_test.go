@@ -40,6 +40,9 @@ var testFS embed.FS
 //go:embed routes-openshift-crd/**
 var testRouteCRDFS embed.FS
 
+//go:embed monitoring-crds/**
+var testMonitoringCRDFS embed.FS
+
 func TestParseImageReference(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -551,6 +554,63 @@ func TestApplyManifestSkipsPreExistingResources(t *testing.T) {
 		g.Expect(existing.Data["original"]).To(gomega.Equal("data"))
 		g.Expect(existing.Data).NotTo(gomega.HaveKey("updated"))
 	})
+}
+
+func TestApplyCRDIfNotExists_MonitoringCRDs(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: getTestEnv().Client,
+		Config: getTestEnv().Config,
+	}
+
+	tests := []struct {
+		name       string
+		resource   string
+		apiVersion string
+		path       string
+	}{
+		{
+			name:       "servicemonitors_crd",
+			resource:   "servicemonitors",
+			apiVersion: "monitoring.coreos.com/v1",
+			path:       "monitoring-crds/servicemonitors.monitoring.coreos.com.crd.yaml",
+		},
+		{
+			name:       "prometheuses_crd",
+			resource:   "prometheuses",
+			apiVersion: "monitoring.coreos.com/v1",
+			path:       "monitoring-crds/prometheuses.monitoring.coreos.com.crd.yaml",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clean up any pre-existing CRD
+			crdName := tt.resource + ".monitoring.coreos.com"
+			existing := &apiextensionsv1.CustomResourceDefinition{}
+			if err := reconciler.Get(context.TODO(), types.NamespacedName{Name: crdName}, existing); err == nil {
+				_ = reconciler.Delete(context.TODO(), existing)
+			}
+
+			err := reconciler.applyCRDIfNotExists(testMonitoringCRDFS, tt.resource, tt.apiVersion, tt.path)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			// Verify CRD was created
+			created := &apiextensionsv1.CustomResourceDefinition{}
+			err = reconciler.Get(context.TODO(), types.NamespacedName{Name: crdName}, created)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(created.Spec.Group).To(gomega.Equal("monitoring.coreos.com"))
+			g.Expect(created.Spec.Versions[0].Served).To(gomega.BeTrue())
+
+			// Call again — should skip without error (already exists)
+			err = reconciler.applyCRDIfNotExists(testMonitoringCRDFS, tt.resource, tt.apiVersion, tt.path)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			// Cleanup
+			_ = reconciler.Delete(context.TODO(), created)
+		})
+	}
 }
 
 func TestTemplateAndApplyChartLabelsAllResources(t *testing.T) {
