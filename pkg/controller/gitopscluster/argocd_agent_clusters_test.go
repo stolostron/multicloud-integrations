@@ -164,7 +164,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
 				secret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
-				assert.NoError(t, err)
+				require.NoError(t, err, "expected agent cluster secret cluster-cluster1 to exist for label validation")
 
 				// System labels should be present
 				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel])
@@ -216,7 +216,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
 				secret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
-				assert.NoError(t, err)
+				require.NoError(t, err, "expected agent cluster secret cluster-cluster1 to exist for system-label precedence validation")
 
 				// System label must keep its correct value, not overridden by ManagedCluster
 				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel],
