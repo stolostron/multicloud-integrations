@@ -278,6 +278,14 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			},
 		}
 
+		// Sync ManagedCluster labels to the cluster object.
+		// System labels above take precedence over ManagedCluster labels.
+		for key, val := range managedCluster.Labels {
+			if _, ok := cluster.Labels[key]; !ok {
+				cluster.Labels[key] = val
+			}
+		}
+
 		// Create the secret
 		secret := &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
