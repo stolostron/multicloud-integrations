@@ -389,7 +389,7 @@ func TestUnionSecretData(t *testing.T) {
 		validateFunc   func(t *testing.T, result *v1.Secret)
 	}{
 		{
-			name: "merge labels and annotations only, not data",
+			name: "merge annotations only, not data or labels",
 			newSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
