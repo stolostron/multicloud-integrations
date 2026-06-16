@@ -265,6 +265,7 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			Name:   clusterName,
 			Labels: map[string]string{
 				labelKeyClusterAgentMapping: clusterName,
+				argoCDTypeLabel:             argoCDSecretTypeClusterValue,
 			},
 			Config: ClusterConfig{
 				Username: clusterName,
