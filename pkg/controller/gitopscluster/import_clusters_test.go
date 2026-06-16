@@ -389,7 +389,7 @@ func TestUnionSecretData(t *testing.T) {
 		validateFunc   func(t *testing.T, result *v1.Secret)
 	}{
 		{
-			name: "merge labels and annotations only, not data",
+			name: "merge annotations only, not data or labels",
 			newSecret: &v1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -420,9 +420,9 @@ func TestUnionSecretData(t *testing.T) {
 				},
 			},
 			validateFunc: func(t *testing.T, result *v1.Secret) {
-				// Labels should be merged with new values taking precedence
+				// Labels from existing secret should NOT be copied - new secret is the source of truth
 				assert.Equal(t, "new-value", result.Labels["new-label"])
-				assert.Equal(t, "existing-value", result.Labels["existing-label"])
+				assert.NotContains(t, result.Labels, "existing-label")
 				assert.Equal(t, "new-shared-value", result.Labels["shared"])
 
 				// Annotations should be merged, excluding kubectl annotation
@@ -461,14 +461,82 @@ func TestUnionSecretData(t *testing.T) {
 				},
 			},
 			validateFunc: func(t *testing.T, result *v1.Secret) {
-				// Labels should be merged
+				// Labels from existing secret should NOT be copied - new secret is the source of truth
 				assert.Equal(t, "new-value", result.Labels["new-label"])
-				assert.Equal(t, "existing-value", result.Labels["existing-label"])
+				assert.NotContains(t, result.Labels, "existing-label")
 
 				// Data should NOT be merged - blank secret should not get config from existing
 				assert.Equal(t, "test-cluster", result.StringData["name"])
 				assert.Equal(t, "https://test-cluster-control-plane", result.StringData["server"])
 				assert.NotContains(t, result.StringData, "config")
+			},
+		},
+		{
+			name: "deleted ManagedCluster label should not be preserved from existing secret",
+			newSecret: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"argocd.argoproj.io/secret-type":               "cluster",
+						"apps.open-cluster-management.io/acm-cluster":  "true",
+						"environment":                                  "production",
+					},
+				},
+				StringData: map[string]string{
+					"name":   "test-cluster",
+					"server": "https://test-cluster-control-plane",
+				},
+			},
+			existingSecret: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"argocd.argoproj.io/secret-type":               "cluster",
+						"apps.open-cluster-management.io/acm-cluster":  "true",
+						"environment":                                  "production",
+						"region":                                       "us-east-1",
+					},
+				},
+				Data: map[string][]byte{
+					"name":   []byte("test-cluster"),
+					"server": []byte("https://test-cluster-control-plane"),
+				},
+			},
+			validateFunc: func(t *testing.T, result *v1.Secret) {
+				assert.Equal(t, "cluster", result.Labels["argocd.argoproj.io/secret-type"])
+				assert.Equal(t, "true", result.Labels["apps.open-cluster-management.io/acm-cluster"])
+				assert.Equal(t, "production", result.Labels["environment"])
+
+				assert.NotContains(t, result.Labels, "region",
+					"label removed from ManagedCluster must not be preserved from existing secret")
+			},
+		},
+		{
+			name: "agent-mode labels should be stripped from traditional mode secret",
+			newSecret: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"argocd.argoproj.io/secret-type":               "cluster",
+						"apps.open-cluster-management.io/acm-cluster":  "true",
+						"argocd-agent.argoproj-labs.io/agent-name":     "test-cluster",
+					},
+				},
+				StringData: map[string]string{
+					"name":   "test-cluster",
+					"server": "https://test-cluster-control-plane",
+				},
+			},
+			existingSecret: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"argocd.argoproj.io/secret-type": "cluster",
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, result *v1.Secret) {
+				assert.Equal(t, "cluster", result.Labels["argocd.argoproj.io/secret-type"])
+				assert.Equal(t, "true", result.Labels["apps.open-cluster-management.io/acm-cluster"])
+
+				assert.NotContains(t, result.Labels, "argocd-agent.argoproj-labs.io/agent-name",
+					"agent-mode label should be stripped in traditional mode")
 			},
 		},
 	}

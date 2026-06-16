@@ -126,6 +126,108 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
+			name: "ManagedCluster labels are synced to agent cluster secret",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+						Labels: map[string]string{
+							"environment": "production",
+							"region":      "us-east-1",
+						},
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+			},
+			expectedError:        false,
+			expectedSecretsCount: 1,
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
+				require.NoError(t, err, "expected agent cluster secret cluster-cluster1 to exist for label validation")
+
+				// System labels should be present
+				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel])
+				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+
+				// ManagedCluster labels should be synced to the secret
+				assert.Equal(t, "production", secret.Labels["environment"],
+					"ManagedCluster label should be synced to agent cluster secret")
+				assert.Equal(t, "us-east-1", secret.Labels["region"],
+					"ManagedCluster label should be synced to agent cluster secret")
+			},
+		},
+		{
+			name: "ManagedCluster label with same key as system label should not override it",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+							ServerAddress: "test-server.example.com",
+							ServerPort:    "443",
+						},
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster1",
+						Labels: map[string]string{
+							"argocd.argoproj.io/secret-type": "something-wrong",
+							"environment":                    "production",
+						},
+					},
+				},
+			},
+			orphanSecretsList: map[types.NamespacedName]string{},
+			existingObjects: []client.Object{
+				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
+			},
+			expectedError:        false,
+			expectedSecretsCount: 1,
+			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
+				secret := &v1.Secret{}
+				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster1", Namespace: "argocd"}, secret)
+				require.NoError(t, err, "expected agent cluster secret cluster-cluster1 to exist for system-label precedence validation")
+
+				// System label must keep its correct value, not overridden by ManagedCluster
+				assert.Equal(t, "cluster", secret.Labels[argoCDTypeLabel],
+					"system label must not be overridden by ManagedCluster label with same key")
+
+				// User label should still be synced
+				assert.Equal(t, "production", secret.Labels["environment"],
+					"non-colliding ManagedCluster label should still be synced")
+			},
+		},
+		{
 			// When the resource proxy service exists the controller prefers it over the external
 			// NodePort address. Verify that the cluster secret server URL uses the proxy path.
 			name: "override existing traditional cluster secret uses resource proxy when available",
@@ -949,6 +1051,96 @@ func TestClusterToSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "cluster1", config.Username)
 	assert.Equal(t, "test-password", config.Password)
+}
+
+func TestClusterToSecret_ManagedClusterLabels(t *testing.T) {
+	reconciler := &ReconcileGitOpsCluster{}
+
+	cluster := &Cluster{
+		Server: "https://test-server.example.com:443?agentName=cluster1",
+		Name:   "cluster1",
+		Labels: map[string]string{
+			labelKeyClusterAgentMapping: "cluster1",
+			"environment":              "production",
+			"region":                   "us-east-1",
+		},
+		Config: ClusterConfig{
+			Username: "cluster1",
+			Password: "test-password",
+			TLSClientConfig: TLSClientConfig{
+				Insecure: false,
+				CAData:   []byte("test-ca"),
+			},
+		},
+	}
+
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster-cluster1",
+			Namespace: "argocd",
+		},
+	}
+
+	err := reconciler.clusterToSecret(cluster, secret)
+	require.NoError(t, err)
+
+	// System labels should be present
+	assert.Equal(t, argoCDSecretTypeClusterValue, secret.Labels[argoCDTypeLabel])
+	assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+
+	// ManagedCluster labels should be present on the secret
+	assert.Equal(t, "production", secret.Labels["environment"],
+		"ManagedCluster label should flow through to secret")
+	assert.Equal(t, "us-east-1", secret.Labels["region"],
+		"ManagedCluster label should flow through to secret")
+}
+
+func TestClusterToSecret_LabelPruningOnUpdate(t *testing.T) {
+	reconciler := &ReconcileGitOpsCluster{}
+
+	// Simulate re-reconciliation where "region" label was removed from ManagedCluster
+	cluster := &Cluster{
+		Server: "https://test-server.example.com:443?agentName=cluster1",
+		Name:   "cluster1",
+		Labels: map[string]string{
+			labelKeyClusterAgentMapping: "cluster1",
+			"environment":              "production",
+		},
+		Config: ClusterConfig{
+			Username: "cluster1",
+			Password: "test-password",
+			TLSClientConfig: TLSClientConfig{
+				Insecure: false,
+				CAData:   []byte("test-ca"),
+			},
+		},
+	}
+
+	// Existing secret still has the old "region" label
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster-cluster1",
+			Namespace: "argocd",
+			Labels: map[string]string{
+				argoCDTypeLabel:             argoCDSecretTypeClusterValue,
+				labelKeyClusterAgentMapping: "cluster1",
+				"environment":              "production",
+				"region":                   "us-east-1",
+			},
+		},
+	}
+
+	err := reconciler.clusterToSecret(cluster, secret)
+	require.NoError(t, err)
+
+	// Current labels should be present
+	assert.Equal(t, argoCDSecretTypeClusterValue, secret.Labels[argoCDTypeLabel])
+	assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
+	assert.Equal(t, "production", secret.Labels["environment"])
+
+	// Deleted label should be pruned because clusterToSecret does a fresh replace
+	assert.NotContains(t, secret.Labels, "region",
+		"label removed from ManagedCluster should be pruned from secret on update")
 }
 
 func TestTLSClientConfig_Structure(t *testing.T) {

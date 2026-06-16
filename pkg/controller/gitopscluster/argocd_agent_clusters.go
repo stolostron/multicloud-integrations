@@ -265,6 +265,7 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			Name:   clusterName,
 			Labels: map[string]string{
 				labelKeyClusterAgentMapping: clusterName,
+				argoCDTypeLabel:             argoCDSecretTypeClusterValue,
 			},
 			Config: ClusterConfig{
 				Username: clusterName,
@@ -276,6 +277,14 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 					KeyData:  []byte(clientKey),
 				},
 			},
+		}
+
+		// Sync ManagedCluster labels to the cluster object.
+		// System labels above take precedence over ManagedCluster labels.
+		for key, val := range managedCluster.Labels {
+			if _, ok := cluster.Labels[key]; !ok {
+				cluster.Labels[key] = val
+			}
 		}
 
 		// Create the secret

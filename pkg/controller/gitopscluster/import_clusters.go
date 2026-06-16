@@ -1003,26 +1003,15 @@ func unionSecretData(newSecret, existingSecret *v1.Secret) *v1.Secret {
 		"managed-by": true, // Used by argocd-agent
 	}
 
-	// union of labels (excluding agent-mode specific labels)
+	// The new secret already contains all system labels and current ManagedCluster labels.
+	// Remove agent-mode labels that should not be present in traditional mode.
 	newLabels := newSecret.GetLabels()
-	existingLabels := existingSecret.GetLabels()
-
 	if newLabels == nil {
 		newLabels = make(map[string]string)
 	}
 
-	if existingLabels == nil {
-		existingLabels = make(map[string]string)
-	}
-
-	for key, val := range existingLabels {
-		// Skip agent-mode specific labels when merging
-		if agentModeLabels[key] {
-			continue
-		}
-		if _, ok := newLabels[key]; !ok {
-			newLabels[key] = val
-		}
+	for key := range agentModeLabels {
+		delete(newLabels, key)
 	}
 
 	newSecret.SetLabels(newLabels)
