@@ -27,11 +27,9 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/engine"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/discovery"
 	"k8s.io/klog"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	k8syaml "sigs.k8s.io/yaml"
@@ -306,73 +304,6 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	return r.Update(context.TODO(), obj)
 }
 
-// applyCRDIfNotExists applies a CRD only if it doesn't already exist
-// This function checks both native APIs (like OpenShift's Route API) and CRD-based APIs
-// to avoid creating duplicate API endpoints that cause OpenAPI spec conflicts.
-func (r *GitopsAddonReconciler) applyCRDIfNotExists(fs embed.FS, resource, apiVersion, yamlFilePath string) error {
-	// Check if API resource exists (either as native API or CRD)
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(r.Config)
-	if err != nil {
-		return fmt.Errorf("failed to create discovery client: %v", err)
-	}
-
-	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(apiVersion)
-	if err == nil {
-		// Check if the resource exists in the API resource list
-		for _, apiResource := range apiResourceList.APIResources {
-			if apiResource.Name == resource {
-				klog.Infof("API resource %s/%s already exists (native or CRD), skipping CRD installation: %s", apiVersion, resource, yamlFilePath)
-				return nil
-			}
-		}
-	}
-
-	// Also check if the CRD itself exists to avoid conflicts
-	crdName := resource + "." + strings.Split(apiVersion, "/")[0]
-	existingCRD := &apiextensionsv1.CustomResourceDefinition{}
-	err = r.Get(context.TODO(), types.NamespacedName{Name: crdName}, existingCRD)
-	if err == nil {
-		klog.Infof("CRD %s already exists, skipping installation", crdName)
-		return nil
-	}
-
-	// CRD doesn't exist, install it
-	klog.Infof("Installing CRD %s (API %s/%s not found)", yamlFilePath, apiVersion, resource)
-
-	crdData, err := fs.ReadFile(yamlFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to read CRD file %s: %v", yamlFilePath, err)
-	}
-
-	var crd apiextensionsv1.CustomResourceDefinition
-	if err := k8syaml.Unmarshal(crdData, &crd); err != nil {
-		return fmt.Errorf("failed to unmarshal CRD %s: %v", yamlFilePath, err)
-	}
-
-	// Check if CRD should be skipped due to annotation
-	annotations := crd.GetAnnotations()
-	if annotations != nil && annotations["gitops-addon.open-cluster-management.io/skip"] == "true" {
-		klog.Infof("Skipping CRD %s due to skip annotation", yamlFilePath)
-		return nil
-	}
-
-	// Add management label to indicate this CRD is managed by gitops-addon
-	labels := crd.GetLabels()
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-	labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
-	crd.SetLabels(labels)
-
-	err = r.Create(context.TODO(), &crd)
-	if err != nil && !errors.IsAlreadyExists(err) {
-		klog.Errorf("failed to create CRD %s, err: %v", yamlFilePath, err)
-		return err
-	}
-
-	klog.Infof("Successfully installed CRD %s", yamlFilePath)
-	return nil
-}
 
 // ParseImageReference parses an image reference into repository and tag
 func ParseImageReference(imageRef string) (string, string, error) {

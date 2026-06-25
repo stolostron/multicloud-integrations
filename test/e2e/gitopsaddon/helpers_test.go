@@ -451,7 +451,31 @@ func verifyEmbeddedOperator(timeout time.Duration) {
 		g.Expect(replicas).To(BeNumerically(">", 0), "expected at least 1 available replica")
 	}, timeout, 5*time.Second).Should(Succeed())
 
+	patchOperatorClusterRoleForUpstream(spokeContext)
 	ensureOperatorInspectedCluster()
+}
+
+// patchOperatorClusterRoleForUpstream adds argocdexports RBAC to the operator ClusterRole.
+// The embedded chart's ClusterRole is extracted from the Red Hat CSV which removed argocdexports.
+// The upstream argocd-operator (used in e2e) still watches ArgoCDExport resources and needs
+// this permission. Without it, the operator's informer cache fails to sync and it never
+// reconciles ArgoCD CRs. This is e2e-only — the Red Hat operator does not need this.
+func patchOperatorClusterRoleForUpstream(ctx string) {
+	By("patching operator ClusterRole with argocdexports for upstream argocd-operator")
+	_, _ = kubectlCtx(ctx, "patch", "clusterrole", "openshift-gitops-operator-manager-role",
+		"--type=json",
+		`-p=[{"op":"add","path":"/rules/-","value":{"apiGroups":["argoproj.io"],"resources":["argocdexports","argocdexports/finalizers"],"verbs":["create","delete","get","list","patch","update","watch"]}}]`)
+	By("restarting operator pod to pick up patched ClusterRole")
+	kubectlCtx(ctx, "delete", "pod", "-n", operatorNamespace,
+		"-l", "control-plane=gitops-operator", "--grace-period=0", "--force")
+	Eventually(func(g Gomega) {
+		out, err := kubectlCtx(ctx, "get", "deployment",
+			"openshift-gitops-operator-controller-manager",
+			"-n", operatorNamespace,
+			"-o", "jsonpath={.status.availableReplicas}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(out).To(Equal("1"))
+	}, 2*time.Minute, 5*time.Second).Should(Succeed())
 }
 
 // ensureOperatorInspectedCluster restarts the spoke operator pod if InspectCluster
@@ -604,6 +628,17 @@ func verifyClusterSecret(timeout time.Duration) {
 		// the in-cluster resource-proxy URL over the external NodePort fallback.
 		g.Expect(serverURL).To(ContainSubstring("resource-proxy"),
 			"server URL should use the resource proxy service (not NodePort fallback)")
+	}, timeout, 5*time.Second).Should(Succeed())
+
+	By("verifying cluster secret has skip-reconcile annotation")
+	Eventually(func(g Gomega) {
+		out, err := kubectlCtx(hubContext, "get", "secret",
+			fmt.Sprintf("cluster-%s", spokeName),
+			"-n", argoCDNamespace,
+			"-o", "jsonpath={.metadata.annotations.argocd\\.argoproj\\.io/skip-reconcile}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(out).To(Equal("true"),
+			"agent cluster secret must have argocd.argoproj.io/skip-reconcile=true for hybrid mode")
 	}, timeout, 5*time.Second).Should(Succeed())
 }
 

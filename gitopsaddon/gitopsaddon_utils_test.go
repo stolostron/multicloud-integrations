@@ -24,7 +24,6 @@ import (
 
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,11 +36,7 @@ import (
 //go:embed charts/openshift-gitops-operator/**
 var testFS embed.FS
 
-//go:embed routes-openshift-crd/**
-var testRouteCRDFS embed.FS
 
-//go:embed monitoring-crds/**
-var testMonitoringCRDFS embed.FS
 
 func TestParseImageReference(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -150,84 +145,6 @@ func TestParseImageComponents(t *testing.T) {
 	}
 }
 
-func TestApplyCRDIfNotExists(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name        string
-		resource    string
-		apiVersion  string
-		yamlPath    string
-		setupCRD    bool
-		expectError bool
-	}{
-		{
-			name:        "crd_does_not_exist",
-			resource:    "appprojects",
-			apiVersion:  "argoproj.io/v1alpha1",
-			yamlPath:    "charts/openshift-gitops-operator/templates/crds/appprojects.argoproj.io.crd.yaml",
-			setupCRD:    false,
-			expectError: false, // Should succeed with real CRD
-		},
-		{
-			name:        "crd_already_exists",
-			resource:    "applications",
-			apiVersion:  "argoproj.io/v1alpha1",
-			yamlPath:    "charts/openshift-gitops-operator/templates/crds/applications.argoproj.io.crd.yaml",
-			setupCRD:    true,
-			expectError: false, // Should handle existing CRD gracefully
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-				Config: getTestEnv().Config,
-			}
-
-			// Setup existing CRD if needed
-			if tt.setupCRD {
-				crd := &apiextensionsv1.CustomResourceDefinition{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "applications.argoproj.io",
-					},
-					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-						Group: "argoproj.io",
-						Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-							Name:    "v1alpha1",
-							Served:  true,
-							Storage: true,
-							Schema: &apiextensionsv1.CustomResourceValidation{
-								OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
-									Type: "object",
-								},
-							},
-						}},
-						Scope: apiextensionsv1.NamespaceScoped,
-						Names: apiextensionsv1.CustomResourceDefinitionNames{
-							Plural: "applications",
-							Kind:   "Application",
-						},
-					},
-				}
-				err := reconciler.Create(context.TODO(), crd)
-				if err != nil && !errors.IsAlreadyExists(err) {
-					g.Expect(err).ToNot(gomega.HaveOccurred())
-				}
-			}
-
-			err := reconciler.applyCRDIfNotExists(testFS, tt.resource, tt.apiVersion, tt.yamlPath)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-		})
-	}
-}
-
 func TestCopyEmbeddedToTemp(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -296,100 +213,6 @@ func TestTemplateAndApplyChart(t *testing.T) {
 				g.Expect(err).To(gomega.HaveOccurred())
 			} else {
 				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-		})
-	}
-}
-
-func TestApplyCRDIfNotExists_DirectCRDCheck(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	tests := []struct {
-		name        string
-		crdName     string
-		resource    string
-		apiVersion  string
-		setupCRD    bool
-		expectError bool
-	}{
-		{
-			name:        "skip_when_crd_exists_directly",
-			crdName:     "testresources.test.example.com",
-			resource:    "testresources",
-			apiVersion:  "test.example.com/v1",
-			setupCRD:    true,
-			expectError: false, // Should skip installation without error
-		},
-		{
-			name:        "install_when_crd_not_exists",
-			crdName:     "nonexistent.test.example.com",
-			resource:    "nonexistent",
-			apiVersion:  "test.example.com/v1",
-			setupCRD:    false,
-			expectError: true, // Error because yaml file doesn't exist
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := &GitopsAddonReconciler{
-				Client: getTestEnv().Client,
-				Config: getTestEnv().Config,
-			}
-
-			// Cleanup before test
-			existingCRD := &apiextensionsv1.CustomResourceDefinition{}
-			err := reconciler.Get(context.TODO(), types.NamespacedName{Name: tt.crdName}, existingCRD)
-			if err == nil {
-				_ = reconciler.Delete(context.TODO(), existingCRD)
-			}
-
-			// Setup CRD if specified
-			if tt.setupCRD {
-				crd := &apiextensionsv1.CustomResourceDefinition{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: tt.crdName,
-					},
-					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-						Group: "test.example.com",
-						Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-							Name:    "v1",
-							Served:  true,
-							Storage: true,
-							Schema: &apiextensionsv1.CustomResourceValidation{
-								OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
-									Type: "object",
-								},
-							},
-						}},
-						Scope: apiextensionsv1.NamespaceScoped,
-						Names: apiextensionsv1.CustomResourceDefinitionNames{
-							Plural: tt.resource,
-							Kind:   "TestResource",
-						},
-					},
-				}
-				err := reconciler.Create(context.TODO(), crd)
-				if err != nil && !errors.IsAlreadyExists(err) {
-					g.Expect(err).ToNot(gomega.HaveOccurred())
-				}
-			}
-
-			// Run the function with a non-existent yaml path
-			// When CRD exists, it should skip without needing to read the yaml
-			err = reconciler.applyCRDIfNotExists(testFS, tt.resource, tt.apiVersion, "charts/nonexistent.yaml")
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
-			}
-
-			// Cleanup
-			if tt.setupCRD {
-				_ = reconciler.Delete(context.TODO(), &apiextensionsv1.CustomResourceDefinition{
-					ObjectMeta: metav1.ObjectMeta{Name: tt.crdName},
-				})
 			}
 		})
 	}
@@ -554,63 +377,6 @@ func TestApplyManifestSkipsPreExistingResources(t *testing.T) {
 		g.Expect(existing.Data["original"]).To(gomega.Equal("data"))
 		g.Expect(existing.Data).NotTo(gomega.HaveKey("updated"))
 	})
-}
-
-func TestApplyCRDIfNotExists_MonitoringCRDs(t *testing.T) {
-	g := gomega.NewWithT(t)
-
-	reconciler := &GitopsAddonReconciler{
-		Client: getTestEnv().Client,
-		Config: getTestEnv().Config,
-	}
-
-	tests := []struct {
-		name       string
-		resource   string
-		apiVersion string
-		path       string
-	}{
-		{
-			name:       "servicemonitors_crd",
-			resource:   "servicemonitors",
-			apiVersion: "monitoring.coreos.com/v1",
-			path:       "monitoring-crds/servicemonitors.monitoring.coreos.com.crd.yaml",
-		},
-		{
-			name:       "prometheuses_crd",
-			resource:   "prometheuses",
-			apiVersion: "monitoring.coreos.com/v1",
-			path:       "monitoring-crds/prometheuses.monitoring.coreos.com.crd.yaml",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Clean up any pre-existing CRD
-			crdName := tt.resource + ".monitoring.coreos.com"
-			existing := &apiextensionsv1.CustomResourceDefinition{}
-			if err := reconciler.Get(context.TODO(), types.NamespacedName{Name: crdName}, existing); err == nil {
-				_ = reconciler.Delete(context.TODO(), existing)
-			}
-
-			err := reconciler.applyCRDIfNotExists(testMonitoringCRDFS, tt.resource, tt.apiVersion, tt.path)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// Verify CRD was created
-			created := &apiextensionsv1.CustomResourceDefinition{}
-			err = reconciler.Get(context.TODO(), types.NamespacedName{Name: crdName}, created)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-			g.Expect(created.Spec.Group).To(gomega.Equal("monitoring.coreos.com"))
-			g.Expect(created.Spec.Versions[0].Served).To(gomega.BeTrue())
-
-			// Call again — should skip without error (already exists)
-			err = reconciler.applyCRDIfNotExists(testMonitoringCRDFS, tt.resource, tt.apiVersion, tt.path)
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-
-			// Cleanup
-			_ = reconciler.Delete(context.TODO(), created)
-		})
-	}
 }
 
 func TestTemplateAndApplyChartLabelsAllResources(t *testing.T) {
