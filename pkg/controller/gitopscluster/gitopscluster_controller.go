@@ -61,6 +61,36 @@ type ReconcileGitOpsCluster struct {
 	apiReader client.Reader
 }
 
+// LabelKeyAllowedArgoNamespace must be set to "true" on a Namespace object by a cluster
+// admin to permit GitOpsCluster CRs from other namespaces to write managed-cluster
+// secrets into it. Namespace labels require cluster-scoped update on namespaces, so a
+// namespaced tenant cannot grant this to their own namespace.
+const LabelKeyAllowedArgoNamespace = "apps.open-cluster-management.io/gitops-argo-namespace"
+
+// verifyArgoNamespaceAuthorized ensures the controller is permitted to write
+// managed-cluster bearer-token secrets into argoNamespace on behalf of the given
+// GitOpsCluster. Same-namespace writes are always allowed. Cross-namespace writes are
+// allowed only when a cluster admin has explicitly labelled the target Namespace with
+// LabelKeyAllowedArgoNamespace=true. spec.argoServer.argoNamespace is tenant-controlled,
+// so without this gate a tenant could direct spoke tokens into a namespace they read.
+func (r *ReconcileGitOpsCluster) verifyArgoNamespaceAuthorized(instance *gitopsclusterV1beta1.GitOpsCluster, argoNamespace string) error {
+	if argoNamespace == instance.Namespace {
+		return nil
+	}
+
+	ns := &v1.Namespace{}
+	if err := r.Get(context.TODO(), types.NamespacedName{Name: argoNamespace}, ns); err != nil {
+		return fmt.Errorf("unable to verify target argoNamespace %q: %w", argoNamespace, err)
+	}
+
+	if ns.GetLabels()[LabelKeyAllowedArgoNamespace] != "true" {
+		return fmt.Errorf("cross-namespace argoNamespace %q is not permitted: target Namespace must carry label %s=true",
+			argoNamespace, LabelKeyAllowedArgoNamespace)
+	}
+
+	return nil
+}
+
 // GetEffectiveArgoNamespace returns the namespace where the ArgoCD instance actually lives.
 // This is spec.argoServer.argoNamespace if set, otherwise falls back to the GitOpsCluster
 // CR's own namespace. This must be used instead of gitOpsCluster.Namespace for any
@@ -617,8 +647,36 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 	}
 
-	// 1. Verify that spec.argoServer.argoNamespace is a valid ArgoCD namespace
-	// skipArgoNamespaceVerify annotation just in case the service labels we use for verification change in future
+	// 1a. Verify the controller is authorized to write managed-cluster secrets into the
+	// effective argo namespace. spec.argoServer.argoNamespace is tenant-supplied; without
+	// this gate a tenant could redirect spoke bearer-token secrets into a namespace they
+	// can read. The previous skipArgoNamespaceVerify annotation bypass has been removed
+	// because it was settable by the same tenant.
+	if err := r.verifyArgoNamespaceAuthorized(instance, argoNamespace); err != nil {
+		klog.Errorf("rejecting GitOpsCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+
+		r.updateGitOpsClusterConditions(instance, "failed",
+			err.Error(),
+			map[string]ConditionUpdate{
+				gitopsclusterV1beta1.GitOpsClusterArgoServerVerified: {
+					Status:  metav1.ConditionFalse,
+					Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+					Message: err.Error(),
+				},
+			})
+
+		if err2 := r.Client.Status().Update(context.TODO(), instance); err2 != nil {
+			klog.Errorf("failed to update GitOpsCluster %s status, will try again: %s", instance.Namespace+"/"+instance.Name, err2)
+			return 1, err2
+		}
+
+		return 1, err
+	}
+
+	// 1b. Verify that the effective argo namespace is a valid ArgoCD namespace.
+	// The skipArgoNamespaceVerify annotation is honoured only for the liveness probe below
+	// (service-label discovery may lag operator upgrades); it no longer bypasses the
+	// authorization gate in 1a.
 	if !r.VerifyArgocdNamespace(argoNamespace) &&
 		annotations["skipArgoNamespaceVerify"] != "true" {
 		klog.Info("invalid argocd namespace because argo server pod was not found")
