@@ -1,6 +1,10 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    operators.coreos.com/openshift-gitops-operator.openshift-gitops-operator: ''
   name: argocds.argoproj.io
 spec:
   conversion:
@@ -240,7 +244,8 @@ spec:
                     - json
                     type: string
                   logLevel:
-                    description: LogLevel describes the log level that should be used by the ApplicationSet controller. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and warn.
+                    description: LogLevel describes the log level that should be used by the ApplicationSet controller. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error,
+                      and warn.
                     type: string
                   resources:
                     description: Resources defines the Compute Resources required by the container for ApplicationSet.
@@ -693,6 +698,20 @@ spec:
                       logLevel:
                         description: LogLevel refers to the log level used by the Agent component.
                         type: string
+                      metrics:
+                        description: Metrics defines the metrics configuration for the Agent ServiceMonitor.
+                        properties:
+                          interval:
+                            description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses its default scrape interval.'
+                            type: string
+                          scrapeTimeout:
+                            description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses the global scrape timeout.'
+                            type: string
+                        type: object
                       redis:
                         description: Redis defines the Redis options for the Agent component.
                         properties:
@@ -907,6 +926,20 @@ spec:
                       logLevel:
                         description: LogLevel refers to the log level used by the Principal component.
                         type: string
+                      metrics:
+                        description: Metrics defines the metrics configuration for the Principal ServiceMonitor.
+                        properties:
+                          interval:
+                            description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses its default scrape interval.'
+                            type: string
+                          scrapeTimeout:
+                            description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses the global scrape timeout.'
+                            type: string
+                        type: object
                       namespace:
                         description: Namespace is the configuration for the Principal component namespace.
                         properties:
@@ -1015,7 +1048,8 @@ spec:
                 - content
                 type: object
               configManagementPlugins:
-                description: 'Deprecated: ConfigManagementPlugins field is no longer supported. Argo CD now requires plugins to be defined as sidecar containers of repo server component. See ''.spec.repo.sidecarContainers''. ConfigManagementPlugins was previously used to specify additional config management plugins.'
+                description: 'Deprecated: ConfigManagementPlugins field is no longer supported. Argo CD now requires plugins to be defined as sidecar containers of repo server component. See ''.spec.repo.sidecarContainers''.
+                  ConfigManagementPlugins was previously used to specify additional config management plugins.'
                 type: string
               controller:
                 description: Controller defines the Application Controller options for ArgoCD.
@@ -1199,8 +1233,23 @@ spec:
                     description: LogFormat refers to the log format used by the Application Controller component. Defaults to ArgoCDDefaultLogFormat if not configured. Valid options are text or json.
                     type: string
                   logLevel:
-                    description: LogLevel refers to the log level used by the Application Controller component. Defaults to ArgoCDDefaultLogLevel if not configured. Valid options are debug, info, error, and warn.
+                    description: LogLevel refers to the log level used by the Application Controller component. Defaults to ArgoCDDefaultLogLevel if not configured. Valid options are debug, info, error,
+                      and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Application Controller ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   parallelismLimit:
                     description: ParallelismLimit defines the limit for parallel kubectl operations
                     format: int32
@@ -1286,6 +1335,13 @@ spec:
                   sharding:
                     description: Sharding contains the options for the Application Controller sharding configuration.
                     properties:
+                      algorithm:
+                        description: DistributionAlgorithm determines what algorithm will be used for distribution of shards. Valid options are legacy, round-robin, and consistent-hashing
+                        enum:
+                        - legacy
+                        - round-robin
+                        - consistent-hashing
+                        type: string
                       clustersPerShard:
                         description: ClustersPerShard defines the maximum number of clusters managed by each argocd shard
                         format: int32
@@ -2093,15 +2149,33 @@ spec:
                   image:
                     description: Image is the Argo CD Notifications image (optional)
                     type: string
-                  logLevel:
-                    description: LogLevel describes the log level that should be used by the argocd-notifications. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and warn.
-                    type: string
-                  logformat:
+                  logFormat:
                     description: LogFormat refers to the log format used by the argocd-notifications. Defaults to ArgoCDDefaultLogFormat if not configured. Valid options are text or json.
                     enum:
                     - text
                     - json
                     type: string
+                  logLevel:
+                    description: LogLevel describes the log level that should be used by the argocd-notifications. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and
+                      warn.
+                    type: string
+                  logformat:
+                    description: 'Deprecated: use LogFormat instead.'
+                    type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Notifications ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   replicas:
                     description: Replicas defines the number of replicas to run for notifications-controller
                     format: int32
@@ -2391,7 +2465,8 @@ spec:
                       but will see no apps, projects, etc...'
                     type: string
                   policy:
-                    description: "Policy is CSV containing user-defined RBAC policies and role definitions.\nPolicy rules are in the form:\n  p, subject, resource, action, object, effect\nRole definitions and bindings are in the form:\n  g, subject, inherited-subject\nSee https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/rbac.md for additional information."
+                    description: "Policy is CSV containing user-defined RBAC policies and role definitions.\nPolicy rules are in the form:\n  p, subject, resource, action, object, effect\nRole definitions\
+                      \ and bindings are in the form:\n  g, subject, inherited-subject\nSee https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/rbac.md for additional information."
                     type: string
                   policyMatcherMode:
                     description: 'PolicyMatcherMode configures the matchers function mode for casbin.
@@ -3777,7 +3852,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -3835,7 +3911,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -4375,6 +4452,20 @@ spec:
                   logLevel:
                     description: LogLevel describes the log level that should be used by the Repo Server. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug, info, error, and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Repo Server ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   mountsatoken:
                     description: MountSAToken describes whether you would like to have the Repo server mount the service account token
                     type: boolean
@@ -5552,7 +5643,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -5610,7 +5702,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -6302,7 +6395,8 @@ spec:
                                 Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                               type: string
                             kind:
-                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only
+                                in managed availability set). defaults to shared'
                               type: string
                             readOnly:
                               default: false
@@ -6637,7 +6731,8 @@ spec:
                                     format: int32
                                     type: integer
                                   path:
-                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item
+                                      of the relative path must not start with ''..'''
                                     type: string
                                   resourceFieldRef:
                                     description: 'Selects a resource of the container: only resources limits and requests
@@ -6700,7 +6795,13 @@ spec:
                               x-kubernetes-int-or-string: true
                           type: object
                         ephemeral:
-                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                            \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot\
+                            \ or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n\
+                            \   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim\
+                            \ or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the\
+                            \ CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes\
+                            \ at the same time."
                           properties:
                             volumeClaimTemplate:
                               description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -6802,7 +6903,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     dataSourceRef:
-                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                        \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object\
+                                        \ matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields\
+                                        \ are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef)\
+                                        \ will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't\
+                                        \ set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific\
+                                        \ types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping\
+                                        \ them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef\
+                                        \ allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of\
+                                        \ dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                       properties:
                                         apiGroup:
                                           description: 'APIGroup is the group for the resource being referenced.
@@ -6820,7 +6930,8 @@ spec:
                                         namespace:
                                           description: 'Namespace is the namespace of resource being referenced
 
-                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner
+                                            to accept the reference. See the ReferenceGrant documentation for details.
 
                                             (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                           type: string
@@ -7196,9 +7307,11 @@ spec:
 
                             The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff
+                            and will be reported on the pod reason and message.
 
-                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported
+                            by the container image field.
 
                             The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -7650,7 +7763,8 @@ spec:
                                               format: int32
                                               type: integer
                                             path:
-                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The
+                                                first item of the relative path must not start with ''..'''
                                               type: string
                                             resourceFieldRef:
                                               description: 'Selects a resource of the container: only resources limits and requests
@@ -8320,7 +8434,8 @@ spec:
               resourceCustomizations:
                 description: 'Deprecated field. Support dropped in v1beta1 version.
 
-                  ResourceCustomizations customizes resource behavior. Keys are in the form: group/Kind. Please note that this is being deprecated in favor of ResourceHealthChecks, ResourceIgnoreDifferences, and ResourceActions.'
+                  ResourceCustomizations customizes resource behavior. Keys are in the form: group/Kind. Please note that this is being deprecated in favor of ResourceHealthChecks, ResourceIgnoreDifferences,
+                  and ResourceActions.'
                 type: string
               resourceExclusions:
                 description: ResourceExclusions is used to completely ignore entire classes of resource group/kinds.
@@ -8762,6 +8877,20 @@ spec:
                   logLevel:
                     description: LogLevel refers to the log level to be used by the ArgoCD Server component. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug, info, error, and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Server ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   replicas:
                     description: Replicas defines the number of replicas for argocd-server. Default is nil. Value should be greater than or equal to 0. Value will be ignored if Autoscaler is enabled.
                     format: int32
@@ -9249,6 +9378,130 @@ spec:
               version:
                 description: Version is the tag to use with the ArgoCD container image for all ArgoCD components.
                 type: string
+              webhookSecrets:
+                description: 'WebhookSecrets references Kubernetes Secrets that supply webhook credentials per provider.
+
+                  The operator syncs values into argocd-secret under the keys Argo CD expects.'
+                properties:
+                  azureDevOps:
+                    description: 'AzureDevOps: Secret key references for the Azure DevOps webhook username and password (or PAT).'
+                    properties:
+                      passwordSecretRef:
+                        description: PasswordSecretRef points to the key holding the password or PAT.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      usernameSecretRef:
+                        description: UsernameSecretRef points to the key holding the username.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: usernameSecretRef and passwordSecretRef must be set together
+                      rule: (has(self.usernameSecretRef) && has(self.passwordSecretRef)) || (!has(self.usernameSecretRef) && !has(self.passwordSecretRef))
+                  bitbucket:
+                    description: 'Bitbucket: Secret key reference for the Bitbucket Cloud webhook UUID.'
+                    properties:
+                      webhookUUIDSecretRef:
+                        description: WebhookUUIDSecretRef points to the key holding the Bitbucket Cloud webhook UUID.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  bitbucketServer:
+                    description: 'BitbucketServer: Secret key reference for the Bitbucket Server webhook secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the Bitbucket Server webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  github:
+                    description: 'GitHub: Secret key reference for the GitHub webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the GitHub webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  gitlab:
+                    description: 'GitLab: Secret key reference for the GitLab webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the GitLab webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  gogs:
+                    description: 'Gogs: Secret key reference for the Gogs webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the Gogs webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                type: object
             type: object
           status:
             description: ArgoCDStatus defines the observed state of ArgoCD
@@ -9663,14 +9916,18 @@ spec:
                       type: string
                     description: Custom labels to pods deployed by the operator
                     type: object
-                  logLevel:
-                    description: LogLevel describes the log level that should be used by the ApplicationSet controller. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and warn.
-                    type: string
-                  logformat:
+                  logFormat:
                     description: LogFormat refers to the log format used by the ApplicationSet component. Defaults to ArgoCDDefaultLogFormat if not configured. Valid options are text or json.
                     enum:
                     - text
                     - json
+                    type: string
+                  logLevel:
+                    description: LogLevel describes the log level that should be used by the ApplicationSet controller. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error,
+                      and warn.
+                    type: string
+                  logformat:
+                    description: 'Deprecated: use LogFormat instead.'
                     type: string
                   resources:
                     description: Resources defines the Compute Resources required by the container for ApplicationSet.
@@ -9906,7 +10163,8 @@ spec:
                                 Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                               type: string
                             kind:
-                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only
+                                in managed availability set). defaults to shared'
                               type: string
                             readOnly:
                               default: false
@@ -10241,7 +10499,8 @@ spec:
                                     format: int32
                                     type: integer
                                   path:
-                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item
+                                      of the relative path must not start with ''..'''
                                     type: string
                                   resourceFieldRef:
                                     description: 'Selects a resource of the container: only resources limits and requests
@@ -10304,7 +10563,13 @@ spec:
                               x-kubernetes-int-or-string: true
                           type: object
                         ephemeral:
-                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                            \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot\
+                            \ or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n\
+                            \   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim\
+                            \ or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the\
+                            \ CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes\
+                            \ at the same time."
                           properties:
                             volumeClaimTemplate:
                               description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -10406,7 +10671,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     dataSourceRef:
-                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                        \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object\
+                                        \ matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields\
+                                        \ are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef)\
+                                        \ will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't\
+                                        \ set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific\
+                                        \ types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping\
+                                        \ them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef\
+                                        \ allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of\
+                                        \ dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                       properties:
                                         apiGroup:
                                           description: 'APIGroup is the group for the resource being referenced.
@@ -10424,7 +10698,8 @@ spec:
                                         namespace:
                                           description: 'Namespace is the namespace of resource being referenced
 
-                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner
+                                            to accept the reference. See the ReferenceGrant documentation for details.
 
                                             (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                           type: string
@@ -10800,9 +11075,11 @@ spec:
 
                             The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff
+                            and will be reported on the pod reason and message.
 
-                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported
+                            by the container image field.
 
                             The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -11254,7 +11531,8 @@ spec:
                                               format: int32
                                               type: integer
                                             path:
-                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The
+                                                first item of the relative path must not start with ''..'''
                                               type: string
                                             resourceFieldRef:
                                               description: 'Selects a resource of the container: only resources limits and requests
@@ -12305,12 +12583,92 @@ spec:
                       logLevel:
                         description: LogLevel refers to the log level used by the Agent component.
                         type: string
+                      metrics:
+                        description: Metrics defines the metrics configuration for the Agent ServiceMonitor.
+                        properties:
+                          interval:
+                            description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses its default scrape interval.'
+                            type: string
+                          scrapeTimeout:
+                            description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses the global scrape timeout.'
+                            type: string
+                        type: object
                       redis:
                         description: Redis defines the Redis options for the Agent component.
                         properties:
                           serverAddress:
                             description: ServerAddress is the address of the Redis server to be used by the PrincAgentipal component.
                             type: string
+                        type: object
+                      resources:
+                        description: Resources defines the Compute Resources required by the container for the Argo CD Agent agent component.
+                        properties:
+                          claims:
+                            description: 'Claims lists the names of resources, defined in spec.resourceClaims,
+
+                              that are used by this container.
+
+
+                              This field depends on the
+
+                              DynamicResourceAllocation feature gate.
+
+
+                              This field is immutable. It can only be set for containers.'
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: 'Name must match the name of one entry in pod.spec.resourceClaims of
+
+                                    the Pod where this field is used. It makes that resource available
+
+                                    inside a container.'
+                                  type: string
+                                request:
+                                  description: 'Request is the name chosen for a request in the referenced claim.
+
+                                    If empty, everything from the claim is made available, otherwise
+
+                                    only the result of this request.'
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: 'Limits describes the maximum amount of compute resources allowed.
+
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: 'Requests describes the minimum amount of compute resources required.
+
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                            type: object
                         type: object
                       tls:
                         description: TLS defines the TLS options for the Agent component.
@@ -12522,6 +12880,20 @@ spec:
                       logLevel:
                         description: LogLevel refers to the log level used by the Principal component.
                         type: string
+                      metrics:
+                        description: Metrics defines the metrics configuration for the Principal ServiceMonitor.
+                        properties:
+                          interval:
+                            description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses its default scrape interval.'
+                            type: string
+                          scrapeTimeout:
+                            description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                              If empty, Prometheus uses the global scrape timeout.'
+                            type: string
+                        type: object
                       namespace:
                         description: Namespace is the configuration for the Principal component namespace.
                         properties:
@@ -12561,6 +12933,72 @@ spec:
                           secretName:
                             description: SecretName is the name of the secret containing the TLS certificate and key for the resource proxy.
                             type: string
+                        type: object
+                      resources:
+                        description: Resources defines the Compute Resources required by the container for the Argo CD Agent principal component.
+                        properties:
+                          claims:
+                            description: 'Claims lists the names of resources, defined in spec.resourceClaims,
+
+                              that are used by this container.
+
+
+                              This field depends on the
+
+                              DynamicResourceAllocation feature gate.
+
+
+                              This field is immutable. It can only be set for containers.'
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: 'Name must match the name of one entry in pod.spec.resourceClaims of
+
+                                    the Pod where this field is used. It makes that resource available
+
+                                    inside a container.'
+                                  type: string
+                                request:
+                                  description: 'Request is the name chosen for a request in the referenced claim.
+
+                                    If empty, everything from the claim is made available, otherwise
+
+                                    only the result of this request.'
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: 'Limits describes the maximum amount of compute resources allowed.
+
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: 'Requests describes the minimum amount of compute resources required.
+
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                            type: object
                         type: object
                       server:
                         description: Server defines the server options for the Principal component.
@@ -12629,13 +13067,22 @@ spec:
                 required:
                 - content
                 type: object
+              clusterDomain:
+                description: 'ClusterDomain is the cluster domain suffix used for constructing service FQDNs. Defaults to "cluster.local".
+
+                  The full FQDN will be: <service>.<namespace>.svc.<clusterDomain>
+
+                  This is useful for clusters that use a different DNS suffix (e.g., "CLUSTER_ID.cluster.local", "edge.local").'
+                type: string
               cmdParams:
                 additionalProperties:
                   type: string
-                description: CmdParams specifies command-line parameters for the Argo CD components.
+                description: "CmdParams specifies command-line parameters for the Argo CD components.\nThe only keys currently supported for this parameter are:\n- controller.resource.health.persist\n-\
+                  \ applicationsetcontroller.enable.tokenref.strict.mode \u2014 when ApplicationSet-in-any-namespace is active, the operator defaults this to \"true\""
                 type: object
               configManagementPlugins:
-                description: 'Deprecated: ConfigManagementPlugins field is no longer supported. Argo CD now requires plugins to be defined as sidecar containers of repo server component. See ''.spec.repo.sidecarContainers''. ConfigManagementPlugins was previously used to specify additional config management plugins.'
+                description: 'Deprecated: ConfigManagementPlugins field is no longer supported. Argo CD now requires plugins to be defined as sidecar containers of repo server component. See ''.spec.repo.sidecarContainers''.
+                  ConfigManagementPlugins was previously used to specify additional config management plugins.'
                 type: string
               controller:
                 description: Controller defines the Application Controller options for ArgoCD.
@@ -13929,7 +14376,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -13987,7 +14435,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -14530,8 +14979,23 @@ spec:
                     description: LogFormat refers to the log format used by the Application Controller component. Defaults to ArgoCDDefaultLogFormat if not configured. Valid options are text or json.
                     type: string
                   logLevel:
-                    description: LogLevel refers to the log level used by the Application Controller component. Defaults to ArgoCDDefaultLogLevel if not configured. Valid options are debug, info, error, and warn.
+                    description: LogLevel refers to the log level used by the Application Controller component. Defaults to ArgoCDDefaultLogLevel if not configured. Valid options are debug, info, error,
+                      and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Application Controller ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   parallelismLimit:
                     description: ParallelismLimit defines the limit for parallel kubectl operations
                     format: int32
@@ -14620,6 +15084,13 @@ spec:
                   sharding:
                     description: Sharding contains the options for the Application Controller sharding configuration.
                     properties:
+                      algorithm:
+                        description: DistributionAlgorithm determines what algorithm will be used for distribution of shards. Valid options are legacy, round-robin, and consistent-hashing
+                        enum:
+                        - legacy
+                        - round-robin
+                        - consistent-hashing
+                        type: string
                       clustersPerShard:
                         description: ClustersPerShard defines the maximum number of clusters managed by each argocd shard
                         format: int32
@@ -15742,7 +16213,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -15800,7 +16272,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -16486,7 +16959,8 @@ spec:
                                 Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                               type: string
                             kind:
-                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only
+                                in managed availability set). defaults to shared'
                               type: string
                             readOnly:
                               default: false
@@ -16821,7 +17295,8 @@ spec:
                                     format: int32
                                     type: integer
                                   path:
-                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item
+                                      of the relative path must not start with ''..'''
                                     type: string
                                   resourceFieldRef:
                                     description: 'Selects a resource of the container: only resources limits and requests
@@ -16884,7 +17359,13 @@ spec:
                               x-kubernetes-int-or-string: true
                           type: object
                         ephemeral:
-                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                            \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot\
+                            \ or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n\
+                            \   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim\
+                            \ or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the\
+                            \ CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes\
+                            \ at the same time."
                           properties:
                             volumeClaimTemplate:
                               description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -16986,7 +17467,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     dataSourceRef:
-                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                        \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object\
+                                        \ matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields\
+                                        \ are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef)\
+                                        \ will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't\
+                                        \ set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific\
+                                        \ types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping\
+                                        \ them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef\
+                                        \ allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of\
+                                        \ dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                       properties:
                                         apiGroup:
                                           description: 'APIGroup is the group for the resource being referenced.
@@ -17004,7 +17494,8 @@ spec:
                                         namespace:
                                           description: 'Namespace is the namespace of resource being referenced
 
-                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner
+                                            to accept the reference. See the ReferenceGrant documentation for details.
 
                                             (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                           type: string
@@ -17380,9 +17871,11 @@ spec:
 
                             The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff
+                            and will be reported on the pod reason and message.
 
-                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported
+                            by the container image field.
 
                             The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -17834,7 +18327,8 @@ spec:
                                               format: int32
                                               type: integer
                                             path:
-                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The
+                                                first item of the relative path must not start with ''..'''
                                               type: string
                                             resourceFieldRef:
                                               description: 'Selects a resource of the container: only resources limits and requests
@@ -19454,15 +19948,33 @@ spec:
                   image:
                     description: Image is the Argo CD Notifications image (optional)
                     type: string
-                  logLevel:
-                    description: LogLevel describes the log level that should be used by the argocd-notifications. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and warn.
-                    type: string
-                  logformat:
+                  logFormat:
                     description: LogFormat refers to the log format used by the argocd-notifications. Defaults to ArgoCDDefaultLogFormat if not configured. Valid options are text or json.
                     enum:
                     - text
                     - json
                     type: string
+                  logLevel:
+                    description: LogLevel describes the log level that should be used by the argocd-notifications. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug,info, error, and
+                      warn.
+                    type: string
+                  logformat:
+                    description: 'Deprecated: use LogFormat instead.'
+                    type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Notifications ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   replicas:
                     description: Replicas defines the number of replicas to run for notifications-controller
                     format: int32
@@ -19752,7 +20264,8 @@ spec:
                       but will see no apps, projects, etc...'
                     type: string
                   policy:
-                    description: "Policy is CSV containing user-defined RBAC policies and role definitions.\nPolicy rules are in the form:\n  p, subject, resource, action, object, effect\nRole definitions and bindings are in the form:\n  g, subject, inherited-subject\nSee https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/rbac.md for additional information."
+                    description: "Policy is CSV containing user-defined RBAC policies and role definitions.\nPolicy rules are in the form:\n  p, subject, resource, action, object, effect\nRole definitions\
+                      \ and bindings are in the form:\n  g, subject, inherited-subject\nSee https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/rbac.md for additional information."
                     type: string
                   policyMatcherMode:
                     description: 'PolicyMatcherMode configures the matchers function mode for casbin.
@@ -21152,7 +21665,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -21210,7 +21724,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -21755,6 +22270,20 @@ spec:
                   logLevel:
                     description: LogLevel describes the log level that should be used by the Repo Server. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug, info, error, and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Repo Server ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   mountsatoken:
                     description: MountSAToken describes whether you would like to have the Repo server mount the service account token
                     type: boolean
@@ -22935,7 +23464,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -22993,7 +23523,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -23948,7 +24479,8 @@ spec:
                                 Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                               type: string
                             kind:
-                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only
+                                in managed availability set). defaults to shared'
                               type: string
                             readOnly:
                               default: false
@@ -24283,7 +24815,8 @@ spec:
                                     format: int32
                                     type: integer
                                   path:
-                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item
+                                      of the relative path must not start with ''..'''
                                     type: string
                                   resourceFieldRef:
                                     description: 'Selects a resource of the container: only resources limits and requests
@@ -24346,7 +24879,13 @@ spec:
                               x-kubernetes-int-or-string: true
                           type: object
                         ephemeral:
-                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                            \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot\
+                            \ or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n\
+                            \   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim\
+                            \ or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the\
+                            \ CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes\
+                            \ at the same time."
                           properties:
                             volumeClaimTemplate:
                               description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -24448,7 +24987,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     dataSourceRef:
-                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                        \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object\
+                                        \ matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields\
+                                        \ are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef)\
+                                        \ will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't\
+                                        \ set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific\
+                                        \ types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping\
+                                        \ them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef\
+                                        \ allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of\
+                                        \ dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                       properties:
                                         apiGroup:
                                           description: 'APIGroup is the group for the resource being referenced.
@@ -24466,7 +25014,8 @@ spec:
                                         namespace:
                                           description: 'Namespace is the namespace of resource being referenced
 
-                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner
+                                            to accept the reference. See the ReferenceGrant documentation for details.
 
                                             (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                           type: string
@@ -24842,9 +25391,11 @@ spec:
 
                             The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff
+                            and will be reported on the pod reason and message.
 
-                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported
+                            by the container image field.
 
                             The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -25296,7 +25847,8 @@ spec:
                                               format: int32
                                               type: integer
                                             path:
-                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The
+                                                first item of the relative path must not start with ''..'''
                                               type: string
                                             resourceFieldRef:
                                               description: 'Selects a resource of the container: only resources limits and requests
@@ -27499,7 +28051,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -27557,7 +28110,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -28105,6 +28659,20 @@ spec:
                   logLevel:
                     description: LogLevel refers to the log level to be used by the ArgoCD Server component. Defaults to ArgoCDDefaultLogLevel if not set.  Valid options are debug, info, error, and warn.
                     type: string
+                  metrics:
+                    description: Metrics defines the metrics configuration for the Server ServiceMonitor.
+                    properties:
+                      interval:
+                        description: 'Interval specifies the Prometheus scrape interval for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses its default scrape interval.'
+                        type: string
+                      scrapeTimeout:
+                        description: 'ScrapeTimeout specifies the Prometheus scrape timeout for this component''s ServiceMonitor.
+
+                          If empty, Prometheus uses the global scrape timeout.'
+                        type: string
+                    type: object
                   replicas:
                     description: Replicas defines the number of replicas for argocd-server. Default is nil. Value should be greater than or equal to 0. Value will be ignored if Autoscaler is enabled.
                     format: int32
@@ -29389,7 +29957,8 @@ spec:
                                 description: Represents the exit codes to check on container exits.
                                 properties:
                                   operator:
-                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
+                                    description: "Represents the relationship between the container exit code(s) and the\nspecified values. Possible values are:\n- In: the requirement is satisfied if the\
+                                      \ container exit code is in the\n  set of specified values.\n- NotIn: the requirement is satisfied if the container exit code is\n  not in the set of specified values."
                                     type: string
                                   values:
                                     description: 'Specifies the set of values to check for container exit codes.
@@ -29447,7 +30016,8 @@ spec:
                                     Must be set if and only if type is "Localhost".'
                                   type: string
                                 type:
-                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
+                                  description: "type indicates which kind of AppArmor profile will be applied.\nValid options are:\n  Localhost - a profile pre-loaded on the node.\n  RuntimeDefault - the\
+                                    \ container runtime's default profile.\n  Unconfined - no AppArmor enforcement."
                                   type: string
                               required:
                               - type
@@ -30133,7 +30703,8 @@ spec:
                                 Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                               type: string
                             kind:
-                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                              description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only
+                                in managed availability set). defaults to shared'
                               type: string
                             readOnly:
                               default: false
@@ -30468,7 +31039,8 @@ spec:
                                     format: int32
                                     type: integer
                                   path:
-                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                    description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item
+                                      of the relative path must not start with ''..'''
                                     type: string
                                   resourceFieldRef:
                                     description: 'Selects a resource of the container: only resources limits and requests
@@ -30531,7 +31103,13 @@ spec:
                               x-kubernetes-int-or-string: true
                           type: object
                         ephemeral:
-                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                          description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                            \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot\
+                            \ or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n\
+                            \   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim\
+                            \ or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the\
+                            \ CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes\
+                            \ at the same time."
                           properties:
                             volumeClaimTemplate:
                               description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -30633,7 +31211,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     dataSourceRef:
-                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                      description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                        \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object\
+                                        \ matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields\
+                                        \ are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef)\
+                                        \ will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't\
+                                        \ set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific\
+                                        \ types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping\
+                                        \ them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef\
+                                        \ allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of\
+                                        \ dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                       properties:
                                         apiGroup:
                                           description: 'APIGroup is the group for the resource being referenced.
@@ -30651,7 +31238,8 @@ spec:
                                         namespace:
                                           description: 'Namespace is the namespace of resource being referenced
 
-                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                            Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner
+                                            to accept the reference. See the ReferenceGrant documentation for details.
 
                                             (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                           type: string
@@ -31027,9 +31615,11 @@ spec:
 
                             The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                            A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff
+                            and will be reported on the pod reason and message.
 
-                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                            The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported
+                            by the container image field.
 
                             The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -31481,7 +32071,8 @@ spec:
                                               format: int32
                                               type: integer
                                             path:
-                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                              description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The
+                                                first item of the relative path must not start with ''..'''
                                               type: string
                                             resourceFieldRef:
                                               description: 'Selects a resource of the container: only resources limits and requests
@@ -32543,7 +33134,8 @@ spec:
                                     Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.'
                                   type: string
                                 kind:
-                                  description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk (only in managed availability set). defaults to shared'
+                                  description: 'kind expected values are Shared: multiple blob disks per storage account  Dedicated: single blob disk per storage account  Managed: azure managed data disk
+                                    (only in managed availability set). defaults to shared'
                                   type: string
                                 readOnly:
                                   default: false
@@ -32878,7 +33470,8 @@ spec:
                                         format: int32
                                         type: integer
                                       path:
-                                        description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                        description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first
+                                          item of the relative path must not start with ''..'''
                                         type: string
                                       resourceFieldRef:
                                         description: 'Selects a resource of the container: only resources limits and requests
@@ -32941,7 +33534,13 @@ spec:
                                   x-kubernetes-int-or-string: true
                               type: object
                             ephemeral:
-                              description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time."
+                              description: "ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before\
+                                \ the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from\
+                                \ snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning\
+                                \ through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse\
+                                \ PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local\
+                                \ ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral\
+                                \ volumes and\npersistent volumes at the same time."
                               properties:
                                 volumeClaimTemplate:
                                   description: 'Will be used to create a stand-alone PVC to provision the volume.
@@ -33043,7 +33642,16 @@ spec:
                                           type: object
                                           x-kubernetes-map-type: atomic
                                         dataSourceRef:
-                                          description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\ndataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha) Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
+                                          description: "dataSourceRef specifies the object from which to populate the volume with data, if a non-empty\nvolume is desired. This may be any object from a non-empty\
+                                            \ API group (non\ncore object) or a PersistentVolumeClaim object.\nWhen this field is specified, volume binding will only succeed if the type of\nthe specified\
+                                            \ object matches some installed volume populator or dynamic\nprovisioner.\nThis field will replace the functionality of the dataSource field and as such\nif both\
+                                            \ fields are non-empty, they must have the same value. For backwards\ncompatibility, when namespace isn't specified in dataSourceRef,\nboth fields (dataSource\
+                                            \ and dataSourceRef) will be set to the same\nvalue automatically if one of them is empty and the other is non-empty.\nWhen namespace is specified in dataSourceRef,\n\
+                                            dataSource isn't set to the same value and must be empty.\nThere are three important differences between dataSource and dataSourceRef:\n* While dataSource only\
+                                            \ allows two specific types of objects, dataSourceRef\n  allows any non-core object, as well as PersistentVolumeClaim objects.\n* While dataSource ignores disallowed\
+                                            \ values (dropping them), dataSourceRef\n  preserves all values, and generates an error if a disallowed value is\n  specified.\n* While dataSource only allows\
+                                            \ local objects, dataSourceRef allows objects\n  in any namespaces.\n(Beta) Using this field requires the AnyVolumeDataSource feature gate to be enabled.\n(Alpha)\
+                                            \ Using the namespace field of dataSourceRef requires the CrossNamespaceVolumeDataSource feature gate to be enabled."
                                           properties:
                                             apiGroup:
                                               description: 'APIGroup is the group for the resource being referenced.
@@ -33061,7 +33669,8 @@ spec:
                                             namespace:
                                               description: 'Namespace is the namespace of resource being referenced
 
-                                                Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s owner to accept the reference. See the ReferenceGrant documentation for details.
+                                                Note that when a namespace is specified, a gateway.networking.k8s.io/ReferenceGrant object is required in the referent namespace to allow that namespace''s
+                                                owner to accept the reference. See the ReferenceGrant documentation for details.
 
                                                 (Alpha) This field requires the CrossNamespaceVolumeDataSource feature gate to be enabled.'
                                               type: string
@@ -33437,9 +34046,11 @@ spec:
 
                                 The volume gets re-resolved if the pod gets deleted and recreated, which means that new remote content will become available on pod recreation.
 
-                                A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
+                                A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume
+                                backoff and will be reported on the pod reason and message.
 
-                                The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
+                                The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types
+                                supported by the container image field.
 
                                 The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
 
@@ -33891,7 +34502,8 @@ spec:
                                                   format: int32
                                                   type: integer
                                                 path:
-                                                  description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded. The first item of the relative path must not start with ''..'''
+                                                  description: 'Required: Path is  the relative path name of the file to be created. Must not be absolute or contain the ''..'' path. Must be utf-8 encoded.
+                                                    The first item of the relative path must not start with ''..'''
                                                   type: string
                                                 resourceFieldRef:
                                                   description: 'Selects a resource of the container: only resources limits and requests
@@ -34663,6 +35275,133 @@ spec:
               version:
                 description: Version is the tag to use with the ArgoCD container image for all ArgoCD components.
                 type: string
+              webTerminalEnabled:
+                description: WebTerminalEnabled allows you to get a shell inside a running pod just like you would with kubectl exec
+                type: boolean
+              webhookSecrets:
+                description: 'WebhookSecrets references Kubernetes Secrets that supply webhook credentials per provider.
+
+                  The operator syncs values into argocd-secret under the keys Argo CD expects.'
+                properties:
+                  azureDevOps:
+                    description: 'AzureDevOps: Secret key references for the Azure DevOps webhook username and password (or PAT).'
+                    properties:
+                      passwordSecretRef:
+                        description: PasswordSecretRef points to the key holding the password or PAT.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      usernameSecretRef:
+                        description: UsernameSecretRef points to the key holding the username.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: usernameSecretRef and passwordSecretRef must be set together
+                      rule: (has(self.usernameSecretRef) && has(self.passwordSecretRef)) || (!has(self.usernameSecretRef) && !has(self.passwordSecretRef))
+                  bitbucket:
+                    description: 'Bitbucket: Secret key reference for the Bitbucket Cloud webhook UUID.'
+                    properties:
+                      webhookUUIDSecretRef:
+                        description: WebhookUUIDSecretRef points to the key holding the Bitbucket Cloud webhook UUID.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  bitbucketServer:
+                    description: 'BitbucketServer: Secret key reference for the Bitbucket Server webhook secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the Bitbucket Server webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  github:
+                    description: 'GitHub: Secret key reference for the GitHub webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the GitHub webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  gitlab:
+                    description: 'GitLab: Secret key reference for the GitLab webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the GitLab webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  gogs:
+                    description: 'Gogs: Secret key reference for the Gogs webhook shared secret.'
+                    properties:
+                      webhookSecretRef:
+                        description: WebhookSecretRef points to the key holding the Gogs webhook shared secret.
+                        properties:
+                          key:
+                            description: Key in the Secret whose value should be used.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                type: object
             type: object
             x-kubernetes-validations:
             - message: spec.sso and spec.oidcConfig cannot both be set
