@@ -220,28 +220,47 @@ spec:
       enabled: true
 STUB_EOF
 
-echo ">> Waiting for argocd-agent-resource-proxy-tls to be created by the controller"
-for i in $(seq 1 60); do
-  if ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops get secret argocd-agent-resource-proxy-tls &>/dev/null; then
-    echo "argocd-agent-resource-proxy-tls created — all agent certs are ready"
-    break
-  fi
-  if [ "$i" -eq 60 ]; then
-    echo "ERROR: argocd-agent-resource-proxy-tls was not created within 300s"
-    echo "Controller logs (last 50 lines):"
-    CTRL_POD=$(${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management \
-      --no-headers -o name 2>/dev/null | grep multicloud-integrations-gitops | head -1)
-    if [ -n "${CTRL_POD}" ]; then
-      ${KUBECTL} --context ${HUB_CTX} logs -n open-cluster-management "${CTRL_POD}" --tail=50 || true
-    else
-      echo "  (controller pod not found — listing pods in open-cluster-management:)"
-      ${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management || true
+echo ">> Waiting for argocd-agent secrets to be created by the controller"
+for secret_name in argocd-agent-principal-tls argocd-agent-resource-proxy-tls argocd-agent-jwt; do
+  echo ">> Waiting for ${secret_name}..."
+  for i in $(seq 1 60); do
+    if ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops get secret "${secret_name}" &>/dev/null; then
+      echo "${secret_name} created"
+      break
     fi
-    exit 1
-  fi
-  echo "  Waiting for resource proxy TLS cert... ($i/60)"
-  sleep 5
+    if [ "$i" -eq 60 ]; then
+      echo "ERROR: ${secret_name} was not created within 300s"
+      echo "Controller logs (last 50 lines):"
+      CTRL_POD=$(${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management \
+        --no-headers -o name 2>/dev/null | grep multicloud-integrations-gitops | head -1)
+      if [ -n "${CTRL_POD}" ]; then
+        ${KUBECTL} --context ${HUB_CTX} logs -n open-cluster-management "${CTRL_POD}" --tail=50 || true
+      else
+        echo "  (controller pod not found — listing pods in open-cluster-management:)"
+        ${KUBECTL} --context ${HUB_CTX} get pods -n open-cluster-management || true
+      fi
+      exit 1
+    fi
+    echo "  Waiting for ${secret_name}... ($i/60)"
+    sleep 5
+  done
 done
+echo "All agent secrets are ready"
+
+# ------- Step 3b2: Patch operator ClusterRole for upstream argocd-operator -------
+# The embedded chart's ClusterRole is extracted from the Red Hat CSV which removed
+# argocdexports. The upstream argocd-operator (used in e2e) still watches ArgoCDExport
+# resources and needs list/watch permission. Without this, the operator's informer cache
+# fails to sync and it never reconciles ArgoCD CRs.
+echo "===== Step 3b2: Patching operator ClusterRole for upstream argocd-operator ====="
+${KUBECTL} --context ${HUB_CTX} patch clusterrole openshift-gitops-operator-manager-role --type=json -p='[
+  {"op":"add","path":"/rules/-","value":{
+    "apiGroups":["argoproj.io"],
+    "resources":["argocdexports","argocdexports/finalizers"],
+    "verbs":["create","delete","get","list","patch","update","watch"]
+  }}
+]' 2>/dev/null || true
+echo ">> Patched ClusterRole with argocdexports for upstream operator"
 
 # ------- Step 3c: Create ArgoCD instance on hub -------
 #
@@ -337,10 +356,9 @@ else
   echo "WARN: argocd-export-crd.yaml not found at ${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml, skipping"
 fi
 
-# The Route CRD is NOT installed here. The upstream ArgoCD operator gracefully handles the
-# absence of Route API (logs "route.openshift.io/v1 API is not registered" and skips Route
-# creation). On managed clusters, the gitopsaddon agent installs the Route CRD stub
-# (gitopsaddon/routes-openshift-crd/) as part of the embedded chart deployment.
+# Route and Monitoring CRDs are NOT installed here. The operator handles missing APIs
+# gracefully via API discovery (argoutil.VerifyAPI / InspectCluster) and skips
+# Route/Monitoring watches and reconciliation when those APIs don't exist.
 
 echo ""
 echo "============================================"

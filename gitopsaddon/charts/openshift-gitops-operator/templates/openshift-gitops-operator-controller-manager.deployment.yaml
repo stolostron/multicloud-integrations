@@ -29,8 +29,6 @@ spec:
         - /usr/local/bin/manager
         {{- end }}
         env:
-        - name: WATCH_NAMESPACE
-          value: ""
         - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
           value: "*"
         - name: CLUSTER_SCOPED_ARGO_ROLLOUTS_NAMESPACES
@@ -41,6 +39,8 @@ spec:
           value: gitops-operator
         - name: ENABLE_CONVERSION_WEBHOOK
           value: "false"
+        - name: LABEL_SELECTOR
+          value: ""
         # Image environment variables - only set if values are provided
         # If not set, the operator will use its built-in defaults
         {{- if .Values.global.operatorImages.ARGOCD_IMAGE }}
@@ -118,6 +118,12 @@ spec:
         ports:
         - containerPort: 9443
           name: webhook-server
+          protocol: TCP
+        - containerPort: 8443
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
           protocol: TCP
         readinessProbe:
           httpGet:

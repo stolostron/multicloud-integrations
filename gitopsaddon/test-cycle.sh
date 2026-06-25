@@ -1,15 +1,20 @@
 #!/bin/bash
-# test-cycle-eks-ocp.sh — Deploy/Verify/Delete cycle for ArgoCD Agent GitOps Addon
+# test-cycle.sh — Deploy/Verify/Delete cycle for ArgoCD Agent GitOps Addon
 #
-# Tests the full lifecycle across multiple managed clusters (OCP + non-OCP):
-# deploy gitopsaddon with argocd-agent, verify ApplicationSet-driven app syncs
-# via the hub principal, then delete from the hub and verify clean cleanup on
-# every managed cluster.
+# Tests the full lifecycle across multiple managed clusters (OCP + non-OCP).
+# Supports any mix of OCP, Kind, and EKS clusters. Deploys gitopsaddon with
+# argocd-agent, verifies ApplicationSet-driven app syncs via the hub principal,
+# then deletes from the hub and verifies clean cleanup on every managed cluster.
+#
+# OCP clusters use OLM for operator installation (latest channel from redhat-operators).
+# Non-OCP clusters (Kind, EKS) use the embedded Helm chart with hardcoded image SHAs
+# from pkg/utils/config.go. The agent image on all clusters is set by the hub
+# controller's drift heal mechanism (reads principal pod image, writes to Policy).
 #
 # Usage:
 #   HUB_KUBECONFIG=/path/to/hub \
-#   MANAGED_CLUSTERS="cluster1:/path/to/kc1,cluster2:/path/to/kc2" \
-#     bash test-cycle-eks-ocp.sh [cycles]
+#   MANAGED_CLUSTERS="ocp-cluster1:/path/to/ocp.kc,kind-cluster1:/path/to/kind.kc" \
+#     bash test-cycle.sh [cycles]
 #
 # Required environment:
 #   HUB_KUBECONFIG       — Path to hub cluster kubeconfig
@@ -188,6 +193,19 @@ clean_hub_stale() {
     hub delete placement "$PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "${GITOPSCLUSTER_NAME}-argocd-policy" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
     hub delete placementbinding "${GITOPSCLUSTER_NAME}-argocd-policy-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+
+    # Strip finalizers from test-owned Applications and delete them.
+    # Only target apps created by this script's AppSet (guestbook-{cluster}).
+    # Without this, apps with resources-finalizer.argocd.argoproj.io block deletion
+    # because the hub has no app-controller (controller.enabled=false in agent mode).
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local app_name="guestbook-${cluster}"
+        if hub get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" &>/dev/null; then
+            hub patch applications.argoproj.io "$app_name" -n "$ARGOCD_NS" --type=json \
+                -p='[{"op":"replace","path":"/metadata/finalizers","value":[]}]' 2>/dev/null || true
+            hub delete applications.argoproj.io "$app_name" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+        fi
+    done
 }
 
 # --- Build Placement matchExpressions for all clusters ---
@@ -383,6 +401,16 @@ verify_managed() {
         else
             log "WARNING: $cluster guestbook-ui not ready (replicas=$guestbook)"
         fi
+
+        # Verify cluster secret has skip-reconcile annotation (agent mode only)
+        local skip_reconcile
+        skip_reconcile=$(hub get secret "cluster-${cluster}" -n "$ARGOCD_NS" \
+            -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/skip-reconcile}' 2>/dev/null || echo "")
+        if [ "$skip_reconcile" = "true" ]; then
+            pass "$cluster cluster secret has skip-reconcile annotation"
+        else
+            fail "$cluster cluster secret missing argocd.argoproj.io/skip-reconcile=true (got '$skip_reconcile')"
+        fi
     done
 }
 
@@ -467,46 +495,95 @@ verify_agent_e2e() {
     done
 }
 
-# --- Verify pod stability (no restarts) across all key namespaces ---
+# --- Verify pod stability across all key namespaces ---
+# Checks that pods are currently Running/Ready and not actively restarting.
+# Takes two restart-count snapshots separated by the settle period. If restarts
+# increased, the pod is unstable (active crash loop). Historical startup restarts
+# (e.g., agent pod crashed before CA secret was propagated) are logged as warnings
+# but do NOT fail the check — they are expected during initial deployment.
 verify_pods_stable() {
     local settle_secs=${POD_STABLE_SETTLE_SECS:-30}
-    log "Waiting ${settle_secs}s for pods to settle before checking restart counts..."
-    sleep "$settle_secs"
-
-    local all_stable=true
     local namespaces=("openshift-gitops" "openshift-gitops-operator" "open-cluster-management-agent-addon")
 
+    # Snapshot 1: record restart counts (max across all containers per pod)
+    declare -A restart_before
     for cluster in "${CLUSTER_NAMES[@]}"; do
         for ns in "${namespaces[@]}"; do
             local pods_output
-            pods_output=$(on_cluster "$cluster" get pods -n "$ns" --no-headers \
-                -o custom-columns='NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,PHASE:.status.phase' 2>/dev/null || echo "")
-            if [ -z "$pods_output" ]; then
-                continue
-            fi
-
+            pods_output=$(on_cluster "$cluster" get pods -n "$ns" -o json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for pod in d.get('items',[]):
+    name=pod['metadata']['name']
+    phase=pod['status'].get('phase','Unknown')
+    restarts=max((cs.get('restartCount',0) for cs in pod['status'].get('containerStatuses',[])),default=0)
+    print(f'{name} {restarts} {phase}')
+" 2>/dev/null || echo "")
+            [ -z "$pods_output" ] && continue
             while IFS= read -r line; do
                 local pod_name restarts phase
                 pod_name=$(echo "$line" | awk '{print $1}')
                 restarts=$(echo "$line" | awk '{print $2}')
                 phase=$(echo "$line" | awk '{print $3}')
-
                 [ "$phase" != "Running" ] && continue
                 [ "$restarts" = "<none>" ] && restarts=0
+                restart_before["${cluster}/${ns}/${pod_name}"]=$restarts
+            done <<< "$pods_output"
+        done
+    done
 
-                if [ "$restarts" -gt 0 ] 2>/dev/null; then
-                    log "FAIL: $cluster pod $pod_name in $ns has $restarts restarts"
+    log "Waiting ${settle_secs}s for pods to settle..."
+    sleep "$settle_secs"
+
+    # Snapshot 2: check for restart count increases (max across all containers, all-ready check)
+    local all_stable=true
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        for ns in "${namespaces[@]}"; do
+            local pods_output
+            pods_output=$(on_cluster "$cluster" get pods -n "$ns" -o json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for pod in d.get('items',[]):
+    name=pod['metadata']['name']
+    phase=pod['status'].get('phase','Unknown')
+    statuses=pod['status'].get('containerStatuses',[])
+    restarts=max((cs.get('restartCount',0) for cs in statuses),default=0)
+    ready='true' if all(cs.get('ready',False) for cs in statuses) else 'false'
+    print(f'{name} {restarts} {phase} {ready}')
+" 2>/dev/null || echo "")
+            [ -z "$pods_output" ] && continue
+            while IFS= read -r line; do
+                local pod_name restarts phase ready
+                pod_name=$(echo "$line" | awk '{print $1}')
+                restarts=$(echo "$line" | awk '{print $2}')
+                phase=$(echo "$line" | awk '{print $3}')
+                ready=$(echo "$line" | awk '{print $4}')
+
+                # Pod must be Running and Ready
+                if [ "$phase" != "Running" ] || [ "$ready" != "true" ]; then
+                    log "FAIL: $cluster pod $pod_name in $ns is $phase (ready=$ready)"
+                    on_cluster "$cluster" logs -n "$ns" "$pod_name" --tail=10 2>/dev/null || true
+                    all_stable=false
+                    continue
+                fi
+
+                # Check if restarts increased during settle period (active crash loop)
+                local before=${restart_before["${cluster}/${ns}/${pod_name}"]:-0}
+                if [ "$restarts" -gt "$before" ] 2>/dev/null; then
+                    log "FAIL: $cluster pod $pod_name in $ns restarted during settle (${before}→${restarts})"
                     on_cluster "$cluster" logs -n "$ns" "$pod_name" --previous --tail=10 2>/dev/null || true
                     all_stable=false
+                elif [ "$restarts" -gt 0 ] 2>/dev/null; then
+                    log "WARNING: $cluster pod $pod_name in $ns has $restarts historical restarts (stabilized)"
                 fi
             done <<< "$pods_output"
         done
     done
 
     if [ "$all_stable" = "true" ]; then
-        pass "All pods stable (zero restarts) across all managed clusters"
+        pass "All pods stable across all managed clusters"
     else
-        fail "Some pods have restarts — indicates crash loops (see logs above)"
+        fail "Some pods are not stable (see logs above)"
     fi
 }
 

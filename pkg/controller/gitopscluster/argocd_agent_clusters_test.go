@@ -117,12 +117,14 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.Equal(t, "cluster", secret1.Labels[argoCDTypeLabel])
 				assert.Equal(t, "cluster1", secret1.Labels[labelKeyClusterAgentMapping])
 				assert.Equal(t, labelValueManagerName, secret1.Annotations[argoCDManagedByAnnotation])
+				assert.Equal(t, "true", secret1.Annotations[annotationKeyAppSkipReconcile], "agent cluster secret must have skip-reconcile=true for hybrid mode")
 
 				secret2 := &v1.Secret{}
 				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-cluster2", Namespace: "argocd"}, secret2)
 				assert.NoError(t, err)
 				assert.Equal(t, "cluster", secret2.Labels[argoCDTypeLabel])
 				assert.Equal(t, "cluster2", secret2.Labels[labelKeyClusterAgentMapping])
+				assert.Equal(t, "true", secret2.Annotations[annotationKeyAppSkipReconcile], "agent cluster secret must have skip-reconcile=true for hybrid mode")
 			},
 		},
 		{
@@ -294,6 +296,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, "cluster1", secret.Labels[labelKeyClusterAgentMapping])
 				assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
+				assert.Equal(t, "true", secret.Annotations[annotationKeyAppSkipReconcile], "agent cluster secret must have skip-reconcile=true for hybrid mode")
 
 				// Verify the resource proxy URL is used when the service is available
 				serverURL := string(secret.Data["server"])
@@ -510,6 +513,7 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				assert.NoError(t, err, "agent cluster secret should be created")
 				assert.Equal(t, "cluster1", agentSecret.Labels[labelKeyClusterAgentMapping])
 				assert.Equal(t, labelValueManagerName, agentSecret.Annotations[argoCDManagedByAnnotation])
+				assert.Equal(t, "true", agentSecret.Annotations[annotationKeyAppSkipReconcile], "agent cluster secret must have skip-reconcile=true for hybrid mode")
 
 				// The old traditional secret must be deleted
 				oldSecret := &v1.Secret{}
@@ -1044,6 +1048,32 @@ func TestClusterToSecret(t *testing.T) {
 
 	// Verify annotations
 	assert.Equal(t, labelValueManagerName, secret.Annotations[argoCDManagedByAnnotation])
+
+	// Verify skip-reconcile annotation is propagated when set on the Cluster
+	clusterWithSkipReconcile := &Cluster{
+		Server: "https://test-server.example.com:443?agentName=cluster1",
+		Name:   "cluster1",
+		Labels: map[string]string{
+			labelKeyClusterAgentMapping: "cluster1",
+		},
+		Annotations: map[string]string{
+			annotationKeyAppSkipReconcile: "true",
+		},
+		Config: ClusterConfig{
+			Username: "cluster1",
+			Password: "test-password",
+		},
+	}
+	secretWithAnnotation := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster-cluster1",
+			Namespace: "argocd",
+		},
+	}
+	err = reconciler.clusterToSecret(clusterWithSkipReconcile, secretWithAnnotation)
+	require.NoError(t, err)
+	assert.Equal(t, "true", secretWithAnnotation.Annotations[annotationKeyAppSkipReconcile], "clusterToSecret must propagate skip-reconcile annotation from Cluster struct")
+	assert.Equal(t, labelValueManagerName, secretWithAnnotation.Annotations[argoCDManagedByAnnotation])
 
 	// Verify config is JSON marshaled
 	var config ClusterConfig
