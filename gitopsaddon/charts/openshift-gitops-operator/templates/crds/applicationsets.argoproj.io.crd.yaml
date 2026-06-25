@@ -4,6 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: applicationsets.argoproj.io
     app.kubernetes.io/part-of: argocd
+    operators.coreos.com/openshift-gitops-operator.openshift-gitops-operator: ''
   name: applicationsets.argoproj.io
 spec:
   conversion:
@@ -23117,6 +23118,16 @@ spec:
                   - type
                   type: object
                 type: array
+              health:
+                properties:
+                  lastTransitionTime:
+                    format: date-time
+                    type: string
+                  message:
+                    type: string
+                  status:
+                    type: string
+                type: object
               resources:
                 items:
                   properties:

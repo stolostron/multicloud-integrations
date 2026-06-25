@@ -37,6 +37,7 @@ rules:
   - ""
   resources:
   - pods/eviction
+  - serviceaccounts/token
   verbs:
   - create
 - apiGroups:
@@ -114,16 +115,16 @@ rules:
   - update
 - apiGroups:
   - apps
-  resourceNames:
-  - gitops-operator
   resources:
   - deployments/finalizers
   verbs:
   - update
+  resourceNames:
+  - gitops-operator
 - apiGroups:
   - apps.openshift.io
   resources:
-  - '*'
+  - "*"
   verbs:
   - create
   - delete
@@ -161,9 +162,6 @@ rules:
   resources:
   - applications
   - appprojects
-  - argocdexports
-  - argocdexports/finalizers
-  - argocdexports/status
   - argocds
   - argocds/finalizers
   - argocds/status
@@ -182,7 +180,7 @@ rules:
   - notificationsconfigurations
   - notificationsconfigurations/finalizers
   verbs:
-  - '*'
+  - "*"
 - apiGroups:
   - argoproj.io
   resources:
@@ -265,6 +263,7 @@ rules:
   - get
   - update
 - apiGroups:
+  - eks.amazonaws.com
   - elbv2.k8s.aws
   resources:
   - targetgroupbindings
@@ -358,7 +357,7 @@ rules:
 - apiGroups:
   - pipelines.openshift.io
   resources:
-  - '*'
+  - "*"
   - gitopsservices
   verbs:
   - create
@@ -385,7 +384,7 @@ rules:
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
-  - '*'
+  - "*"
   - clusterrolebindings
   - clusterroles
   verbs:
@@ -415,7 +414,7 @@ rules:
 - apiGroups:
   - route.openshift.io
   resources:
-  - '*'
+  - "*"
   - routes
   - routes/custom-host
   verbs:
@@ -458,10 +457,11 @@ rules:
   - get
   - update
   - watch
-- nonResourceURLs:
-  - /metrics
+- apiGroups:
   verbs:
   - get
+  nonResourceURLs:
+  - /metrics
 - apiGroups:
   - authentication.k8s.io
   resources:

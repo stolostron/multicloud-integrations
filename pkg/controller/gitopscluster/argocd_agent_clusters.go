@@ -44,12 +44,13 @@ import (
 
 const (
 	// ArgoCD agent constants
-	labelKeyClusterAgentMapping  = "argocd-agent.argoproj-labs.io/agent-name"
-	labelValueManagerName        = "argocd-agent"
-	principalCAName              = "argocd-agent-ca"
-	argoCDTypeLabel              = "argocd.argoproj.io/secret-type"
-	argoCDSecretTypeClusterValue = "cluster"
-	argoCDManagedByAnnotation    = "managed-by"
+	labelKeyClusterAgentMapping      = "argocd-agent.argoproj-labs.io/agent-name"
+	labelValueManagerName            = "argocd-agent"
+	principalCAName                  = "argocd-agent-ca"
+	argoCDTypeLabel                  = "argocd.argoproj.io/secret-type"
+	argoCDSecretTypeClusterValue     = "cluster"
+	argoCDManagedByAnnotation        = "managed-by"
+	annotationKeyAppSkipReconcile    = "argocd.argoproj.io/skip-reconcile"
 )
 
 // TLSClientConfig represents TLS client configuration for ArgoCD cluster secrets
@@ -266,6 +267,9 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 			Labels: map[string]string{
 				labelKeyClusterAgentMapping: clusterName,
 				argoCDTypeLabel:             argoCDSecretTypeClusterValue,
+			},
+			Annotations: map[string]string{
+				annotationKeyAppSkipReconcile: "true",
 			},
 			Config: ClusterConfig{
 				Username: clusterName,

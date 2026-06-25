@@ -521,6 +521,9 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 				klog.Warningf("[early-cert] failed to ensure resource proxy TLS cert for %s: %v — will retry later", instance.Namespace+"/"+instance.Name, err)
 			}
 		}
+		if err := r.ensureArgoCDAgentJWTSecret(argoNamespace); err != nil {
+			klog.Warningf("[early-cert] failed to ensure JWT secret for %s: %v — will retry later", instance.Namespace+"/"+instance.Name, err)
+		}
 	}
 
 	// Create default policy template
