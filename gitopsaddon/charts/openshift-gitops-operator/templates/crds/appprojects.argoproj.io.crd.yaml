@@ -4,6 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: appprojects.argoproj.io
     app.kubernetes.io/part-of: argocd
+    operators.coreos.com/openshift-gitops-operator.openshift-gitops-operator: ''
   name: appprojects.argoproj.io
 spec:
   conversion:
