@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1068,7 +1069,7 @@ func TestReconcileRequest(t *testing.T) {
 		})
 
 		assert.NoError(t, err)
-		assert.Equal(t, reconcile.Result{}, result)
+		assert.Equal(t, reconcile.Result{RequeueAfter: 5 * time.Minute}, result)
 	})
 }
 

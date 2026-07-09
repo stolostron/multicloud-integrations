@@ -606,6 +606,17 @@ func (r *ReconcileGitOpsCluster) createBlankClusterSecret(
 //     Application in the namespace explicitly references the old server URL via
 //     spec.destination.server. If any Application still points to that URL the secret is
 //     preserved to prevent ArgoCD from deleting or erroring on those Applications.
+//
+// In both cases, before the physical deletion the ArgoCD cluster-type label
+// (argocd.argoproj.io/secret-type=cluster) is removed from the old secret via a
+// patch. This prevents the ArgoCD ApplicationSet controller's clusterSecretEventHandler
+// from enqueueing ApplicationSets on the subsequent DELETE event before the new
+// secret has propagated into ArgoCD's informer cache. Without this step, the cluster
+// generator would momentarily see zero clusters for the managed cluster and delete the
+// corresponding ArgoCD Application (which then gets re-created, losing its sync history
+// and causing all managed resources to appear "untracked" until a manual sync).
+// If the de-label patch fails the deletion is skipped; the secret will be retried on
+// the next reconcile.
 func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secret, managedClusterName string) {
 	secretList := &v1.SecretList{}
 
@@ -674,8 +685,41 @@ func (r *ReconcileGitOpsCluster) cleanupOldArgoClusterSecrets(newSecret *v1.Secr
 			klog.Infof("Cleaning up old ArgoCD cluster secret %s/%s (replaced by %s)", oldSecret.Namespace, oldSecret.Name, newSecret.Name)
 		}
 
-		if err := r.Delete(context.TODO(), oldSecret); err != nil {
-			klog.Warningf("Failed to delete old ArgoCD cluster secret %s/%s: %v", oldSecret.Namespace, oldSecret.Name, err)
+		// De-label before deleting: remove the ArgoCD cluster-type label so that ArgoCD's
+		// clusterSecretEventHandler does not fire an ApplicationSet reconcile when the DELETE
+		// event is processed. Without this step the ApplicationSet cluster generator can
+		// momentarily see zero entries for the managed cluster (new secret not yet in cache)
+		// and delete the corresponding Application — causing all managed resources to lose
+		// their ArgoCD tracking until a manual sync.
+		deLabeled := oldSecret.DeepCopy()
+		delete(deLabeled.Labels, "argocd.argoproj.io/secret-type")
+		if patchErr := r.Patch(context.TODO(), deLabeled, client.MergeFrom(oldSecret)); patchErr != nil {
+			if !k8errors.IsNotFound(patchErr) {
+				klog.Warningf("Failed to de-label old ArgoCD cluster secret %s/%s before deletion (skipping to avoid race condition): %v",
+					oldSecret.Namespace, oldSecret.Name, patchErr)
+				continue
+			}
+			// Already gone — nothing to delete.
+			klog.Infof("Old ArgoCD cluster secret %s/%s already deleted", oldSecret.Namespace, oldSecret.Name)
+			continue
+		}
+
+		if err := r.Delete(context.TODO(), deLabeled); err != nil {
+			if !k8errors.IsNotFound(err) {
+				// Delete failed — restore the ArgoCD cluster-type label so the secret
+				// remains visible to future reconciles. Without this, the cleanup selector
+				// (argocd.argoproj.io/secret-type=cluster) would never find the secret
+				// again and it would be orphaned indefinitely.
+				relabeled := deLabeled.DeepCopy()
+				relabeled.Labels["argocd.argoproj.io/secret-type"] = "cluster"
+				if relabelErr := r.Patch(context.TODO(), relabeled, client.MergeFrom(deLabeled)); relabelErr != nil {
+					klog.Warningf("Failed to restore ArgoCD label on %s/%s after delete failure (secret may be orphaned): %v",
+						oldSecret.Namespace, oldSecret.Name, relabelErr)
+				} else {
+					klog.Warningf("Restored ArgoCD label on %s/%s after delete failure; will retry on next reconcile: %v",
+						oldSecret.Namespace, oldSecret.Name, err)
+				}
+			}
 		} else {
 			klog.Infof("Successfully cleaned up old ArgoCD cluster secret %s/%s", oldSecret.Namespace, oldSecret.Name)
 		}

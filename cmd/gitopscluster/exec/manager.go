@@ -76,7 +76,13 @@ func RunManager() {
 		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
 			opts.ByObject = map[client.Object]cache.ByObject{
 				&v1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{"apps.open-cluster-management.io/cluster-name,argocd.argoproj.io/secret-type": "cluster"}),
+					// Watch only ArgoCD cluster secrets (written by this controller into the
+					// ArgoCD server namespace). The original selector used a single key
+					// containing a comma — "cluster-name,argocd.argoproj.io/secret-type" —
+					// which is not a valid Kubernetes label key. We use the canonical ArgoCD
+					// cluster-secret label instead. MSA token secrets are watched through a
+					// separate cache in the controller's add() function (Fix 3).
+					Label: labels.SelectorFromSet(labels.Set{"argocd.argoproj.io/secret-type": "cluster"}),
 				},
 				&appsv1.Deployment{}: {
 					Label: labels.SelectorFromSet(labels.Set{"app.kubernetes.io/component": "principal"}),

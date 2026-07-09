@@ -3154,6 +3154,111 @@ func TestCleanupOldArgoClusterSecrets(t *testing.T) {
 	}
 }
 
+// TestCleanupOldArgoClusterSecrets_DeLabelBeforeDelete verifies that the
+// argocd.argoproj.io/secret-type label is removed from the old secret before it is
+// physically deleted. This is the fix for the race condition where ArgoCD's
+// clusterSecretEventHandler fires on the DELETE event before the new cluster secret
+// has propagated into ArgoCD's informer cache, causing the ApplicationSet cluster
+// generator to see zero clusters and delete the corresponding Application.
+func TestCleanupOldArgoClusterSecrets_DeLabelBeforeDelete(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme), "adding corev1 to scheme should succeed")
+
+	argoNs := "argocd"
+	clusterName := "test-cluster"
+	directURL := "https://api.test-cluster.example.com:6443"
+	proxyURL := "https://cluster-proxy.multicluster-engine.svc.cluster.local:9092/test-cluster"
+
+	// old secret that will be replaced (different name → triggers cleanup)
+	oldSecretName := "test-cluster-cluster-secret"
+	oldSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      oldSecretName,
+			Namespace: argoNs,
+			Labels: map[string]string{
+				"argocd.argoproj.io/secret-type":                 "cluster",
+				"apps.open-cluster-management.io/acm-cluster":    "true",
+				"apps.open-cluster-management.io/cluster-name":   clusterName,
+				"apps.open-cluster-management.io/cluster-server": "api.test-cluster.example.com",
+			},
+		},
+		Data: map[string][]byte{
+			"server": []byte(directURL),
+			"name":   []byte(clusterName),
+		},
+	}
+
+	// new secret (different name, different URL — would have triggered safe-delete check)
+	newSecretObj := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-application-manager-cluster-secret",
+			Namespace: argoNs,
+			Labels: map[string]string{
+				"argocd.argoproj.io/secret-type":               "cluster",
+				"apps.open-cluster-management.io/acm-cluster":  "true",
+				"apps.open-cluster-management.io/cluster-name": clusterName,
+			},
+		},
+		Data: map[string][]byte{
+			"server": []byte(proxyURL),
+			"name":   []byte(clusterName),
+		},
+	}
+
+	// Track Patch calls via a wrapper so we can assert the label was stripped.
+	type patchRecord struct {
+		name   string
+		labels map[string]string
+	}
+	var patchedSecrets []patchRecord
+
+	trackingClient := &patchTrackingClient{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(oldSecret, newSecretObj).
+			Build(),
+		onPatch: func(obj client.Object) {
+			s, ok := obj.(*v1.Secret)
+			if !ok {
+				return
+			}
+			labels := make(map[string]string)
+			for k, v := range s.GetLabels() {
+				labels[k] = v
+			}
+			patchedSecrets = append(patchedSecrets, patchRecord{name: s.Name, labels: labels})
+		},
+	}
+
+	reconciler := &ReconcileGitOpsCluster{Client: trackingClient}
+	reconciler.cleanupOldArgoClusterSecrets(newSecretObj, clusterName)
+
+	// Old secret must be gone
+	got := &v1.Secret{}
+	getErr := trackingClient.Get(context.TODO(), types.NamespacedName{Name: oldSecretName, Namespace: argoNs}, got)
+	assert.True(t, k8errors.IsNotFound(getErr), "old secret should be deleted after cleanup")
+
+	// The patch that stripped the label must have been recorded
+	require.Len(t, patchedSecrets, 1, "expected exactly one patch (de-label) before deletion")
+	assert.Equal(t, oldSecretName, patchedSecrets[0].name)
+	_, hasClusterTypeLabel := patchedSecrets[0].labels["argocd.argoproj.io/secret-type"]
+	assert.False(t, hasClusterTypeLabel,
+		"argocd.argoproj.io/secret-type label must be absent in the patch sent before deletion")
+}
+
+// patchTrackingClient wraps a client.Client and invokes onPatch for every Patch call.
+type patchTrackingClient struct {
+	client.Client
+	onPatch func(obj client.Object)
+}
+
+func (c *patchTrackingClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if c.onPatch != nil {
+		c.onPatch(obj)
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
 func TestTruncateLabelValue(t *testing.T) {
 	tests := []struct {
 		name     string
