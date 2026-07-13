@@ -1404,6 +1404,122 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 	}
 }
 
+// TestReconcileGitOpsCluster_RejectsLocalClusterInPlacement verifies that a GitOpsCluster whose
+// Placement resolves to include local-cluster is rejected outright (failed condition + error),
+// rather than only logging a warning and proceeding to create a conflicting second ArgoCD CR via
+// CreateArgoCDPolicy. This is a dedicated, standalone test (not part of the
+// TestReconcileGitOpsClusterAgentMode table above) because that table's driver only asserts the
+// ClustersRegistered condition, but this rejection happens earlier and sets ArgoCDPolicyReady
+// instead - shoehorning it into that shared driver would require reworking its assertion logic.
+func TestReconcileGitOpsCluster_RejectsLocalClusterInPlacement(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+	_ = spokeclusterv1.AddToScheme(scheme)
+	_ = clusterv1beta1.AddToScheme(scheme)
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = workv1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "test-ns",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+				ArgoNamespace: "argocd",
+			},
+			PlacementRef: &v1.ObjectReference{
+				Kind:       "Placement",
+				APIVersion: "cluster.open-cluster-management.io/v1beta1",
+				Name:       "test-placement",
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: func(b bool) *bool { return &b }(true),
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					// Agent mode deliberately disabled here: EnsureArgoCDAgentCASecret needs a
+					// real Kubernetes clientset the fake-client-only test setup doesn't provide
+					// (see the skipped "agent mode successfully creates cluster secrets" case in
+					// TestReconcileGitOpsClusterAgentMode above). The local-cluster-in-Placement
+					// rejection this test targets runs unconditionally, before any agent-specific
+					// logic, so non-agent mode still exercises it fully.
+					Enabled: func(b bool) *bool { return &b }(false),
+				},
+			},
+		},
+	}
+
+	existingObjects := []client.Object{
+		&gitOpsCluster,
+		&spokeclusterv1.ManagedCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
+		},
+		&spokeclusterv1.ManagedCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "local-cluster"},
+		},
+		&clusterv1beta1.Placement{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-placement",
+				Namespace: "test-ns",
+			},
+		},
+		&clusterv1beta1.PlacementDecision{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-placement-decision",
+				Namespace: "test-ns",
+				Labels: map[string]string{
+					"cluster.open-cluster-management.io/placement": "test-placement",
+				},
+			},
+			Status: clusterv1beta1.PlacementDecisionStatus{
+				Decisions: []clusterv1beta1.ClusterDecision{
+					{ClusterName: "cluster1"},
+					{ClusterName: "local-cluster"},
+				},
+			},
+		},
+		createTestArgoCDRedisSecret("argocd"),
+		createTestArgoCDJWTSecret("argocd"),
+		createTestArgoCDServerService("argocd"),
+		createTestArgoCDServerPod("argocd"),
+		createTestArgoCDAgentPrincipalService("argocd"),
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingObjects...).
+		WithStatusSubresource(&gitopsclusterV1beta1.GitOpsCluster{}).
+		Build()
+
+	reconciler := &ReconcileGitOpsCluster{Client: fakeClient}
+	orphanSecretsList := map[types.NamespacedName]string{}
+
+	gitOpsClusterFromClient := &gitopsclusterV1beta1.GitOpsCluster{}
+	require.NoError(t, fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name: gitOpsCluster.Name, Namespace: gitOpsCluster.Namespace,
+	}, gitOpsClusterFromClient))
+
+	_, err := reconciler.reconcileGitOpsCluster(context.TODO(), *gitOpsClusterFromClient, orphanSecretsList)
+	assert.Error(t, err, "reconcile must fail when the Placement resolves to include local-cluster")
+	assert.Contains(t, err.Error(), "local-cluster",
+		"error message should name local-cluster so operators can immediately identify the invalid Placement")
+
+	updated := &gitopsclusterV1beta1.GitOpsCluster{}
+	require.NoError(t, fakeClient.Get(context.TODO(), types.NamespacedName{
+		Name: gitOpsCluster.Name, Namespace: gitOpsCluster.Namespace,
+	}, updated))
+
+	condition := updated.GetCondition(gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady)
+	require.NotNil(t, condition, "ArgoCDPolicyReady condition should be set")
+	assert.Equal(t, string(metav1.ConditionFalse), string(condition.Status),
+		"ArgoCDPolicyReady must be False - the invalid local-cluster Placement must not be treated as a successful reconcile")
+	assert.Equal(t, gitopsclusterV1beta1.ReasonInvalidConfiguration, condition.Reason,
+		"Reason should be InvalidConfiguration, identifying this as a rejected Placement rather than a transient/infra failure")
+	assert.Contains(t, condition.Message, "local-cluster",
+		"condition message should name local-cluster so it's actionable directly from `kubectl get gitopscluster`")
+}
+
 // Helper functions for controller tests
 
 func createTestArgoCDRedisSecret(namespace string) *v1.Secret {

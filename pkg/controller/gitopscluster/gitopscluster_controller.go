@@ -1058,6 +1058,45 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			r.cleanupLegacyOLMAddOnTemplates(instance)
 		}
 
+		// local-cluster must never be selected by this GitOpsCluster's Placement: it already has
+		// its own ArgoCD instance (hosting the argocd-agent principal) and is never an
+		// addon-install target. If it's present here, CreateArgoCDPolicy below would deploy a
+		// second, conflicting ArgoCD CR into local-cluster's own openshift-gitops namespace - so
+		// reject the configuration outright instead of proceeding into a known-broken state.
+		for _, managedCluster := range managedClusters {
+			if !IsLocalCluster(managedCluster) {
+				continue
+			}
+
+			msg := fmt.Sprintf("GitOpsCluster %s/%s Placement selects local-cluster - this is not "+
+				"supported and would cause a conflicting second ArgoCD CR in local-cluster's "+
+				"openshift-gitops namespace. Exclude local-cluster from this GitOpsCluster's "+
+				"placementRef; use a separate Placement for ApplicationSets that need to "+
+				"target local-cluster.", instance.Namespace, instance.Name)
+			klog.Error(msg)
+
+			r.updateGitOpsClusterConditions(instance, "failed", msg,
+				map[string]ConditionUpdate{
+					gitopsclusterV1beta1.GitOpsClusterArgoCDPolicyReady: {
+						Status:  metav1.ConditionFalse,
+						Reason:  gitopsclusterV1beta1.ReasonInvalidConfiguration,
+						Message: msg,
+					},
+				})
+
+			err2 := r.Client.Status().Update(context.TODO(), instance)
+			if err2 != nil {
+				if isObjectGoneError(err2) {
+					klog.Infof("GitOpsCluster %s was deleted during reconcile, aborting", instance.Namespace+"/"+instance.Name)
+					return 0, nil
+				}
+				klog.Errorf("failed to update GitOpsCluster %s status after local-cluster Placement rejection: %s", instance.Namespace+"/"+instance.Name, err2)
+				return 3, err2
+			}
+
+			return 3, errors.New(msg)
+		}
+
 		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework
 		policySkipped := false
 		err = r.CreateArgoCDPolicy(instance)
@@ -1127,6 +1166,12 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		successCount := 0
 
 		for _, managedCluster := range managedClusters {
+			// local-cluster (the hub) already has GitOps operator + ArgoCD installed
+			// independently - it is never an addon-install target.
+			if IsLocalCluster(managedCluster) {
+				continue
+			}
+
 			clusterFailed := false
 
 			err = r.CreateAddOnDeploymentConfig(instance, managedCluster)

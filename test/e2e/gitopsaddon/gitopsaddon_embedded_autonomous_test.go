@@ -94,16 +94,20 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 		})
 	})
 
-	Context("Local-Cluster Verification", func() {
-		It("should create ManagedClusterAddOn for local-cluster", func() {
-			verifyLocalClusterAddon(5 * time.Minute)
+	// Autonomous mode only affects how Applications are dispatched to the SPOKE (via Policy,
+	// not the ApplicationSet/principal pipeline) - it has no bearing on local-cluster, which is
+	// never addon-installed or agent-routed regardless of mode. This just confirms hybrid mode's
+	// local-cluster registration is unaffected by the spoke's agent mode setting.
+	Context("Local-Cluster Verification (Hybrid Mode)", func() {
+		It("should register local-cluster as a plain in-cluster ArgoCD secret (no agent routing)", func() {
+			verifyLocalClusterSecret(5 * time.Minute)
 		})
 
-		It("should verify autonomous agent infrastructure on local-cluster (hub)", func() {
-			verifyLocalClusterAutonomousInfrastructure(8 * time.Minute)
+		It("should NOT have a duplicate acm-openshift-gitops ArgoCD instance anywhere on hub", func() {
+			verifyNoDuplicateArgoCDOnHub()
 		})
 
-		It("should have no cross-namespace conflicts on local-cluster", func() {
+		It("should have no addon-installed application controller anywhere on hub", func() {
 			verifyLocalClusterEnvironmentHealth()
 		})
 	})
@@ -119,16 +123,12 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 	})
 
 	Context("Cleanup Verification", func() {
-		It("should have removed GitOpsCluster, MCA (spoke), and MCA (local-cluster) from hub", func() {
+		It("should have removed GitOpsCluster and MCA (spoke) from hub", func() {
 			verifyHubCleanup(opts)
 		})
 
 		It("should have removed ArgoCD CR and operator from spoke", func() {
 			verifySpokeCleanup()
-		})
-
-		It("should have removed ArgoCD CR from local-cluster namespace on hub", func() {
-			verifyLocalClusterCleanup()
 		})
 	})
 })
