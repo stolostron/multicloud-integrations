@@ -197,11 +197,13 @@ func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) 
 		argoCDAgentEnabled = *gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent.Enabled
 	}
 
-	// Use a ConfigurationPolicy template to deploy the ArgoCD CR to the correct namespace:
-	// - local-cluster (hub): deploy to "local-cluster" namespace to avoid conflict with
-	//   the existing "openshift-gitops" ArgoCD CR managed by the hub's GitOps operator
-	// - all other clusters: deploy to "openshift-gitops" namespace (standard location)
-	namespaceTemplate := `'{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}'`
+	// Use a ConfigurationPolicy template to deploy the ArgoCD CR to the standard
+	// "openshift-gitops" namespace (or the GitOpsCluster's effective ArgoCD namespace).
+	// This Policy's Placement must never select local-cluster: local-cluster already has its
+	// own ArgoCD instance (the one hosting the argocd-agent principal) and reconciles hub-
+	// targeted Applications directly via that instance's application controller (hybrid mode) -
+	// it is not an addon-install target (see IsLocalCluster call sites).
+	namespaceTemplate := fmt.Sprintf("'%s'", GetEffectiveArgoNamespace(&gitOpsCluster))
 
 	yamlString := fmt.Sprintf(`
 apiVersion: policy.open-cluster-management.io/v1
@@ -310,10 +312,7 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 	// Principal and agent must agree on this setting because it controls the Redis key separator
 	// used for resource tree data ('_' when enabled, '|' when disabled). A mismatch causes the
 	// ArgoCD UI live manifest to fail with "Resource not found in cluster" and agent logs showing
-	// "unexpected key format, missing '_'". For local-cluster, DBM on the agent is safe: the
-	// agent's getTargetNamespaceForApp() still returns its own namespace ("local-cluster") for
-	// the Application copy because the agent's destination is the in-cluster server URL, not the
-	// hub cluster name - so apps are stored in "local-cluster" regardless of DBM setting.
+	// "unexpected key format, missing '_'".
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 		agentConfig := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
 		serverAddress := agentConfig.ServerAddress

@@ -75,6 +75,9 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					Namespace: "test-ns",
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						GitOpsOperatorImage: "test-operator-image:latest",
 						ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
@@ -117,7 +120,11 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "local-cluster by name gets ARGOCD_NAMESPACE set to local-cluster",
+			// local-cluster is never passed to CreateAddOnDeploymentConfig in production (the
+			// reconcile loop skips it via IsLocalCluster), but this asserts the function itself
+			// no longer special-cases it if it were ever called directly - always the standard
+			// GitOps namespace, matching every other cluster.
+			name: "local-cluster by name still gets standard ARGOCD_NAMESPACE (no special-casing)",
 			managedCluster: &spokeclusterv1.ManagedCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "local-cluster"},
 			},
@@ -127,6 +134,9 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					Namespace: "test-ns",
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						GitOpsOperatorImage: "test-operator-image:latest",
 					},
@@ -145,11 +155,11 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					varMap[variable.Name] = variable.Value
 				}
 
-				assert.Equal(t, "local-cluster", varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should be set to local-cluster")
+				assert.Equal(t, utils.GitOpsNamespace, varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should always be the standard GitOps namespace")
 			},
 		},
 		{
-			name: "local-cluster by label gets ARGOCD_NAMESPACE set to cluster name",
+			name: "cluster with local-cluster label still gets standard ARGOCD_NAMESPACE (no special-casing)",
 			managedCluster: &spokeclusterv1.ManagedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   "hub-alt-ns",
@@ -162,6 +172,9 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					Namespace: "test-ns",
 				},
 				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: utils.GitOpsNamespace,
+					},
 					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
 						GitOpsOperatorImage: "test-operator-image:latest",
 					},
@@ -180,7 +193,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					varMap[variable.Name] = variable.Value
 				}
 
-				assert.Equal(t, "hub-alt-ns", varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should be the cluster name for label-identified hub")
+				assert.Equal(t, utils.GitOpsNamespace, varMap["ARGOCD_NAMESPACE"], "ARGOCD_NAMESPACE should always be the standard GitOps namespace")
 			},
 		},
 		{

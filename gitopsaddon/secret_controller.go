@@ -51,9 +51,10 @@ const (
 	SecretResyncInterval = 5 * time.Minute
 )
 
-// getTargetNamespace returns the namespace where the ArgoCD CR lives.
-// For local-cluster (hub), this is the cluster's own namespace (e.g. "local-cluster").
-// For remote clusters, this defaults to "openshift-gitops".
+// getTargetNamespace returns the namespace where the ArgoCD CR lives. Defaults to
+// "openshift-gitops"; can be overridden via ARGOCD_NAMESPACE for a custom ArgoCD namespace. The
+// addon never runs on local-cluster (the hub), so this is always a real managed cluster's ArgoCD
+// namespace.
 func getTargetNamespace() string {
 	if ns := strings.TrimSpace(os.Getenv("ARGOCD_NAMESPACE")); ns != "" {
 		return ns

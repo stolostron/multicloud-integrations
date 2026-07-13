@@ -82,8 +82,12 @@ func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	assert.Contains(t, yamlString, "remediationAction: enforce")
 	// ArgoCD CR should be orphaned when policy is deleted (cleanup job handles deletion)
 	assert.Contains(t, yamlString, "pruneObjectBehavior: None")
-	// ArgoCD namespace should use a hub template to deploy to local-cluster ns on hub
-	assert.Contains(t, yamlString, `{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}`)
+	// ArgoCD namespace is always the effective ArgoCD namespace (openshift-gitops here) - no
+	// per-cluster branching for local-cluster (hybrid mode: local-cluster is never a Policy target).
+	assert.Contains(t, yamlString, "namespace: 'openshift-gitops'",
+		"hybrid mode must consistently deploy the ArgoCD CR into the effective ArgoCD namespace (openshift-gitops here)")
+	assert.NotContains(t, yamlString, "local-cluster",
+		"the Policy must never target local-cluster - it already has its own ArgoCD instance and is not an addon-install target")
 }
 
 func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
@@ -111,8 +115,9 @@ func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
 	assert.Contains(t, yamlString, "kind: AppProject")
 	assert.Contains(t, yamlString, "name: default")
 
-	// AppProject namespace should also use the hub template (same as ArgoCD CR namespace)
-	assert.Contains(t, yamlString, `{{hub or (and (eq .ManagedClusterName "local-cluster") "local-cluster") "openshift-gitops" hub}}`)
+	// AppProject namespace should also be the effective ArgoCD namespace (same as ArgoCD CR namespace)
+	assert.Contains(t, yamlString, "namespace: 'openshift-gitops'",
+		"hybrid mode must consistently deploy the AppProject into the effective ArgoCD namespace (openshift-gitops here)")
 
 	// AppProject should have permissive spec for default project
 	assert.Contains(t, yamlString, "clusterResourceWhitelist:")

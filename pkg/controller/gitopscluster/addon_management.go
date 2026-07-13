@@ -47,13 +47,7 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		utils.EnvArgoCDAgentEnabled: "false", // Default value
 	}
 
-	// For local-cluster (by name or label), ArgoCD lives in the cluster's own
-	// namespace; for remote clusters it lives in openshift-gitops.
-	if IsLocalCluster(managedCluster) {
-		managedVariables["ARGOCD_NAMESPACE"] = namespace
-	} else {
-		managedVariables["ARGOCD_NAMESPACE"] = utils.GitOpsNamespace
-	}
+	managedVariables["ARGOCD_NAMESPACE"] = GetEffectiveArgoNamespace(gitOpsCluster)
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
 	r.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)

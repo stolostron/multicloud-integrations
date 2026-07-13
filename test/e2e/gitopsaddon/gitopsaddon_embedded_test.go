@@ -89,20 +89,16 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 		})
 	})
 
-	Context("Local-Cluster Verification", func() {
-		It("should create ManagedClusterAddOn for local-cluster", func() {
-			verifyLocalClusterAddon(5 * time.Minute)
-		})
-
-		It("should deploy ArgoCD CR in local-cluster namespace on hub", func() {
-			verifyLocalClusterArgoCDDeployed(8 * time.Minute)
-		})
-
-		It("should NOT have duplicate acm-openshift-gitops in openshift-gitops on hub", func() {
+	// This scenario runs with agentEnabled=false, so the controller never calls
+	// ensureLocalClusterSecret (only CreateArgoCDAgentClusters does, gated on
+	// ArgoCDAgent.Enabled) - there is no cluster-local-cluster secret to verify here.
+	// See gitopsaddon_embedded_agent_test.go / gitopsaddon_embedded_autonomous_test.go for that.
+	Context("Local-Cluster Verification (Hybrid Mode)", func() {
+		It("should NOT have a duplicate acm-openshift-gitops ArgoCD instance anywhere on hub", func() {
 			verifyNoDuplicateArgoCDOnHub()
 		})
 
-		It("should deploy and sync guestbook on local-cluster", func() {
+		It("should deploy and sync guestbook on local-cluster via the hub's own application controller", func() {
 			verifyLocalClusterGuestbook(false, 10*time.Minute)
 		})
 
@@ -110,7 +106,7 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 			verifyLocalClusterControllerNamespace(false)
 		})
 
-		It("should have no cross-namespace conflicts on local-cluster", func() {
+		It("should have no addon-installed application controller anywhere on hub", func() {
 			verifyLocalClusterEnvironmentHealth()
 		})
 	})
@@ -126,16 +122,12 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 	})
 
 	Context("Cleanup Verification", func() {
-		It("should have removed GitOpsCluster, MCA (spoke), and MCA (local-cluster) from hub", func() {
+		It("should have removed GitOpsCluster and MCA (spoke) from hub", func() {
 			verifyHubCleanup(opts)
 		})
 
 		It("should have removed ArgoCD CR and operator from spoke", func() {
 			verifySpokeCleanup()
-		})
-
-		It("should have removed ArgoCD CR from local-cluster namespace on hub", func() {
-			verifyLocalClusterCleanup()
 		})
 	})
 })
