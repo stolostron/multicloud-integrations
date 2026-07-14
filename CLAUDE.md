@@ -23,17 +23,19 @@ kubectl get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerc
 ### Agent Mode Setup Order (skip a step = broken)
 
 1. Fix pull secret chain (above) — do this BEFORE anything else for non-OCP clusters
-2. Install OpenShift GitOps operator on hub (OLM, `openshift-gitops-operator` ns, `ARGOCD_CLUSTER_CONFIG_NAMESPACES=openshift-gitops,local-cluster`, `DISABLE_DEFAULT_ARGOCD_INSTANCE=false`)
+2. Install OpenShift GitOps operator on hub (OLM, `openshift-gitops-operator` ns, `ARGOCD_CLUSTER_CONFIG_NAMESPACES=openshift-gitops`, `DISABLE_DEFAULT_ARGOCD_INSTANCE=false`)
 3. Wait for ArgoCD server pod Running in `openshift-gitops`
-4. Patch ArgoCD CR: `principal.enabled: true`, `destinationBasedMapping: true`, `controller.enabled: false`, `sourceNamespaces: ["*"]`
+4. Patch ArgoCD CR: `principal.enabled: true`, `destinationBasedMapping: true`, `controller.enabled: true`, `sourceNamespaces: ["*"]` — **hybrid mode**: the app-controller stays enabled and coexists with the principal in the same namespace/instance; it never conflicts because agent-routed cluster secrets carry `skip-reconcile: "true"` (see "Hybrid Mode" below)
 5. Create `ManagedClusterSetBinding` for `global` in `openshift-gitops`
 6. Patch default AppProject: `destinations: [{name:"*", namespace:"*", server:"*"}]` — **`name:"*"` is critical**, without it principal won't propagate AppProjects
 7. Apply addon templates: `kubectl apply -f gitopsaddon/addonTemplates/addonTemplates.yaml`
-8. Create Placement + GitOpsCluster with `argoCDAgent.enabled: true, mode: managed`
+8. Create Placement (excluding `local-cluster`) + GitOpsCluster with `argoCDAgent.enabled: true, mode: managed` — `local-cluster` must never be in this Placement; it's not an addon-install target (it already has its own ArgoCD instance)
 9. Wait for GitOpsCluster `Ready=True` and Policy `Compliant`
 10. **Patch Policy with cluster-admin RBAC for app-controller BEFORE creating AppSet** — if apps sync before RBAC exists, ArgoCD exhausts 5 retries and gives up permanently
-11. Create ApplicationSet
-12. Verify apps Synced on hub, guestbook pods on spokes
+11. **Grant the hub's own app-controller ServiceAccount (`openshift-gitops-argocd-application-controller`) cluster-admin too** — needed for any Application targeting `local-cluster`/in-cluster to create resources in its destination namespace; the operator's default ClusterRole is read-only outside `openshift-gitops` itself. Do this before creating the AppSet for the same reason as step 10 (5-retry exhaustion).
+12. If ApplicationSets should also target `local-cluster` (hybrid mode), create a **separate** Placement that includes `local-cluster` and point the AppSet's `clusterDecisionResource` generator at it — never reuse the addon-install Placement from step 8 for this
+13. Create ApplicationSet(s)
+14. Verify apps Synced on hub (including any `local-cluster`-targeted app, reconciled directly by the hub's own app-controller) and guestbook pods on spokes
 
 ### Kind Cluster Import Order
 
@@ -65,8 +67,7 @@ Two components from the same image (`quay.io/stolostron/multicloud-integrations`
 ```bash
 make build                                    # Build all binaries
 make build-images                             # Build container images
-make ensure-kubebuilder-tools                 # Required before unit tests
-make test                                     # Unit tests
+make test                                     # Unit tests (self-provisions envtest/kubebuilder assets via setup-envtest)
 make lint                                     # Linting
 make generate                                 # DeepCopy methods after API changes
 make manifests                                # CRD manifests after RBAC/CRD annotation changes
@@ -82,10 +83,10 @@ make clean-e2e                                # Delete Kind clusters
 ## Agent Mode Setup — Full YAML
 
 ```bash
-# 1. Configure hub ArgoCD as principal
+# 1. Configure hub ArgoCD as principal (hybrid mode: controller stays enabled)
 kubectl patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{
   "spec": {
-    "controller": {"enabled": false},
+    "controller": {"enabled": true},
     "argoCDAgent": {
       "principal": {
         "enabled": true,
@@ -187,7 +188,34 @@ kubectl patch policy mc-gitops-agent-argocd-policy -n openshift-gitops --type=js
   }}
 ]'
 
-# 8. Create ApplicationSet (AFTER RBAC is in place)
+# 8. Grant the hub's own app-controller RBAC too (needed for local-cluster/in-cluster targets) —
+# DO THIS BEFORE creating any AppSet that targets local-cluster, same 5-retry-exhaustion reason.
+kubectl create clusterrolebinding openshift-gitops-appcontroller-cluster-admin \
+  --clusterrole=cluster-admin \
+  --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller
+
+# 9. (Hybrid mode only) Create a SEPARATE Placement that includes local-cluster, used only by
+# ApplicationSets that need to target it. Never add local-cluster to "agent-placement" above.
+kubectl apply -f - <<'EOF'
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: agent-placement-appset
+  namespace: openshift-gitops
+spec:
+  clusterSets: [global]
+  predicates:
+  - requiredClusterSelector:
+      labelSelector:
+        matchExpressions:
+        - key: name
+          operator: In
+          values: [local-cluster]   # plus every managed cluster name you want the AppSet to target
+EOF
+
+# 10. Create ApplicationSet (AFTER RBAC is in place). Point at "agent-placement-appset" if it
+# should also generate an Application for local-cluster; point at "agent-placement" if it should
+# stay agent-spokes-only.
 kubectl apply -f - <<'EOF'
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -200,7 +228,7 @@ spec:
       configMapRef: acm-placement
       labelSelector:
         matchLabels:
-          cluster.open-cluster-management.io/placement: agent-placement
+          cluster.open-cluster-management.io/placement: agent-placement-appset
       requeueAfterSeconds: 30
   template:
     metadata:
@@ -351,6 +379,42 @@ OCP and non-OCP managed clusters run **different operator versions**:
 | AppProject in Policy | Not included (principal propagates) | Included |
 | Best for | Centralized control | App of Apps, GitOps-first |
 
+### Hybrid Mode (hub app-controller + argocd-agent principal, same instance)
+
+The hub runs a **single** ArgoCD instance in `openshift-gitops` that hosts both the argocd-agent
+principal (dispatching to managed clusters) and its own application controller (`controller.enabled:
+true`) reconciling anything targeting `local-cluster`/in-cluster directly. There is no separate
+ArgoCD instance or namespace for the hub — that legacy design (a dedicated `local-cluster`
+namespace with its own agent-connected ArgoCD instance) has been removed.
+
+- **Isolation mechanism**: every agent-routed cluster secret (`cluster-<name>` for real spokes)
+  carries `argocd.argoproj.io/skip-reconcile: "true"`, so the hub's app-controller ignores anything
+  dispatched to an agent and lets the principal own it exclusively. `local-cluster`'s own cluster
+  secret (`cluster-local-cluster`, created by `ensureLocalClusterSecret` in
+  `argocd_agent_clusters.go`) carries **no** skip-reconcile and **no** agent-name label — it's a
+  plain cluster secret pointing at `https://kubernetes.default.svc`, so the hub app-controller
+  reconciles it like any other in-cluster ArgoCD destination.
+- **`local-cluster` is never an addon-install target**: it already has GitOps operator + ArgoCD
+  installed independently (a prerequisite, not addon-managed). The `GitOpsCluster`'s own
+  `placementRef` must always exclude `local-cluster` — the addon-install loop
+  (`CreateAddOnDeploymentConfig`/`EnsureManagedClusterAddon`) and the ArgoCD-CR-enforcing Policy
+  both skip/must never select it (`IsLocalCluster` guards this in
+  `gitopscluster_controller.go`/`argocd_agent_clusters.go`; a warning is logged if the Placement
+  ever resolves to include it, since the Policy would otherwise deploy a second, conflicting
+  ArgoCD CR into `openshift-gitops`).
+- **ApplicationSets targeting `local-cluster`**: use a Placement **separate** from the
+  GitOpsCluster's own `placementRef` — this one is free to include `local-cluster` alongside real
+  managed clusters. The generated Application resolves `destination: {name: 'local-cluster'}`
+  against the plain `cluster-local-cluster` secret and gets created in `openshift-gitops`,
+  reconciled by the hub's app-controller.
+- **RBAC**: the operator's default ClusterRole for the app-controller is read-only outside
+  `openshift-gitops` itself. Any Application targeting `local-cluster` needs the hub
+  app-controller's own ServiceAccount (`openshift-gitops-argocd-application-controller`) granted
+  elevated RBAC (e.g. `cluster-admin`, matching the same pattern already used for spoke
+  app-controllers) in whatever destination namespaces those apps create — do this **before**
+  creating the AppSet, or the first sync attempt exhausts ArgoCD's 5-retry budget and self-heal
+  won't retry a revision that already failed that many times.
+
 ### Package Structure
 
 - `pkg/controller/gitopscluster/` — Hub controller (reconciler, policy gen, certs, addon mgmt, agent clusters)
@@ -477,11 +541,20 @@ GitHub Actions (`.github/workflows/e2e.yml`): `e2e` (cluster-import), `e2e-gitop
 - **CSR accumulation**: Rapid deploy/delete cycles exhaust CSR quota. Fix: `kubectl get csr -o name | grep gitops-addon | xargs kubectl delete`.
 - **ACM 2.16→2.17 CRB roleRef immutability**: `deleteStaleClusterRoleBinding()` self-heals at startup.
 - **Addon agent race during cleanup**: `scaleDownAddonAgent()` scales to 0 before cleanup Job runs.
-- **local-cluster guestbook**: Agent identity check fails because hub-side Application in `openshift-gitops` conflicts with dispatched copy. Known limitation, tested as warning not failure.
+- **local-cluster guestbook (hybrid mode)**: local-cluster is never agent-dispatched, so there is no hub-vs-spoke identity conflict to work around. Its Application is verified and finalized normally through the hub's own application controller, same as any other in-cluster ArgoCD destination - see "Deploy/Delete Cycle Testing" below.
 
 ## Deploy/Delete Cycle Testing
 
-`gitopsaddon/test-cycle.sh` — automated deploy/verify/delete cycling.
+`gitopsaddon/test-cycle.sh` — automated deploy/verify/delete cycling against **real** clusters
+(not the Kind-only `make test-local-e2e-*` targets). This is the primary way to validate hybrid
+mode end-to-end: it always includes `local-cluster` in the ApplicationSet target (via a dedicated
+`cycle-agent-appset-placement`, kept separate from the addon-install `cycle-agent-placement` which
+still excludes `local-cluster`), verifies the `cluster-local-cluster` secret shape and that the
+generated app reconciles via the hub's own application controller, and tears everything down with
+no manual finalizer stripping anywhere in the script: it deletes the ApplicationSet first (per the
+"Cleanup (Manual Deletion Order)" section above), while agents and the hub app-controller are still
+connected, and waits for every generated Application — spoke-managed and `local-cluster` alike — to
+finalize naturally before touching GitOpsCluster/Policy/MCAs.
 
 ```bash
 HUB_KUBECONFIG=/path/to/hub \
@@ -490,6 +563,22 @@ MANAGED_CLUSTERS="eks-cluster1:/path/to/eks.kc,ocp-cluster-name:/path/to/ocp.kc"
 ```
 
 Optional env vars: `FORCE_CLEAN_FIRST` (true), `WAIT_DEPLOY_SECS` (600), `WAIT_CLEANUP_SECS` (600), `HUB_CONTROLLER_NS` (ocm).
+
+Prerequisite (one-time, per hub): the hub's own ArgoCD app-controller ServiceAccount needs
+elevated RBAC to manage the `local-cluster` hybrid app's destination namespace — see "Hybrid Mode"
+above. `test-cycle.sh` creates this itself (`ensure_hub_appcontroller_rbac`) so no manual step is
+needed for the script specifically, but real (non-test) hybrid-mode setups must do this too.
+
+### Building/pushing images from a Flatpak-sandboxed shell (e.g. this coding agent's Bash tool)
+
+If `docker`/`podman`/`kind`/`go` aren't visible in the shell but ARE installed on the real host,
+the shell is likely running inside a Flatpak sandbox layer (check `cat /etc/os-release` — a
+`Freedesktop SDK ... (Flatpak runtime)` result confirms it). Escape it with
+`flatpak-spawn --host <command>` to run the command on the real host instead — this reaches the
+host's actual `podman`, `kind`, and `go` installs, registry credentials, and any existing local
+Kind clusters. Plain `kubectl` against real remote clusters typically works fine without the
+escape hatch (outbound network is already shared); use `flatpak-spawn --host` for anything that
+needs the host's container/VM tooling specifically.
 
 ## Development Workflow
 
@@ -505,14 +594,15 @@ Optional env vars: `FORCE_CLEAN_FIRST` (true), `WAIT_DEPLOY_SECS` (600), `WAIT_C
 1. **Policy is user-owned**: Controller recreates deleted Policies (unless `skip-argocd-policy`), may patch `argoCDAgent.agent.image` during drift heal, but doesn't overwrite other customizations.
 2. **Cleanup order matters**: GitOpsCluster → Policy → MCAs (strict order or resources get recreated).
 3. **GitOpsCluster deletion is a no-op**: No finalizer, no cascade.
-4. **Local-cluster agent namespace**: Uses `local-cluster`, not `openshift-gitops`.
+4. **`local-cluster` must stay out of the GitOpsCluster's own `placementRef`**: it's never an
+   addon-install target (hybrid mode) — it already has its own ArgoCD instance. A separate
+   Placement, used only by ApplicationSets, may include it.
 5. **OLM mode OCP only**: Non-OCP uses embedded Helm chart.
-6. **RBAC before first app sync**: ArgoCD retry limit (5) means stuck apps if RBAC missing. Delete spoke app copies to recover.
+6. **RBAC before first app sync**: ArgoCD retry limit (5) means stuck apps if RBAC missing. Delete spoke app copies to recover. This applies to the hub's own app-controller too for any app targeting `local-cluster`.
 7. **Non-OCP pull secret chain**: `multiclusterhub-operator-pull-secret` must have `registry.redhat.io` in BOTH namespaces.
 8. **OCP OLM timing**: 30-120s. Use 600s timeouts.
 9. **DBM must match principal and agent**: Mismatched = "Resource not found" in UI.
 10. **Agent SA view ClusterRole**: Not auto-provisioned. Add manually or via Policy.
-11. **Autonomous on local-cluster**: Agent spec transforms conflict with Policy. Use managed mode for hub.
 
 ## Container Registry
 

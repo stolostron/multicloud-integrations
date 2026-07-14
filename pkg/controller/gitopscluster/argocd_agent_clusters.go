@@ -126,6 +126,103 @@ func (r *ReconcileGitOpsCluster) deleteBlankClusterSecretsForCluster(
 	return nil
 }
 
+// inClusterServerURL is the well-known API server address ArgoCD treats specially: whenever a
+// cluster secret's server matches this value, ArgoCD uses its own in-cluster service account
+// credentials rather than the secret's config, regardless of the config's contents.
+const inClusterServerURL = "https://kubernetes.default.svc"
+
+// findLocalCluster returns the ManagedCluster representing the hub itself. The hub's identity is
+// authoritatively determined by IsLocalCluster - primarily the "local-cluster: true" label, with
+// the conventional "local-cluster" object name as a secondary signal. The object's Name is NOT
+// assumed to be "local-cluster": some deployments label a differently-named ManagedCluster as the
+// hub, and ApplicationSets will reference whatever name the ManagedCluster actually has.
+func (r *ReconcileGitOpsCluster) findLocalCluster(ctx context.Context) (*spokeclusterv1.ManagedCluster, error) {
+	mcList := &spokeclusterv1.ManagedClusterList{}
+	if err := r.List(ctx, mcList); err != nil {
+		return nil, fmt.Errorf("failed to list ManagedClusters: %w", err)
+	}
+
+	for i := range mcList.Items {
+		if IsLocalCluster(&mcList.Items[i]) {
+			return &mcList.Items[i], nil
+		}
+	}
+
+	return nil, nil
+}
+
+// ensureLocalClusterSecret registers local-cluster (the hub) as a plain ArgoCD cluster secret
+// pointing at the in-cluster API server. Unlike agent-routed cluster secrets, this one carries no
+// agent-name label, no skip-reconcile annotation, and no mTLS client cert: local-cluster is not
+// behind the argocd-agent principal/resource-proxy, it's reconciled directly by the hub's own
+// ArgoCD application controller. This lets ApplicationSets use the same `destination: {name:
+// '{{name}}'}` templating for local-cluster as they do for real spokes - which requires using the
+// hub ManagedCluster's actual Name (see findLocalCluster), not an assumed "local-cluster" string.
+//
+// This is unconditional and independent of the GitOpsCluster's Placement/managedClusters list -
+// local-cluster must never appear in that Placement (see CreateArgoCDPolicy), so it can't rely on
+// the same per-managed-cluster loop agent clusters go through.
+func (r *ReconcileGitOpsCluster) ensureLocalClusterSecret(argoNamespace string, orphanSecretsList map[types.NamespacedName]string) error {
+	localCluster, err := r.findLocalCluster(context.TODO())
+	if err != nil {
+		return fmt.Errorf("failed to find local-cluster: %w", err)
+	}
+
+	if localCluster == nil {
+		return fmt.Errorf("no ManagedCluster identified as local-cluster (name \"local-cluster\" or " +
+			"\"local-cluster: true\" label) - cannot register the in-cluster ArgoCD secret")
+	}
+
+	localClusterName := localCluster.Name
+	secretName := fmt.Sprintf("cluster-%s", localClusterName)
+	secretObjectKey := types.NamespacedName{Name: secretName, Namespace: argoNamespace}
+
+	delete(orphanSecretsList, secretObjectKey)
+
+	existingSecret := &v1.Secret{}
+	err = r.Get(context.TODO(), secretObjectKey, existingSecret)
+	secretExists := err == nil
+
+	if err != nil && !k8errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check existing local-cluster secret: %w", err)
+	}
+
+	newSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: argoNamespace,
+			Labels: map[string]string{
+				argoCDTypeLabel: argoCDSecretTypeClusterValue,
+			},
+		},
+		Type: v1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"name":   []byte(localClusterName),
+			"server": []byte(inClusterServerURL),
+			"config": []byte("{}"),
+		},
+	}
+
+	if !secretExists {
+		if err := r.Create(context.TODO(), newSecret); err != nil {
+			return fmt.Errorf("failed to create local-cluster secret %s: %w", secretName, err)
+		}
+
+		klog.Infof("Created local-cluster ArgoCD cluster secret %s (in-cluster, no agent routing)", secretName)
+
+		return nil
+	}
+
+	newSecret.ResourceVersion = existingSecret.ResourceVersion
+	if err := r.Update(context.TODO(), newSecret); err != nil {
+		return fmt.Errorf("failed to update local-cluster secret %s: %w", secretName, err)
+	}
+
+	klog.V(2).Infof("Updated local-cluster ArgoCD cluster secret %s", secretName)
+
+	return nil
+}
+
 // CreateArgoCDAgentClusters creates ArgoCD cluster secrets for each managed cluster using ArgoCD agent configuration
 func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 	gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster,
@@ -138,6 +235,12 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 
 	if argoNamespace == "" {
 		return fmt.Errorf("ArgoCDnamespace must not be empty")
+	}
+
+	// local-cluster is never agent-routed - it's registered as a plain in-cluster secret,
+	// independent of whatever the Placement/managedClusters list contains.
+	if err := r.ensureLocalClusterSecret(argoNamespace, orphanSecretsList); err != nil {
+		return fmt.Errorf("failed to ensure local-cluster secret: %w", err)
 	}
 
 	// Determine the server URL strategy for cluster secrets.
@@ -182,6 +285,12 @@ func (r *ReconcileGitOpsCluster) CreateArgoCDAgentClusters(
 	}
 
 	for _, managedCluster := range managedClusters {
+		// local-cluster is registered above via ensureLocalClusterSecret, not as an
+		// agent-routed cluster - skip it here even if it's present in managedClusters.
+		if IsLocalCluster(managedCluster) {
+			continue
+		}
+
 		clusterName := managedCluster.Name
 
 		// Validate cluster name
