@@ -22,6 +22,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -48,11 +49,16 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 	caCert, caKey, caPEM := generateTestCACertificate(t)
 
 	tests := []struct {
-		name                 string
-		gitOpsCluster        *gitopsclusterV1beta1.GitOpsCluster
-		managedClusters      []*spokeclusterv1.ManagedCluster
-		orphanSecretsList    map[types.NamespacedName]string
-		existingObjects      []client.Object
+		name              string
+		gitOpsCluster     *gitopsclusterV1beta1.GitOpsCluster
+		managedClusters   []*spokeclusterv1.ManagedCluster
+		orphanSecretsList map[types.NamespacedName]string
+		existingObjects   []client.Object
+		// localClusterObject overrides the ManagedCluster ensureLocalClusterSecret discovers via
+		// IsLocalCluster (List + label/name check). Defaults to a standard-named "local-cluster"
+		// object with the "local-cluster: true" label when nil - override it to exercise a hub
+		// identified only by the label under a different object name.
+		localClusterObject   *spokeclusterv1.ManagedCluster
 		expectedError        bool
 		expectedSecretsCount int
 		validateFunc         func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string)
@@ -587,7 +593,11 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			},
 		},
 		{
-			name: "local-cluster by name gets cluster secret",
+			// local-cluster is never agent-routed: it's registered once, unconditionally, as a
+			// plain in-cluster secret by ensureLocalClusterSecret (always named
+			// "cluster-local-cluster") - it must NOT also get a per-cluster-name agent secret
+			// even if it's present in managedClusters.
+			name: "local-cluster by name gets the generic in-cluster secret, not an agent secret",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -622,23 +632,32 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
 			},
 			expectedError:        false,
-			expectedSecretsCount: 2,
+			expectedSecretsCount: 1, // remote-cluster only; cluster-local-cluster is checked separately
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
 				localSecret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-local-cluster", Namespace: "argocd"}, localSecret)
-				assert.NoError(t, err, "Cluster secret should be created for local-cluster")
+				require.NoError(t, err, "generic in-cluster secret should be created for local-cluster")
 				assert.Equal(t, "cluster", localSecret.Labels[argoCDTypeLabel])
-				assert.Equal(t, "local-cluster", localSecret.Labels[labelKeyClusterAgentMapping])
+				assert.NotContains(t, localSecret.Labels, labelKeyClusterAgentMapping, "local-cluster secret must not carry the agent-name label")
+				assert.NotContains(t, localSecret.Annotations, annotationKeyAppSkipReconcile, "local-cluster secret must not carry skip-reconcile")
+				assert.Equal(t, "local-cluster", string(localSecret.Data["name"]))
+				assert.Equal(t, inClusterServerURL, string(localSecret.Data["server"]))
 
 				remoteSecret := &v1.Secret{}
 				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-remote-cluster", Namespace: "argocd"}, remoteSecret)
 				assert.NoError(t, err, "Cluster secret should be created for remote-cluster")
 				assert.Equal(t, "cluster", remoteSecret.Labels[argoCDTypeLabel])
 				assert.Equal(t, "remote-cluster", remoteSecret.Labels[labelKeyClusterAgentMapping])
+				assert.Equal(t, "true", remoteSecret.Annotations[annotationKeyAppSkipReconcile])
 			},
 		},
 		{
-			name: "cluster with local-cluster label gets cluster secret",
+			// A hub identified only by the local-cluster=true label (NOT the conventional
+			// "local-cluster" name) must still be registered correctly: under its ACTUAL name
+			// ("hub-cluster" here), because that's the name ApplicationSets/PlacementDecisions
+			// will reference - never a hardcoded "local-cluster" string. It's still skipped from
+			// per-cluster agent registration (no agent-name label, no skip-reconcile).
+			name: "cluster identified only by local-cluster label is registered under its own name",
 			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-gitops",
@@ -671,18 +690,29 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 					},
 				},
 			},
+			// The hub is identified only by the label here, under a non-default name - override
+			// the auto-injected default so findLocalCluster discovers this object.
+			localClusterObject: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "hub-cluster",
+					Labels: map[string]string{"local-cluster": "true"},
+				},
+			},
 			orphanSecretsList: map[types.NamespacedName]string{},
 			existingObjects: []client.Object{
 				createTestPrincipalCASecret("argocd", caCert, caKey, caPEM),
 			},
 			expectedError:        false,
-			expectedSecretsCount: 2,
+			expectedSecretsCount: 1, // managed-cluster only; cluster-hub-cluster (local) is checked separately
 			validateFunc: func(t *testing.T, c client.Client, orphanList map[types.NamespacedName]string) {
 				hubSecret := &v1.Secret{}
 				err := c.Get(context.TODO(), types.NamespacedName{Name: "cluster-hub-cluster", Namespace: "argocd"}, hubSecret)
-				assert.NoError(t, err, "Cluster secret should be created for cluster with local-cluster=true label")
+				require.NoError(t, err, "cluster-hub-cluster should be created under the hub's actual name")
 				assert.Equal(t, "cluster", hubSecret.Labels[argoCDTypeLabel])
-				assert.Equal(t, "hub-cluster", hubSecret.Labels[labelKeyClusterAgentMapping])
+				assert.NotContains(t, hubSecret.Labels, labelKeyClusterAgentMapping, "hub secret must not carry the agent-name label")
+				assert.NotContains(t, hubSecret.Annotations, annotationKeyAppSkipReconcile, "hub secret must not carry skip-reconcile")
+				assert.Equal(t, "hub-cluster", string(hubSecret.Data["name"]))
+				assert.Equal(t, inClusterServerURL, string(hubSecret.Data["server"]))
 
 				managedSecret := &v1.Secret{}
 				err = c.Get(context.TODO(), types.NamespacedName{Name: "cluster-managed-cluster", Namespace: "argocd"}, managedSecret)
@@ -695,9 +725,24 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// ensureLocalClusterSecret discovers the hub via a live List+IsLocalCluster check, so
+			// a real ManagedCluster object identifying the hub must exist in the fake client -
+			// the managedClusters slice parameter alone is not enough (it's never persisted to
+			// the fake client's object store).
+			localCluster := tt.localClusterObject
+			if localCluster == nil {
+				localCluster = &spokeclusterv1.ManagedCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "local-cluster",
+						Labels: map[string]string{"local-cluster": "true"},
+					},
+				}
+			}
+			objects := append([]client.Object{localCluster}, tt.existingObjects...)
+
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.existingObjects...).
+				WithObjects(objects...).
 				Build()
 
 			reconciler := &ReconcileGitOpsCluster{
@@ -711,11 +756,25 @@ func TestCreateArgoCDAgentClusters(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 
+				// ensureLocalClusterSecret runs unconditionally on every successful call, named
+				// after the discovered hub ManagedCluster's actual Name - verify it's always
+				// present, but exclude it from the per-test expectedSecretsCount tally below so
+				// existing/new test cases only need to count the "real" managed clusters they set up.
+				localSecretName := fmt.Sprintf("cluster-%s", localCluster.Name)
+				localSecret := &v1.Secret{}
+				localErr := fakeClient.Get(context.TODO(), types.NamespacedName{
+					Name: localSecretName, Namespace: tt.gitOpsCluster.Spec.ArgoServer.ArgoNamespace,
+				}, localSecret)
+				assert.NoError(t, localErr, "%s secret should always be created on success", localSecretName)
+
 				secretList := &v1.SecretList{}
 				err := fakeClient.List(context.TODO(), secretList, client.InNamespace(tt.gitOpsCluster.Spec.ArgoServer.ArgoNamespace))
 				assert.NoError(t, err)
 				clusterSecrets := 0
 				for _, s := range secretList.Items {
+					if s.Name == localSecretName {
+						continue
+					}
 					if s.Labels[argoCDTypeLabel] == argoCDSecretTypeClusterValue {
 						clusterSecrets++
 					}

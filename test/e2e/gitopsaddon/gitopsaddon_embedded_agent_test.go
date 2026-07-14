@@ -95,20 +95,16 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 		})
 	})
 
-	Context("Local-Cluster Verification", func() {
-		It("should create ManagedClusterAddOn for local-cluster", func() {
-			verifyLocalClusterAddon(5 * time.Minute)
+	Context("Local-Cluster Verification (Hybrid Mode)", func() {
+		It("should register local-cluster as a plain in-cluster ArgoCD secret (no agent routing)", func() {
+			verifyLocalClusterSecret(5 * time.Minute)
 		})
 
-		It("should deploy ArgoCD CR in local-cluster namespace on hub", func() {
-			verifyLocalClusterArgoCDDeployed(8 * time.Minute)
-		})
-
-		It("should NOT have duplicate acm-openshift-gitops in openshift-gitops on hub", func() {
+		It("should NOT have a duplicate acm-openshift-gitops ArgoCD instance anywhere on hub", func() {
 			verifyNoDuplicateArgoCDOnHub()
 		})
 
-		It("should deploy and sync guestbook on local-cluster via ApplicationSet agent pipeline", func() {
+		It("should deploy and sync guestbook on local-cluster via the ApplicationSet + hub application controller", func() {
 			verifyLocalClusterGuestbook(true, 10*time.Minute)
 		})
 
@@ -116,7 +112,7 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 			verifyLocalClusterControllerNamespace(true)
 		})
 
-		It("should have no cross-namespace conflicts on local-cluster", func() {
+		It("should have no addon-installed application controller anywhere on hub", func() {
 			verifyLocalClusterEnvironmentHealth()
 		})
 	})
@@ -142,16 +138,12 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 	})
 
 	Context("Cleanup Verification", func() {
-		It("should have removed GitOpsCluster, MCA (spoke), and MCA (local-cluster) from hub", func() {
+		It("should have removed GitOpsCluster and MCA (spoke) from hub", func() {
 			verifyHubCleanup(opts)
 		})
 
 		It("should have removed ArgoCD CR and operator from spoke", func() {
 			verifySpokeCleanup()
-		})
-
-		It("should have removed ArgoCD CR from local-cluster namespace on hub", func() {
-			verifyLocalClusterCleanup()
 		})
 	})
 })

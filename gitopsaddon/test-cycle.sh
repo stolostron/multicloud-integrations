@@ -39,7 +39,9 @@ MAX_CYCLES="${1:-5}"
 
 GITOPSCLUSTER_NAME="cycle-agent-gitops"
 PLACEMENT_NAME="cycle-agent-placement"
+APPSET_PLACEMENT_NAME="cycle-agent-appset-placement"
 APPSET_NAME="cycle-agent-guestbook-appset"
+HUB_APPCONTROLLER_RBAC_NAME="cycle-agent-appcontroller-cluster-admin"
 ARGOCD_NS="openshift-gitops"
 
 # Parse MANAGED_CLUSTERS into arrays
@@ -64,6 +66,19 @@ pass() { log "PASS: $*"; }
 
 hub()     { KUBECONFIG="$HUB_KUBECONFIG" kubectl "$@"; }
 on_cluster() { local c=$1; shift; KUBECONFIG="${CLUSTER_KUBECONFIGS[$c]}" kubectl "$@"; }
+
+# --- Resolve the hub's actual ManagedCluster name ---
+# The hub's identity is authoritative via the "local-cluster: true" label, NOT an assumed
+# "local-cluster" object name (matches IsLocalCluster in pkg/controller/gitopscluster) - some
+# deployments label a differently-named ManagedCluster as the hub. Fall back to a ManagedCluster
+# literally named "local-cluster" only if no labeled one is found (defensive, matches the same
+# fallback order as IsLocalCluster's name-then-label check, just in list order here).
+LOCAL_CLUSTER_NAME=$(hub get managedcluster -l local-cluster=true -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -z "$LOCAL_CLUSTER_NAME" ]; then
+    LOCAL_CLUSTER_NAME=$(hub get managedcluster local-cluster -o jsonpath='{.metadata.name}' 2>/dev/null || true)
+fi
+: "${LOCAL_CLUSTER_NAME:?Could not find a ManagedCluster labeled local-cluster=true (or named local-cluster) on the hub}"
+LOCAL_CLUSTER_APP="guestbook-${LOCAL_CLUSTER_NAME}"
 
 # --- Force-clean a managed cluster (direct access) ---
 force_clean_cluster() {
@@ -171,6 +186,9 @@ EORBAC
 # --- Clean stale hub resources for test clusters ---
 clean_hub_stale() {
     log "Cleaning stale hub resources..."
+    # Only this test run's own script-specific binding - never the "openshift-gitops-
+    # appcontroller-cluster-admin" name a real hybrid-mode deployment manages (see CLAUDE.md).
+    hub delete clusterrolebinding "$HUB_APPCONTROLLER_RBAC_NAME" --ignore-not-found 2>/dev/null || true
     local stale_csrs
     stale_csrs=$(hub get csr -o name 2>/dev/null | grep "gitops-addon" || true)
     for csr in $stale_csrs; do hub delete "$csr" 2>/dev/null || true; done
@@ -191,13 +209,19 @@ clean_hub_stale() {
     hub delete applicationset "$APPSET_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete gitopscluster "$GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" --ignore-not-found --timeout=30s 2>/dev/null || true
     hub delete placement "$PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    hub delete placement "$APPSET_PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "${GITOPSCLUSTER_NAME}-argocd-policy" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
     hub delete placementbinding "${GITOPSCLUSTER_NAME}-argocd-policy-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
 
-    # Strip finalizers from test-owned Applications and delete them.
-    # Only target apps created by this script's AppSet (guestbook-{cluster}).
-    # Without this, apps with resources-finalizer.argocd.argoproj.io block deletion
-    # because the hub has no app-controller (controller.enabled=false in agent mode).
+    # Strip finalizers from test-owned Applications for REAL managed clusters and delete them.
+    # Only target apps created by this script's AppSet (guestbook-{cluster}). These clusters'
+    # secrets carry skip-reconcile=true, so the hub's application controller (hybrid mode)
+    # deliberately ignores them - nothing ever processes their resources-finalizer, so it must
+    # be stripped manually.
+    #
+    # guestbook-local-cluster is NOT included here: its cluster secret has no skip-reconcile, so
+    # the hub's own application controller reconciles and finalizes it normally. If that ever
+    # gets stuck, the underlying issue should be fixed rather than papered over with a strip here.
     for cluster in "${CLUSTER_NAMES[@]}"; do
         local app_name="guestbook-${cluster}"
         if hub get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" &>/dev/null; then
@@ -206,6 +230,10 @@ clean_hub_stale() {
             hub delete applications.argoproj.io "$app_name" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
         fi
     done
+
+    # Clean any stale local-cluster hybrid app/namespace left over from an interrupted run.
+    hub delete applications.argoproj.io "$LOCAL_CLUSTER_APP" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
+    hub delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
 }
 
 # --- Build Placement matchExpressions for all clusters ---
@@ -219,10 +247,33 @@ build_placement_values() {
 }
 
 # --- Deploy ---
+# "local-cluster" below always means $LOCAL_CLUSTER_NAME - the hub's ACTUAL ManagedCluster name,
+# resolved earlier via the "local-cluster: true" label (see LOCAL_CLUSTER_NAME resolution above),
+# never a hardcoded "local-cluster" string. Two placements are used deliberately:
+#   PLACEMENT_NAME (GitOpsCluster.spec.placementRef) - drives addon install + agent cluster
+#     secret registration. Must NEVER select the hub cluster: it already has its own ArgoCD
+#     instance (hosting the argocd-agent principal) and is not an addon-install target - if it
+#     were included here, the ArgoCD-CR-enforcing Policy would deploy a second, conflicting
+#     ArgoCD CR into the hub's own openshift-gitops namespace.
+#   APPSET_PLACEMENT_NAME - drives ONLY the ApplicationSet's clusterDecisionResource generator,
+#     and always includes the hub cluster alongside the real managed clusters. This is what
+#     "hybrid mode" is about: the hub is registered as a plain in-cluster ArgoCD cluster secret
+#     (ensureLocalClusterSecret, no agent routing, no skip-reconcile) under its real name, so the
+#     generated guestbook-${LOCAL_CLUSTER_NAME} Application resolves to an in-cluster destination
+#     and is reconciled directly by the hub's own (now-enabled) application controller.
 deploy() {
-    log "Deploying to clusters: ${CLUSTER_NAMES[*]}"
+    log "Deploying to clusters: ${CLUSTER_NAMES[*]} + ${LOCAL_CLUSTER_NAME} (hybrid)"
     local match_values
     match_values=$(build_placement_values)
+    local appset_match_values
+    appset_match_values="${match_values}
+                - ${LOCAL_CLUSTER_NAME}"
+
+    # Must exist BEFORE the ApplicationSet is created below: ArgoCD's automated self-heal will
+    # not retry a revision that already failed 5 times, so missing RBAC on the very first sync
+    # leaves the Application stuck in a permanently-failed state instead of self-healing once
+    # RBAC appears.
+    ensure_hub_appcontroller_rbac
 
     hub apply -f - <<EOF
 apiVersion: cluster.open-cluster-management.io/v1beta1
@@ -240,7 +291,24 @@ spec:
               values:
 ${match_values}
             - key: local-cluster
-              operator: DoesNotExist
+              operator: NotIn
+              values:
+                - "true"
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: ${APPSET_PLACEMENT_NAME}
+  namespace: ${ARGOCD_NS}
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+${appset_match_values}
 ---
 apiVersion: apps.open-cluster-management.io/v1beta1
 kind: GitOpsCluster
@@ -249,7 +317,7 @@ metadata:
   namespace: ${ARGOCD_NS}
 spec:
   argoServer:
-    cluster: local-cluster
+    cluster: ${LOCAL_CLUSTER_NAME}
     argoNamespace: ${ARGOCD_NS}
   placementRef:
     kind: Placement
@@ -271,7 +339,7 @@ spec:
         configMapRef: acm-placement
         labelSelector:
           matchLabels:
-            cluster.open-cluster-management.io/placement: ${PLACEMENT_NAME}
+            cluster.open-cluster-management.io/placement: ${APPSET_PLACEMENT_NAME}
         requeueAfterSeconds: 180
   template:
     metadata:
@@ -294,6 +362,27 @@ spec:
 EOF
 
     log "Deploy manifests applied"
+}
+
+# --- Ensure the hub's own ArgoCD app-controller can manage the in-cluster (local-cluster)
+# destination ---
+# The Red Hat OpenShift GitOps operator's ArgoCD app-controller ClusterRole is deliberately
+# narrow for the in-cluster destination - it does not get admin rights over arbitrary target
+# namespaces like "guestbook" unless the namespace is pre-labeled
+# (argocd.argoproj.io/managed-by=openshift-gitops) or ARGOCD_CLUSTER_CONFIG_NAMESPACES includes
+# it. Since CreateNamespace=true creates "guestbook" fresh on every cycle, grant the hub
+# app-controller's ServiceAccount cluster-admin directly - the same approach already used for
+# the app-controller on non-OCP managed clusters (see force_clean_cluster's pre-created binding).
+#
+# Uses a script-specific ClusterRoleBinding name (not the "openshift-gitops-appcontroller-
+# cluster-admin" name documented in CLAUDE.md for real hybrid-mode setups) so this test run never
+# overwrites or fights over a binding a real deployment already manages under that name; it's
+# torn down in clean_hub_stale so repeated runs start from a clean slate.
+ensure_hub_appcontroller_rbac() {
+    hub create clusterrolebinding "$HUB_APPCONTROLLER_RBAC_NAME" \
+        --clusterrole=cluster-admin \
+        --serviceaccount=openshift-gitops:openshift-gitops-argocd-application-controller \
+        --dry-run=client -o yaml | hub apply -f - >/dev/null 2>&1
 }
 
 # --- Ensure app-controller has cluster-admin on non-OCP clusters ---
@@ -412,6 +501,67 @@ verify_managed() {
             fail "$cluster cluster secret missing argocd.argoproj.io/skip-reconcile=true (got '$skip_reconcile')"
         fi
     done
+}
+
+# --- Verify hybrid mode: local-cluster reconciles via the hub's own application controller ---
+# Unlike real spokes, local-cluster is never agent-routed: ensureLocalClusterSecret registers it
+# as a plain in-cluster ArgoCD cluster secret (no agent-name label, no skip-reconcile), so the
+# guestbook-local-cluster Application generated by APPSET_PLACEMENT_NAME must be reconciled
+# directly by the hub's openshift-gitops-application-controller, with real guestbook resources
+# created in the "guestbook" namespace ON THE HUB ITSELF (destination = in-cluster).
+verify_local_cluster() {
+    local timeout=${LOCAL_CLUSTER_VERIFY_SECS:-180}
+    local secret_name_key="cluster-${LOCAL_CLUSTER_NAME}"
+    log "Verifying hybrid mode: ${LOCAL_CLUSTER_NAME} via hub application controller (up to ${timeout}s)..."
+
+    local secret_name secret_server skip_reconcile agent_name_label
+    secret_name=$(hub get secret "$secret_name_key" -n "$ARGOCD_NS" -o jsonpath='{.data.name}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+    secret_server=$(hub get secret "$secret_name_key" -n "$ARGOCD_NS" -o jsonpath='{.data.server}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+    skip_reconcile=$(hub get secret "$secret_name_key" -n "$ARGOCD_NS" \
+        -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/skip-reconcile}' 2>/dev/null || echo "")
+    agent_name_label=$(hub get secret "$secret_name_key" -n "$ARGOCD_NS" \
+        -o jsonpath='{.metadata.labels.argocd-agent\.argoproj-labs\.io/agent-name}' 2>/dev/null || echo "")
+
+    [ "$secret_name" = "$LOCAL_CLUSTER_NAME" ] && pass "${secret_name_key} secret has name=${LOCAL_CLUSTER_NAME}" \
+        || fail "${secret_name_key} secret name mismatch (got '$secret_name')"
+    [ "$secret_server" = "https://kubernetes.default.svc" ] && pass "${secret_name_key} secret points at in-cluster API server" \
+        || fail "${secret_name_key} secret server mismatch (got '$secret_server')"
+    [ -z "$skip_reconcile" ] && pass "${secret_name_key} secret has no skip-reconcile annotation (hub app-controller owns it)" \
+        || fail "${secret_name_key} secret unexpectedly has skip-reconcile=$skip_reconcile"
+    [ -z "$agent_name_label" ] && pass "${secret_name_key} secret has no agent-name label (not agent-routed)" \
+        || fail "${secret_name_key} secret unexpectedly has agent-name label=$agent_name_label"
+
+    # Success bar matches verify_managed's tolerance for real spokes: sync=Synced plus a
+    # non-Missing/Unknown health proves the hub app-controller actually took ownership,
+    # applied RBAC correctly, and reconciled the app. guestbook-ui becoming fully Ready is only
+    # a WARNING, not a hard requirement - the upstream demo image (gcr.io/google-samples/
+    # gb-frontend) binds port 80 as non-root, which OpenShift's restricted SCC rejects; this
+    # already crash-loops identically on real OCP spokes (see the WARNING further down for
+    # ${cluster} guestbook-ui), so it's an app-image/SCC compatibility issue, not a hybrid-mode
+    # bug, and local-cluster shouldn't be held to a stricter bar than spokes are.
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        local sync health ui_ready
+        sync=$(hub get application.argoproj.io "$LOCAL_CLUSTER_APP" -n "$ARGOCD_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+        health=$(hub get application.argoproj.io "$LOCAL_CLUSTER_APP" -n "$ARGOCD_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+        ui_ready=$(hub get deploy -n guestbook guestbook-ui -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+
+        if [ "$sync" = "Synced" ] && [ "$health" != "Missing" ] && [ "$health" != "Unknown" ] && [ -n "$health" ]; then
+            pass "${LOCAL_CLUSTER_NAME} hybrid app synced via hub application controller, health=$health (${elapsed}s)"
+            if [ "$ui_ready" = "1" ]; then
+                pass "${LOCAL_CLUSTER_NAME} guestbook-ui ready on the hub itself"
+            else
+                log "WARNING: ${LOCAL_CLUSTER_NAME} guestbook-ui not ready (replicas=${ui_ready:-0}) - likely restricted-SCC vs demo image, same as spokes"
+            fi
+            return 0
+        fi
+
+        sleep 15
+        elapsed=$((elapsed + 15))
+        log "  Waiting for ${LOCAL_CLUSTER_NAME} app: sync=${sync:-Pending} health=${health:-Pending} guestbook-ui-ready=${ui_ready} (${elapsed}s)"
+    done
+
+    fail "${LOCAL_CLUSTER_NAME} hybrid app did not reach Synced with a known health status within ${timeout}s"
 }
 
 # --- Verify ArgoCD agent end-to-end: app dispatch + status sync ---
@@ -641,17 +791,62 @@ verify_gitopsaddon_labels() {
 delete_from_hub() {
     log "Deleting from hub..."
 
-    # 1. Delete GitOpsCluster — stops the controller from re-creating MCAs.
+    local policy_name="${GITOPSCLUSTER_NAME}-argocd-policy"
+
+    # 1. Delete the ApplicationSet WHILE agents and the hub app-controller are still
+    #    connected (GitOpsCluster/Policy/MCAs untouched so far). The ApplicationSet
+    #    controller cascade-deletes its generated Applications, and each Application's
+    #    resources-finalizer.argocd.argoproj.io is processed by whichever ArgoCD instance
+    #    actually owns it: the connected agent for guestbook-<cluster> (spoke-managed,
+    #    cluster secret carries skip-reconcile), and the hub's own application controller
+    #    for guestbook-local-cluster (plain in-cluster secret, no skip-reconcile). This
+    #    matches the documented "Cleanup (Manual Deletion Order)" in CLAUDE.md
+    #    (ApplicationSet first) and needs no manual finalizer stripping — deleting MCAs
+    #    first would disconnect the agents before they can process the finalizer.
+    hub delete applicationset "$APPSET_NAME" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
+
+    log "Waiting for guestbook Applications to finalize naturally (no manual finalizer stripping)..."
+    local app_names=("$LOCAL_CLUSTER_APP")
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        app_names+=("guestbook-${cluster}")
+    done
+    local app_timeout=180
+    local app_elapsed=0
+    local apps_all_gone=false
+    while [ "$app_elapsed" -lt "$app_timeout" ]; do
+        apps_all_gone=true
+        for app_name in "${app_names[@]}"; do
+            if hub get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" &>/dev/null; then
+                apps_all_gone=false
+                break
+            fi
+        done
+        if $apps_all_gone; then
+            pass "All guestbook Applications finalized naturally (${app_elapsed}s)"
+            break
+        fi
+        sleep 10
+        app_elapsed=$((app_elapsed + 10))
+        [ $((app_elapsed % 30)) -eq 0 ] && log "  still waiting on guestbook Applications (${app_elapsed}s)"
+    done
+    if ! $apps_all_gone; then
+        for app_name in "${app_names[@]}"; do
+            if hub get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" &>/dev/null; then
+                fail "$app_name still present after ${app_timeout}s — did not finalize naturally"
+            fi
+        done
+    fi
+
+    # 2. Delete GitOpsCluster — stops the controller from re-creating MCAs.
     #    GitOpsCluster deletion is a no-op (no finalizer, no automated cleanup).
     #    Dynamic AddOnTemplates and ADCs are NOT owned by GitOpsCluster, so they persist.
     hub delete gitopscluster "$GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
 
-    # 2. Delete Policy + PlacementBinding — stops enforcement of ArgoCD CR on managed
+    # 3. Delete Policy + PlacementBinding — stops enforcement of ArgoCD CR on managed
     #    clusters. Without this, the ConfigurationPolicy re-creates the ArgoCD CR
     #    during cleanup, causing a race: cleanup Job deletes ArgoCD CR (step 2),
     #    ConfigurationPolicy re-creates it, cleanup Job kills operator (step 3),
     #    re-created ArgoCD CR has unprocessable finalizer → orphaned CR + workloads.
-    local policy_name="${GITOPSCLUSTER_NAME}-argocd-policy"
     hub delete placementbinding "${policy_name}-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "$policy_name" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
 
@@ -714,36 +909,24 @@ delete_from_hub() {
     log "Waiting 30s for config-policy-controller reconciliation queue to drain..."
     sleep 30
 
-    # 3. Delete MCAs — triggers pre-delete cleanup Job on each managed cluster.
-    #    ADC and AddOnTemplate still exist (orphaned from step 1), so the addon
-    #    framework can render the pre-delete ManifestWork.
+    # 4. Delete MCAs — triggers pre-delete cleanup Job on each managed cluster.
+    #    ADC and AddOnTemplate still exist (orphaned from step 2), so the addon
+    #    framework can render the pre-delete ManifestWork. Guestbook Applications are
+    #    already gone (step 1), so this only tears down the operator/agent, not apps.
     #    Use --wait=false so kubectl returns immediately; wait_for_mca_cleanup polls.
     for cluster in "${CLUSTER_NAMES[@]}"; do
         hub delete managedclusteraddon gitops-addon -n "$cluster" --ignore-not-found --wait=false 2>/dev/null || true
     done
     log "MCAs deletion triggered"
 
-    # 4. Wait for MCAs to fully delete (cleanup Jobs complete, finalizers removed)
+    # 5. Wait for MCAs to fully delete (cleanup Jobs complete, finalizers removed)
     wait_for_mca_cleanup
-
-    # 5. Delete ApplicationSet AFTER agents are disconnected. If deleted while
-    #    agents are running, the apps get resources-finalizer.argocd.argoproj.io
-    #    and the hub application-controller can't process them (agents gone).
-    hub delete applicationset "$APPSET_NAME" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
-    # Strip finalizers from orphaned apps — the resources-finalizer can't be
-    # processed because the managed cluster agents are already disconnected.
-    sleep 2
-    for cluster in "${CLUSTER_NAMES[@]}"; do
-        local app_name="guestbook-${cluster}"
-        if hub get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" &>/dev/null 2>&1; then
-            hub patch applications.argoproj.io "$app_name" -n "$ARGOCD_NS" \
-                --type=json -p='[{"op":"replace","path":"/metadata/finalizers","value":[]}]' 2>/dev/null || true
-        fi
-    done
 
     # 6. Delete remaining hub resources
     hub delete placement "$PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    hub delete placement "$APPSET_PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
     hub delete policy "$policy_name" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
+    hub delete clusterrolebinding "$HUB_APPCONTROLLER_RBAC_NAME" --ignore-not-found 2>/dev/null || true
 
     # 7. Clean up orphaned ADCs
     for cluster in "${CLUSTER_NAMES[@]}"; do
@@ -789,6 +972,19 @@ verify_cleanup() {
         log "CLEANUP ISSUE: Policy still exists on hub"; issues=$((issues+1))
     else
         pass "Hub: Policy deleted"
+    fi
+
+    # Hub: local-cluster hybrid app and its guestbook resources fully finalized (reconciled by
+    # the hub's own application controller, not agent-routed, so no manual stripping applies).
+    if hub get applications.argoproj.io "$LOCAL_CLUSTER_APP" -n "$ARGOCD_NS" &>/dev/null; then
+        log "CLEANUP ISSUE: $LOCAL_CLUSTER_APP still exists on hub"; issues=$((issues+1))
+    else
+        pass "Hub: $LOCAL_CLUSTER_APP deleted"
+    fi
+    if hub get deploy guestbook-ui -n guestbook &>/dev/null; then
+        log "CLEANUP ISSUE: guestbook-ui deployment still exists on the hub itself"; issues=$((issues+1))
+    else
+        pass "Hub: ${LOCAL_CLUSTER_NAME} guestbook-ui deployment removed"
     fi
 
     # Per-cluster checks
@@ -930,6 +1126,7 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
     deploy
     wait_for_deploy
     verify_managed
+    verify_local_cluster
     verify_pods_stable
     verify_agent_e2e
     verify_gitopsaddon_labels

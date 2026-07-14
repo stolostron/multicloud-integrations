@@ -54,64 +54,12 @@ func (r *GitopsAddonCleanupReconciler) uninstallGitopsAgent(ctx context.Context)
 	return uninstallGitopsAgentInternal(ctx, r.Client, GitOpsOperatorNamespace)
 }
 
-// uninstallGitopsAgentInternal performs the actual uninstall logic.
-// On hub clusters, only the addon-created ArgoCD CR is deleted (operator/OLM resources are shared).
-// On remote clusters, a full cleanup is performed.
+// uninstallGitopsAgentInternal performs the actual uninstall logic. The addon never runs on
+// local-cluster (the hub), so this is always a full cleanup on a real managed cluster.
 func uninstallGitopsAgentInternal(ctx context.Context, c client.Client, gitopsOperatorNS string) error {
 	klog.Infof("Starting Gitops agent addon uninstall - gitopsOperatorNS: %s, gitopsNS: %s", gitopsOperatorNS, GitOpsNamespace)
 
-	isHub, err := isHubClusterForCleanup(ctx, c)
-	if err != nil {
-		return fmt.Errorf("failed to detect cluster type during cleanup, aborting: %w", err)
-	}
-	if isHub {
-		return uninstallOnHub(ctx, c)
-	}
 	return uninstallOnManagedCluster(ctx, c, gitopsOperatorNS)
-}
-
-// isHubClusterForCleanup detects if this is the hub cluster during cleanup.
-// Uses the same signals as isHubCluster but works with a raw client (no reconciler).
-// Returns (bool, error) so callers can fail closed on unexpected API errors
-// instead of defaulting to the destructive managed-cluster cleanup path.
-func isHubClusterForCleanup(ctx context.Context, c client.Client) (bool, error) {
-	cmList := &unstructured.UnstructuredList{}
-	cmList.SetAPIVersion("operator.open-cluster-management.io/v1")
-	cmList.SetKind("ClusterManagerList")
-	if err := c.List(ctx, cmList); err != nil {
-		if !apierrors.IsNotFound(err) && !isNoKindMatchError(err) {
-			return false, fmt.Errorf("failed to list ClusterManager resources: %w", err)
-		}
-	} else if len(cmList.Items) > 0 {
-		klog.Info("Hub cluster detected during cleanup: ClusterManager resource found")
-		return true, nil
-	}
-
-	mcList := &unstructured.UnstructuredList{}
-	mcList.SetAPIVersion("cluster.open-cluster-management.io/v1")
-	mcList.SetKind("ManagedClusterList")
-	if err := c.List(ctx, mcList); err != nil {
-		if !apierrors.IsNotFound(err) && !isNoKindMatchError(err) {
-			return false, fmt.Errorf("failed to list ManagedCluster resources: %w", err)
-		}
-	} else {
-		for i := range mcList.Items {
-			mc := &mcList.Items[i]
-			if mc.GetName() == "local-cluster" {
-				klog.Info("Hub cluster detected during cleanup: ManagedCluster 'local-cluster' found")
-				return true, nil
-			}
-			labels := mc.GetLabels()
-			if labels != nil {
-				if v, ok := labels["local-cluster"]; ok && v == "true" {
-					klog.Infof("Hub cluster detected during cleanup: ManagedCluster '%s' has local-cluster=true label", mc.GetName())
-					return true, nil
-				}
-			}
-		}
-	}
-
-	return false, nil
 }
 
 // isNoKindMatchError returns true if the error indicates the CRD is not installed.
@@ -120,54 +68,6 @@ func isNoKindMatchError(err error) bool {
 		return false
 	}
 	return meta.IsNoMatchError(err)
-}
-
-// uninstallOnHub performs a conservative cleanup on the hub cluster.
-// Only deletes the addon-created ArgoCD CR — operator, OLM, and shared resources are preserved.
-func uninstallOnHub(ctx context.Context, c client.Client) error {
-	klog.Info("Hub cluster cleanup: only deleting addon-created ArgoCD CRs")
-	var errors []error
-
-	klog.Info("Step 0: Creating pause marker")
-	if err := createPauseMarker(ctx, c); err != nil {
-		klog.Errorf("Error creating pause marker (continuing): %v", err)
-		errors = append(errors, fmt.Errorf("failed to create pause marker: %w", err))
-	}
-
-	klog.Info("Step 1: Deleting ArgoCD CRs with gitopsaddon label (all namespaces)")
-	if err := deleteArgoCDCR(ctx, c); err != nil {
-		klog.Errorf("Error deleting ArgoCD CRs (continuing): %v", err)
-		errors = append(errors, fmt.Errorf("failed to delete ArgoCD CRs: %w", err))
-	}
-
-	klog.Info("Step 2: Deleting pause marker")
-	if err := deletePauseMarker(ctx, c); err != nil {
-		klog.Warningf("Failed to delete pause marker (continuing): %v", err)
-	}
-
-	klog.Info("Final Step: Deleting gitops-addon RBAC (self-referencing, best-effort)")
-	for _, name := range []string{AddonDeploymentName, AddonDeploymentName + "-cleanup"} {
-		crb := &unstructured.Unstructured{}
-		crb.SetAPIVersion("rbac.authorization.k8s.io/v1")
-		crb.SetKind("ClusterRoleBinding")
-		crb.SetName(name)
-		if delErr := c.Delete(ctx, crb); delErr != nil && !apierrors.IsNotFound(delErr) {
-			klog.Warningf("Best-effort: failed to delete %s ClusterRoleBinding: %v", name, delErr)
-		}
-		cr := &unstructured.Unstructured{}
-		cr.SetAPIVersion("rbac.authorization.k8s.io/v1")
-		cr.SetKind("ClusterRole")
-		cr.SetName(name)
-		if delErr := c.Delete(ctx, cr); delErr != nil && !apierrors.IsNotFound(delErr) {
-			klog.Warningf("Best-effort: failed to delete %s ClusterRole: %v", name, delErr)
-		}
-	}
-
-	if len(errors) > 0 {
-		return stderrors.Join(errors...)
-	}
-	klog.Info("Successfully completed hub cluster cleanup")
-	return nil
 }
 
 // uninstallOnManagedCluster performs a full cleanup on remote managed clusters.

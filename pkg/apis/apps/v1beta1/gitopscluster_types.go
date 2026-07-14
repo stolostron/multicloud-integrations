@@ -184,7 +184,8 @@ type GitOpsAddonSpec struct {
 	// mode for operator installation regardless of OCP auto-detection. This acts as an override:
 	// even if OCP detection fails or the cluster is non-OCP, the agent will attempt OLM installation.
 	// The specified fields (channel, source, etc.) override the default subscription values.
-	// Note: the local-cluster (hub) path always skips operator installation and ignores olmSubscription.
+	// Note: local-cluster (the hub) is never an addon-install target at all, so olmSubscription
+	// (and this whole addon-install path) never applies to it.
 	// Requires gitopsAddon.enabled to be true.
 	// +optional
 	OLMSubscription *OLMSubscriptionSpec `json:"olmSubscription,omitempty"`

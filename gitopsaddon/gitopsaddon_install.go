@@ -37,38 +37,18 @@ import (
 )
 
 // installOrUpdateOpenshiftGitops orchestrates the complete GitOps installation process.
-// The addon agent selects the installation method using the following priority:
-//  1. Hub cluster: skip operator installation (operator already exists from OLM)
-//  2. OLM_SUBSCRIPTION_ENABLED=true (set via GitOpsCluster olmSubscription.enabled):
+// The addon agent never runs on local-cluster (the hub) - it always runs on a real managed
+// cluster, and selects the installation method using the following priority:
+//  1. OLM_SUBSCRIPTION_ENABLED=true (set via GitOpsCluster olmSubscription.enabled):
 //     force OLM subscription mode regardless of cluster type
-//  3. OCP auto-detect: create OLM subscription for openshift-gitops-operator
-//  4. Fallback: deploy embedded operator manifests (Kind, EKS, etc.)
+//  2. OCP auto-detect: create OLM subscription for openshift-gitops-operator
+//  3. Fallback: deploy embedded operator manifests (Kind, EKS, etc.)
 //
 // ArgoCD CR is created by Policy (argocd_policy.go on the hub), not by this addon.
 func (r *GitopsAddonReconciler) installOrUpdateOpenshiftGitops() error {
 	ctx := context.Background()
 
-	// Detect cluster type
-	isHub, err := r.isHubCluster(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to detect hub cluster: %w", err)
-	}
-
-	if isHub {
-		klog.Info("Hub cluster detected - skipping operator installation (operator already present)")
-		// On the hub, the ArgoCD namespace is the managed cluster's own namespace (e.g. local-cluster).
-		// Ensure the namespace has the right labels for image pull secret sync.
-		argoCDNs := getArgoCDNamespace()
-		if argoCDNs != "" && argoCDNs != GitOpsNamespace {
-			nsKey := types.NamespacedName{Name: argoCDNs}
-			if err := r.CreateUpdateNamespace(nsKey); err != nil {
-				return fmt.Errorf("failed to ensure namespace %s on hub: %w", argoCDNs, err)
-			}
-		}
-		return nil
-	}
-
-	// On managed clusters: clean up the stale default ArgoCD instance that was created by
+	// Clean up the stale default ArgoCD instance that was created by
 	// the ACM 2.16 OLM operator (installed via the embedded subscription in the old
 	// gitops-addon-olm ManifestWork). That subscription lacked DISABLE_DEFAULT_ARGOCD_INSTANCE=true,
 	// so the operator created a default GitopsService CR and thus the openshift-gitops ArgoCD CR.
@@ -283,50 +263,6 @@ func (r *GitopsAddonReconciler) isOCPCluster(ctx context.Context) (bool, error) 
 	}
 
 	klog.Info("Cluster is not OCP (no OpenShift indicators found)")
-	return false, nil
-}
-
-// isHubCluster detects if this cluster is the ACM/OCM hub cluster.
-// Checks for ClusterManager resources (hub operator) and ManagedCluster with local-cluster identity.
-func (r *GitopsAddonReconciler) isHubCluster(ctx context.Context) (bool, error) {
-	// Check 1: ClusterManager resources exist (hub-only OCM resource)
-	cmList := &unstructured.UnstructuredList{}
-	cmList.SetAPIVersion("operator.open-cluster-management.io/v1")
-	cmList.SetKind("ClusterManagerList")
-	if err := r.List(ctx, cmList); err != nil {
-		if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
-			return false, fmt.Errorf("failed to list ClusterManager resources: %w", err)
-		}
-	} else if len(cmList.Items) > 0 {
-		klog.Info("Hub cluster detected: ClusterManager resource found")
-		return true, nil
-	}
-
-	// Check 2: ManagedCluster with name "local-cluster" or label "local-cluster=true"
-	mcList := &unstructured.UnstructuredList{}
-	mcList.SetAPIVersion("cluster.open-cluster-management.io/v1")
-	mcList.SetKind("ManagedClusterList")
-	if err := r.List(ctx, mcList); err != nil {
-		if !errors.IsNotFound(err) && !isNoKindMatchError(err) {
-			return false, fmt.Errorf("failed to list ManagedCluster resources: %w", err)
-		}
-	} else {
-		for i := range mcList.Items {
-			mc := &mcList.Items[i]
-			if mc.GetName() == "local-cluster" {
-				klog.Info("Hub cluster detected: ManagedCluster 'local-cluster' found")
-				return true, nil
-			}
-			labels := mc.GetLabels()
-			if labels != nil {
-				if v, ok := labels["local-cluster"]; ok && v == "true" {
-					klog.Infof("Hub cluster detected: ManagedCluster '%s' has local-cluster=true label", mc.GetName())
-					return true, nil
-				}
-			}
-		}
-	}
-
 	return false, nil
 }
 
