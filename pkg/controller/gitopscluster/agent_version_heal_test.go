@@ -219,7 +219,7 @@ func TestReconcileArgoCDPolicyAgentSpec_NilDynamicClient(t *testing.T) {
 func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 	// Test that ensureNestedMap + field comparison logic works correctly
 	// for all the fields that reconcileArgoCDPolicyAgentSpec manages.
-	t.Run("destinationBasedMapping defaults to absent and must be set", func(t *testing.T) {
+	t.Run("destinationBasedMapping defaults to absent and must be set for managed mode", func(t *testing.T) {
 		agent := map[string]interface{}{}
 		dbm := ensureNestedMap(agent, "destinationBasedMapping")
 		assert.NotNil(t, dbm)
@@ -228,6 +228,56 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 		assert.NotEqual(t, true, dbm["enabled"], "newly created map should not have enabled=true yet")
 		dbm["enabled"] = true
 		assert.Equal(t, true, dbm["enabled"])
+	})
+
+	t.Run("destinationBasedMapping must be forced off for autonomous mode", func(t *testing.T) {
+		// destinationBasedMapping is unsupported by the argocd-agent binary when
+		// running in autonomous mode; reconcileArgoCDPolicyAgentSpec must not enable
+		// it, and must actively disable it if a previous (buggy) reconcile turned it on.
+		agent := map[string]interface{}{
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": true,
+			},
+		}
+		mode := "autonomous"
+
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		needsUpdate := false
+		if mode == "autonomous" {
+			if dbm["enabled"] != false {
+				dbm["enabled"] = false
+				needsUpdate = true
+			}
+		} else if dbm["enabled"] != true {
+			dbm["enabled"] = true
+			needsUpdate = true
+		}
+
+		assert.True(t, needsUpdate, "should patch away a stale destinationBasedMapping=true left over from managed mode")
+		assert.Equal(t, false, dbm["enabled"])
+	})
+
+	t.Run("destinationBasedMapping already false for autonomous mode needs no update", func(t *testing.T) {
+		agent := map[string]interface{}{
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": false,
+			},
+		}
+		mode := "autonomous"
+
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		needsUpdate := false
+		if mode == "autonomous" {
+			if dbm["enabled"] != false {
+				dbm["enabled"] = false
+				needsUpdate = true
+			}
+		} else if dbm["enabled"] != true {
+			dbm["enabled"] = true
+			needsUpdate = true
+		}
+
+		assert.False(t, needsUpdate, "no update should be needed when destinationBasedMapping is already correct for autonomous mode")
 	})
 
 	t.Run("client fields absent on legacy policy template", func(t *testing.T) {

@@ -368,8 +368,19 @@ func (r *ReconcileGitOpsCluster) reconcileArgoCDPolicyAgentSpec(instance *gitops
 					needsUpdate = true
 				}
 
+				// destinationBasedMapping is not supported when the agent runs in autonomous
+				// mode (the argocd-agent binary fails to start with it enabled), so only force
+				// it on for managed-mode agents. For autonomous mode, actively ensure it stays
+				// disabled so previously-broken policies self-heal instead of crash-looping.
 				dbm := ensureNestedMap(agent, "destinationBasedMapping")
-				if dbm["enabled"] != true {
+				if mode == "autonomous" {
+					if dbm["enabled"] != false {
+						dbm["enabled"] = false
+						klog.Infof("Patching Policy %s/%s policy-templates[%d]: disabling argoCDAgent.agent.destinationBasedMapping (unsupported in autonomous mode)",
+							instance.Namespace, policyName, ptIdx)
+						needsUpdate = true
+					}
+				} else if dbm["enabled"] != true {
 					dbm["enabled"] = true
 					klog.Infof("Patching Policy %s/%s policy-templates[%d]: enabling argoCDAgent.agent.destinationBasedMapping",
 						instance.Namespace, policyName, ptIdx)
