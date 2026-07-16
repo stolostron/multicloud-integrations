@@ -254,7 +254,7 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 		}
 
 		assert.True(t, needsUpdate, "should patch away a stale destinationBasedMapping=true left over from managed mode")
-		assert.Equal(t, false, dbm["enabled"])
+		assert.Equal(t, false, dbm["enabled"], "destinationBasedMapping.enabled should be forced to false to prevent the agent from crash-looping in autonomous mode")
 	})
 
 	t.Run("destinationBasedMapping already false for autonomous mode needs no update", func(t *testing.T) {
