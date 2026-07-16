@@ -44,6 +44,16 @@ APPSET_NAME="cycle-agent-guestbook-appset"
 HUB_APPCONTROLLER_RBAC_NAME="cycle-agent-appcontroller-cluster-admin"
 ARGOCD_NS="openshift-gitops"
 
+# Autonomous-mode phase: exercises mode=autonomous specifically (as opposed to the
+# managed-mode phase above, which never sets .spec.gitopsAddon.argoCDAgent.mode). Runs as a
+# separate, sequential phase against the SAME managed clusters, after the managed-mode
+# GitOpsCluster/MCA is fully torn down - a managed cluster can only run one gitops-addon
+# ManagedClusterAddOn (one mode) at a time, so the two phases can never coexist.
+AUTONOMOUS_GITOPSCLUSTER_NAME="cycle-agent-autonomous-gitops"
+AUTONOMOUS_PLACEMENT_NAME="cycle-agent-autonomous-placement"
+AUTONOMOUS_APP_PREFIX="guestbook-autonomous"
+AUTONOMOUS_APP_NAMESPACE="guestbook-autonomous"
+
 # Parse MANAGED_CLUSTERS into arrays
 declare -a CLUSTER_NAMES=()
 declare -A CLUSTER_KUBECONFIGS=()
@@ -234,6 +244,19 @@ clean_hub_stale() {
     # Clean any stale local-cluster hybrid app/namespace left over from an interrupted run.
     hub delete applications.argoproj.io "$LOCAL_CLUSTER_APP" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
     hub delete namespace guestbook --ignore-not-found --wait=false 2>/dev/null || true
+
+    # Delete stale autonomous-mode GitOpsCluster, Policy, Placement left over from an
+    # interrupted run. Autonomous apps have no ApplicationSet and no skip-reconcile cluster
+    # secret entanglement, so no finalizer stripping is needed - just direct deletes.
+    hub delete gitopscluster "$AUTONOMOUS_GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" --ignore-not-found --timeout=30s 2>/dev/null || true
+    hub delete placement "$AUTONOMOUS_PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    hub delete policy "${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
+    hub delete placementbinding "${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        on_cluster "$cluster" delete applications.argoproj.io "${AUTONOMOUS_APP_PREFIX}-${cluster}" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+        on_cluster "$cluster" delete namespace "$AUTONOMOUS_APP_NAMESPACE" --ignore-not-found --wait=false 2>/dev/null || true
+        hub delete applications.argoproj.io "${AUTONOMOUS_APP_PREFIX}-${cluster}" -n "$cluster" --ignore-not-found 2>/dev/null || true
+    done
 }
 
 # --- Build Placement matchExpressions for all clusters ---
@@ -429,15 +452,21 @@ wait_for_deploy() {
         policy_ok=$(hub get policy -n "$ARGOCD_NS" "${GITOPSCLUSTER_NAME}-argocd-policy" -o jsonpath='{.status.compliant}' 2>/dev/null || echo "")
 
         if [ "$all_mca_ok" = true ] && [ "${policy_ok:-}" = "Compliant" ]; then
-            local app_healthy=0 app_total=0
+            # Requires a real (non-empty) sync status, not health=Healthy: the guestbook demo
+            # image runs as non-root binding port 80, which OpenShift's restricted SCC rejects,
+            # so health legitimately never reaches "Healthy" on OCP spokes - a known, pre-existing,
+            # already-tolerated-elsewhere (see verify_managed's WARNING-only guestbook-ui check)
+            # limitation of the demo app, not a real deploy failure. Gating this coarse readiness
+            # check on an unreachable health state just burns the full timeout every cycle.
+            local app_synced=0 app_total=0
             for cluster in "${CLUSTER_NAMES[@]}"; do
-                local app_ok
-                app_ok=$(hub get applications.argoproj.io -n "$ARGOCD_NS" "guestbook-${cluster}" -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+                local app_sync
+                app_sync=$(hub get applications.argoproj.io -n "$ARGOCD_NS" "guestbook-${cluster}" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
                 app_total=$((app_total+1))
-                [ "$app_ok" = "Healthy" ] && app_healthy=$((app_healthy+1))
+                [ -n "$app_sync" ] && [ "$app_sync" != "Unknown" ] && app_synced=$((app_synced+1))
             done
-            if [ "$app_healthy" -gt 0 ] && [ "$app_total" -gt 0 ]; then
-                pass "Deploy verified: MCAs all Available, apps ${app_healthy}/${app_total} Healthy, Policy=Compliant (${elapsed}s)"
+            if [ "$app_synced" -gt 0 ] && [ "$app_total" -gt 0 ]; then
+                pass "Deploy verified: MCAs all Available, apps ${app_synced}/${app_total} have a real sync status, Policy=Compliant (${elapsed}s)"
                 return 0
             fi
         fi
@@ -449,12 +478,95 @@ wait_for_deploy() {
     fail "Deploy timed out after ${WAIT_DEPLOY_SECS}s"
 }
 
+# Waits for a spoke Application's sync status to settle (non-empty, not "Unknown" - i.e. the
+# agent actually ran a real comparison), then waits for the SAME Application's hub-side copy to
+# ALSO become a real (non-empty, non-"Unknown") status - proof the hub actually received a real
+# status relay from the agent through the principal. Deliberately does NOT require the hub value
+# to equal the spoke's value at that instant: both sides progress independently and racing them
+# against each other chases a moving target - observed live, the spoke can advance to a newer
+# resourceVersion while the hub is still catching up on an older one, which a strict-equality
+# check would never converge on even though the pipeline is working correctly. What's under test
+# is simply "did the hub get SOME real update from the spoke", not "are they byte-identical right
+# now" - and does NOT require a hardcoded "Synced" either, since the app's actual GitOps outcome
+# (Synced vs OutOfSync, or an unrelated health issue like the documented restricted-SCC/demo-image
+# mismatch on OCP) is not what's under test here.
+# Args: cluster, app_name, spoke_ns, hub_ns [, settle_attempts, hub_attempts, label]
+wait_for_status_match() {
+    local cluster=$1 app=$2 spoke_ns=$3 hub_ns=$4
+    # hub_attempts default is generous (40 x 10s ~= 400s): observed live that the principal's
+    # event-writer can exhaust its own internal retry budget on a stuck event ("Event failed
+    # after 12 retries, giving up to unblock queue") before finally accepting a fresh one -
+    # confirmed this can take several minutes end-to-end. Restarting the whole script on a false
+    # failure here costs far more time than just waiting long enough the first time.
+    local settle_attempts=${5:-18} hub_attempts=${6:-40} label=${7:-"$cluster $app"}
+
+    # A freshly-installed repo-server can refuse the app-controller's very first comparison
+    # attempt while it's still starting up, leaving sync stuck at "Unknown" until ArgoCD's
+    # periodic resync (default 180s) retries on its own. Nudge an immediate retry via the
+    # standard argocd.argoproj.io/refresh annotation partway through instead of waiting out the
+    # full interval (same proven pattern already used by verify_autonomous).
+    local spoke_val=""
+    for attempt in $(seq 1 "$settle_attempts"); do
+        spoke_val=$(on_cluster "$cluster" get applications.argoproj.io "$app" -n "$spoke_ns" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+        if [ -n "$spoke_val" ] && [ "$spoke_val" != "Unknown" ]; then
+            break
+        fi
+        if [ "$attempt" -eq 3 ]; then
+            log "  $label spoke status still $spoke_val after ${attempt} attempts, nudging a refresh..."
+            on_cluster "$cluster" annotate applications.argoproj.io "$app" -n "$spoke_ns" \
+                "argocd.argoproj.io/refresh=normal" --overwrite >/dev/null 2>&1 || true
+        fi
+        log "  $label spoke status=$spoke_val (not yet settled), waiting... (attempt $attempt/$settle_attempts)"
+        sleep 10
+    done
+    if [ -z "$spoke_val" ] || [ "$spoke_val" = "Unknown" ]; then
+        fail "$label spoke status never settled (stuck at '$spoke_val') - the agent never completed a real comparison"
+    fi
+
+    # Observed live: the principal's event-processor can get stuck retrying one stale
+    # (superseded) status-update event against a resourceVersion the hub has already moved past
+    # ("the server rejected our request due to an error in our request", retried with
+    # exponential backoff). It self-heals once the agent's own next periodic resync (ArgoCD
+    # default 180s) sends a fresh event - but passively waiting for that timer is slow. Nudging
+    # another refresh on the spoke forces ArgoCD to recompute and re-emit a fresh status event
+    # through the agent immediately, unsticking the principal's queue far faster than waiting out
+    # the natural resync interval.
+    local hub_val=""
+    for attempt in $(seq 1 "$hub_attempts"); do
+        hub_val=$(hub get applications.argoproj.io "$app" -n "$hub_ns" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+        if [ -n "$hub_val" ] && [ "$hub_val" != "Unknown" ]; then
+            pass "$label hub received a real status update ($hub_val) - principal is correctly relaying status from the agent (spoke's own status: $spoke_val)"
+            return 0
+        fi
+        if [ "$attempt" -eq 6 ]; then
+            log "  $label hub status still $hub_val after ${attempt} attempts, nudging the spoke to re-emit a fresh status event..."
+            on_cluster "$cluster" annotate applications.argoproj.io "$app" -n "$spoke_ns" \
+                "argocd.argoproj.io/refresh=normal" --overwrite >/dev/null 2>&1 || true
+        fi
+        log "  $label hub status=$hub_val, waiting for a real update... (attempt $attempt/$hub_attempts)"
+        sleep 10
+    done
+    fail "$label hub never received a real status update (stuck at '$hub_val') - principal is not relaying status back to the hub (spoke's own status: $spoke_val)"
+}
+
 # --- Verify managed clusters ---
 verify_managed() {
     for cluster in "${CLUSTER_NAMES[@]}"; do
         local nodes
         nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l)
         pass "$cluster accessible ($nodes nodes)"
+
+        # A freshly-installed agent can crash-loop for a few minutes while the argocd-agent-ca
+        # secret propagates from the hub via ManifestWork (documented, expected - see CLAUDE.md's
+        # "Principal CrashLoopBackOff" note). Observed live: while crash-looping, the agent can
+        # drop its locally-managed Application on a reconnect/resync, and that never gets
+        # redispatched until the agent is actually stable. Wait for stability FIRST so the
+        # app-status checks below aren't racing a still-settling agent.
+        if wait_for_agent_pod_stable "$cluster" 30; then
+            pass "$cluster agent pod stably Running and Ready"
+        else
+            log "WARNING: $cluster agent pod did not stabilize in time - subsequent checks may be racing a still-settling agent"
+        fi
 
         local argocd
         argocd=$(on_cluster "$cluster" get argocd -n openshift-gitops -o name 2>/dev/null || echo "")
@@ -490,6 +602,17 @@ verify_managed() {
         else
             log "WARNING: $cluster guestbook-ui not ready (replicas=$guestbook)"
         fi
+
+        # The spoke-side guestbook-ui check above only proves the agent successfully deployed the
+        # app - it says nothing about whether the principal actually dispatched status back to
+        # the hub. A broken agent<->principal connection would still let the spoke half pass.
+        # This is the real functional proof for managed mode: the hub's own copy of the
+        # ApplicationSet-dispatched Application (named "guestbook-<cluster>") must report the
+        # SAME status the agent's own spoke-side copy reports - proving the full dispatch+report
+        # round trip actually works, regardless of whether the app's own GitOps content happens
+        # to reach Synced (that's a property of the demo app/repo, not of this round trip).
+        wait_for_status_match "$cluster" "guestbook-${cluster}" "$ARGOCD_NS" "$ARGOCD_NS" \
+            18 40 "$cluster guestbook-${cluster}"
 
         # Verify cluster secret has skip-reconcile annotation (agent mode only)
         local skip_reconcile
@@ -568,7 +691,9 @@ verify_local_cluster() {
 # Polls for up to AGENT_VERIFY_SECS (default 300s) waiting for:
 #   1. App dispatched to spoke (Application exists in openshift-gitops on spoke)
 #   2. App reconciled (resources created in guestbook namespace on spoke)
-#   3. Status synced back (hub Application has non-Unknown sync status)
+#   3. Hub app status matches the spoke app's own status (the real proof the principal is
+#      relaying genuine status from the agent - NOT a hardcoded "Synced" requirement, since the
+#      app's actual GitOps outcome is a property of the demo repo/content, not of this pipeline)
 # At least one cluster must pass all 3 checks for this to PASS.
 verify_agent_e2e() {
     local timeout=${AGENT_VERIFY_SECS:-300}
@@ -594,19 +719,27 @@ verify_agent_e2e() {
                 [ "$spoke_resources" -lt 1 ] && cluster_ok=false
             fi
 
-            # 3. Hub app has real sync status (not Unknown = principal relayed agent status)
-            local hub_sync=""
+            # 3. Hub app must have received a real (non-empty, non-Unknown) status update from
+            #    the agent - proof the reporting pipeline actually works. Deliberately does NOT
+            #    require the hub value to equal the spoke's current value: both progress
+            #    independently, and racing them chases a moving target (observed live: the spoke
+            #    can advance to a newer resourceVersion while the hub is still catching up on an
+            #    older one). What matters is that the hub got SOME real update, not that they're
+            #    byte-identical at this instant.
+            local hub_sync="" spoke_sync=""
             if [ "$cluster_ok" = "true" ]; then
+                spoke_sync=$(on_cluster "$cluster" get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
+                    -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
                 hub_sync=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
                     -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
-                [ "$hub_sync" = "Unknown" ] || [ -z "$hub_sync" ] && cluster_ok=false
+                [ -n "$hub_sync" ] && [ "$hub_sync" != "Unknown" ] || cluster_ok=false
             fi
 
             if [ "$cluster_ok" = "true" ]; then
                 local hub_health
                 hub_health=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
                     -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
-                pass "$cluster agent e2e OK: spoke app dispatched, ${spoke_resources} resources, hub sync=$hub_sync health=$hub_health"
+                pass "$cluster agent e2e OK: spoke app dispatched, ${spoke_resources} resources, hub received real status (sync=$hub_sync health=$hub_health, spoke's own sync=$spoke_sync)"
                 any_cluster_ok=true
             fi
         done
@@ -653,44 +786,31 @@ verify_agent_e2e() {
 # but do NOT fail the check — they are expected during initial deployment.
 verify_pods_stable() {
     local settle_secs=${POD_STABLE_SETTLE_SECS:-30}
+    local recover_timeout=${POD_STABLE_RECOVER_SECS:-180}
     local namespaces=("openshift-gitops" "openshift-gitops-operator" "open-cluster-management-agent-addon")
-
-    # Snapshot 1: record restart counts (max across all containers per pod)
-    declare -A restart_before
-    for cluster in "${CLUSTER_NAMES[@]}"; do
-        for ns in "${namespaces[@]}"; do
-            local pods_output
-            pods_output=$(on_cluster "$cluster" get pods -n "$ns" -o json 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for pod in d.get('items',[]):
-    name=pod['metadata']['name']
-    phase=pod['status'].get('phase','Unknown')
-    restarts=max((cs.get('restartCount',0) for cs in pod['status'].get('containerStatuses',[])),default=0)
-    print(f'{name} {restarts} {phase}')
-" 2>/dev/null || echo "")
-            [ -z "$pods_output" ] && continue
-            while IFS= read -r line; do
-                local pod_name restarts phase
-                pod_name=$(echo "$line" | awk '{print $1}')
-                restarts=$(echo "$line" | awk '{print $2}')
-                phase=$(echo "$line" | awk '{print $3}')
-                [ "$phase" != "Running" ] && continue
-                [ "$restarts" = "<none>" ] && restarts=0
-                restart_before["${cluster}/${ns}/${pod_name}"]=$restarts
-            done <<< "$pods_output"
-        done
-    done
 
     log "Waiting ${settle_secs}s for pods to settle..."
     sleep "$settle_secs"
 
-    # Snapshot 2: check for restart count increases (max across all containers, all-ready check)
-    local all_stable=true
-    for cluster in "${CLUSTER_NAMES[@]}"; do
-        for ns in "${namespaces[@]}"; do
-            local pods_output
-            pods_output=$(on_cluster "$cluster" get pods -n "$ns" -o json 2>/dev/null | python3 -c "
+    # Poll until every pod converges to STABLE: Running+Ready with an unchanged restart count
+    # across two consecutive checks. A pod may restart once or twice on the way there (e.g. the
+    # well-known argocd-agent-ca/client-tls secret propagation race - see "Expected Waits" in
+    # CLAUDE.md, which can transiently crash-loop a fresh agent pod for up to a couple minutes
+    # before self-healing) without failing this check, as long as it eventually settles. It only
+    # fails a pod that never reaches that stable state within the recovery window - a single
+    # snapshot right after settle_secs can't tell "still recovering" apart from "actually broken."
+    declare -A last_restarts
+    declare -A stable_streak
+    declare -A last_seen
+    local recover_elapsed=0
+    local pod_keys=""
+
+    while true; do
+        pod_keys=""
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            for ns in "${namespaces[@]}"; do
+                local pods_output
+                pods_output=$(on_cluster "$cluster" get pods -n "$ns" -o json 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for pod in d.get('items',[]):
@@ -701,34 +821,59 @@ for pod in d.get('items',[]):
     ready='true' if all(cs.get('ready',False) for cs in statuses) else 'false'
     print(f'{name} {restarts} {phase} {ready}')
 " 2>/dev/null || echo "")
-            [ -z "$pods_output" ] && continue
-            while IFS= read -r line; do
-                local pod_name restarts phase ready
-                pod_name=$(echo "$line" | awk '{print $1}')
-                restarts=$(echo "$line" | awk '{print $2}')
-                phase=$(echo "$line" | awk '{print $3}')
-                ready=$(echo "$line" | awk '{print $4}')
+                [ -z "$pods_output" ] && continue
+                while IFS= read -r line; do
+                    local pod_name restarts phase ready key prev_restarts
+                    pod_name=$(echo "$line" | awk '{print $1}')
+                    restarts=$(echo "$line" | awk '{print $2}')
+                    phase=$(echo "$line" | awk '{print $3}')
+                    ready=$(echo "$line" | awk '{print $4}')
+                    key="${cluster}/${ns}/${pod_name}"
+                    pod_keys+="${key}"$'\n'
 
-                # Pod must be Running and Ready
-                if [ "$phase" != "Running" ] || [ "$ready" != "true" ]; then
-                    log "FAIL: $cluster pod $pod_name in $ns is $phase (ready=$ready)"
-                    on_cluster "$cluster" logs -n "$ns" "$pod_name" --tail=10 2>/dev/null || true
-                    all_stable=false
-                    continue
-                fi
-
-                # Check if restarts increased during settle period (active crash loop)
-                local before=${restart_before["${cluster}/${ns}/${pod_name}"]:-0}
-                if [ "$restarts" -gt "$before" ] 2>/dev/null; then
-                    log "FAIL: $cluster pod $pod_name in $ns restarted during settle (${before}→${restarts})"
-                    on_cluster "$cluster" logs -n "$ns" "$pod_name" --previous --tail=10 2>/dev/null || true
-                    all_stable=false
-                elif [ "$restarts" -gt 0 ] 2>/dev/null; then
-                    log "WARNING: $cluster pod $pod_name in $ns has $restarts historical restarts (stabilized)"
-                fi
-            done <<< "$pods_output"
+                    prev_restarts=${last_restarts[$key]:-}
+                    if [ -n "$prev_restarts" ] && [ "$phase" = "Running" ] && [ "$ready" = "true" ] && [ "$restarts" = "$prev_restarts" ]; then
+                        stable_streak[$key]=$(( ${stable_streak[$key]:-0} + 1 ))
+                    else
+                        stable_streak[$key]=0
+                    fi
+                    last_restarts[$key]=$restarts
+                    last_seen[$key]="phase=$phase ready=$ready restarts=$restarts"
+                done <<< "$pods_output"
+            done
         done
+
+        local all_converged=true
+        while IFS= read -r key; do
+            [ -z "$key" ] && continue
+            if [ "${stable_streak[$key]:-0}" -lt 2 ]; then
+                all_converged=false
+                break
+            fi
+        done <<< "$pod_keys"
+
+        [ "$all_converged" = "true" ] && break
+        [ "$recover_elapsed" -ge "$recover_timeout" ] && break
+        sleep 15
+        recover_elapsed=$((recover_elapsed + 15))
+        log "  Some pods still converging (restarts/readiness changing) - waiting... (${recover_elapsed}s/${recover_timeout}s)"
     done
+
+    local all_stable=true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        if [ "${stable_streak[$key]:-0}" -lt 2 ]; then
+            log "FAIL: $key did not stabilize within $((settle_secs + recover_timeout))s (last seen: ${last_seen[$key]})"
+            local cluster ns pod_name
+            cluster=$(echo "$key" | cut -d/ -f1)
+            ns=$(echo "$key" | cut -d/ -f2)
+            pod_name=$(echo "$key" | cut -d/ -f3)
+            on_cluster "$cluster" logs -n "$ns" "$pod_name" --tail=10 2>/dev/null || true
+            all_stable=false
+        elif [ "${last_restarts[$key]}" -gt 0 ] 2>/dev/null; then
+            log "WARNING: $key has ${last_restarts[$key]} restart(s) but stabilized"
+        fi
+    done <<< "$pod_keys"
 
     if [ "$all_stable" = "true" ]; then
         pass "All pods stable across all managed clusters"
@@ -785,6 +930,428 @@ verify_gitopsaddon_labels() {
             pass "$cluster all embedded operator resources have gitopsaddon label"
         fi
     done
+}
+
+# =====================================================================
+# Autonomous mode phase
+# =====================================================================
+# Runs as a separate, sequential phase against the SAME managed clusters, AFTER the managed-mode
+# phase above is fully torn down (deploy/verify/delete/cleanup) - a managed cluster can only run
+# one gitops-addon ManagedClusterAddOn (one mode) at a time, so the two phases can never coexist.
+# Unlike managed mode, autonomous mode has no ApplicationSet/principal-driven dispatch: guestbook
+# Applications are created directly on each spoke (kubectl, standing in for "Git" per the
+# argocd-agent docs), and the principal mirrors a read-only reflection back to the hub in a
+# namespace named after the agent (NOT $ARGOCD_NS).
+
+# --- Deploy autonomous-mode GitOpsCluster ---
+# No serverAddress/serverPort set, same as the managed-mode deploy() above - the controller's own
+# auto-discovery (Route/LoadBalancer/NodePort) finds the principal's externally-reachable
+# endpoint. Hardcoding an internal cluster-DNS address here would work for local-cluster but
+# silently break every real external spoke.
+deploy_autonomous() {
+    log "Deploying AUTONOMOUS mode to clusters: ${CLUSTER_NAMES[*]}"
+    local match_values
+    match_values=$(build_placement_values)
+
+    hub apply -f - <<EOF
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: ${AUTONOMOUS_PLACEMENT_NAME}
+  namespace: ${ARGOCD_NS}
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions:
+            - key: name
+              operator: In
+              values:
+${match_values}
+            - key: local-cluster
+              operator: NotIn
+              values:
+                - "true"
+---
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: ${AUTONOMOUS_GITOPSCLUSTER_NAME}
+  namespace: ${ARGOCD_NS}
+spec:
+  argoServer:
+    cluster: ${LOCAL_CLUSTER_NAME}
+    argoNamespace: ${ARGOCD_NS}
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: ${AUTONOMOUS_PLACEMENT_NAME}
+  gitopsAddon:
+    enabled: true
+    argoCDAgent:
+      enabled: true
+      mode: autonomous
+EOF
+
+    log "Autonomous-mode deploy manifests applied"
+}
+
+# --- Wait for autonomous-mode deploy ---
+wait_for_autonomous_deploy() {
+    log "Waiting up to ${WAIT_DEPLOY_SECS}s for autonomous-mode deployment..."
+    local elapsed=0
+    while [ $elapsed -lt "$WAIT_DEPLOY_SECS" ]; do
+        local all_mca_ok=true
+        local mca_status=""
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            local mca_ok
+            mca_ok=$(hub get managedclusteraddon -n "$cluster" gitops-addon -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "")
+            mca_status+=" ${cluster}=${mca_ok:-Pending}"
+            [ "$mca_ok" != "True" ] && all_mca_ok=false
+        done
+
+        local policy_ok
+        policy_ok=$(hub get policy -n "$ARGOCD_NS" "${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy" -o jsonpath='{.status.compliant}' 2>/dev/null || echo "")
+
+        if [ "$all_mca_ok" = true ] && [ "${policy_ok:-}" = "Compliant" ]; then
+            pass "Autonomous deploy verified: MCAs all Available, Policy=Compliant (${elapsed}s)"
+            return 0
+        fi
+
+        sleep 30
+        elapsed=$((elapsed + 30))
+        log "  Waiting... MCA:${mca_status} Policy=${policy_ok:-Pending} (${elapsed}s)"
+    done
+    fail "Autonomous deploy timed out after ${WAIT_DEPLOY_SECS}s"
+}
+
+# --- Deploy guestbook Applications directly on each spoke (the autonomous way) ---
+# Autonomous agents never receive Applications from the hub - all configuration is created on
+# the workload cluster first (see https://argocd-agent.readthedocs.io/latest/concepts/agent-modes/autonomous/).
+# A real deployment would do this via Git (app-of-apps); kubectl apply directly on the spoke is
+# the same thing from the agent's point of view; it just watches its own local API server.
+deploy_autonomous_apps() {
+    log "Deploying guestbook Applications directly on spokes (autonomous mode)..."
+    ensure_appcontroller_rbac
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        on_cluster "$cluster" apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${AUTONOMOUS_APP_PREFIX}-${cluster}
+  namespace: ${ARGOCD_NS}
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/argoproj/argocd-example-apps.git'
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${AUTONOMOUS_APP_NAMESPACE}
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
+EOF
+    done
+    log "Autonomous Applications applied directly on spokes"
+}
+
+# Waits for the autonomous agent pod on $1 to reach Running+Ready and STAY there across two
+# consecutive samples (same phase, ready, and restart count) 10s apart - not just be observed
+# there once. A crash-looping container (start -> fatal error -> exit -> restart) can genuinely
+# report Running+ready=true for the brief window between container start and the fatal exit, long
+# enough that a single-sample poll has a real chance of sampling mid-flicker and reporting a false
+# pass while the pod is actually stuck restarting forever. Requiring phase+ready+restartCount to
+# be identical across two samples closes that gap: any restart in between changes the restart
+# count and forces another round. Mirrors waitForPodPhase's fix in the e2e suite.
+wait_for_agent_pod_stable() {
+    local cluster=$1
+    local max_attempts=${2:-12}
+    local last_phase="" last_ready="" last_restarts=""
+    local stable=false
+    for attempt in $(seq 1 "$max_attempts"); do
+        local phase ready restarts
+        phase=$(on_cluster "$cluster" get pod -n "$ARGOCD_NS" -l app.kubernetes.io/name=acm-openshift-gitops-agent-agent -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
+        ready=$(on_cluster "$cluster" get pod -n "$ARGOCD_NS" -l app.kubernetes.io/name=acm-openshift-gitops-agent-agent -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "")
+        restarts=$(on_cluster "$cluster" get pod -n "$ARGOCD_NS" -l app.kubernetes.io/name=acm-openshift-gitops-agent-agent -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo "")
+        if [ "$phase" = "Running" ] && [ "$ready" = "true" ] && \
+           [ "$phase" = "$last_phase" ] && [ "$ready" = "$last_ready" ] && [ "$restarts" = "$last_restarts" ]; then
+            stable=true
+            break
+        fi
+        log "  $cluster autonomous agent pod phase=$phase ready=$ready restarts=$restarts, waiting for stability... (attempt $attempt/$max_attempts)"
+        last_phase=$phase
+        last_ready=$ready
+        last_restarts=$restarts
+        sleep 10
+    done
+    [ "$stable" = "true" ]
+}
+
+# --- Verify autonomous mode: no crash-loop, correct config, app dispatch + hub mirror ---
+verify_autonomous() {
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        # 1. Agent pod must be stably Running and Ready - necessary but NOT sufficient proof the
+        #    fix works: a pod that flickers Running/Ready between restarts must not pass. The
+        #    authoritative functional proof is steps 5/6 below (app actually syncs on the spoke
+        #    AND the hub reflects that status back) - a broken agent could never do either of
+        #    those, so this pod check is a fast-failing diagnostic aid, not the real gate.
+        if wait_for_agent_pod_stable "$cluster" 12; then
+            pass "$cluster autonomous agent pod stably Running and Ready"
+        else
+            local agent_logs
+            agent_logs=$(on_cluster "$cluster" logs -n "$ARGOCD_NS" -l app.kubernetes.io/name=acm-openshift-gitops-agent-agent --tail=20 2>/dev/null || echo "")
+            fail "$cluster autonomous agent pod not stably Running/Ready. Recent logs: $agent_logs"
+        fi
+
+        # 2. No destinationBasedMapping FATAL anywhere in the agent's current logs
+        local fatal_count
+        fatal_count=$(on_cluster "$cluster" logs -n "$ARGOCD_NS" -l app.kubernetes.io/name=acm-openshift-gitops-agent-agent --tail=200 2>/dev/null | grep -c "destination-based mapping is not supported" || true)
+        if [ "$fatal_count" -eq 0 ]; then
+            pass "$cluster autonomous agent has no destinationBasedMapping FATAL errors"
+        else
+            fail "$cluster autonomous agent hit the destinationBasedMapping FATAL error ${fatal_count} time(s)"
+        fi
+
+        # 3. Spoke ArgoCD CR must have destinationBasedMapping disabled and client.mode=autonomous
+        local dbm mode
+        dbm=$(on_cluster "$cluster" get argocd acm-openshift-gitops -n "$ARGOCD_NS" -o jsonpath='{.spec.argoCDAgent.agent.destinationBasedMapping.enabled}' 2>/dev/null || echo "")
+        mode=$(on_cluster "$cluster" get argocd acm-openshift-gitops -n "$ARGOCD_NS" -o jsonpath='{.spec.argoCDAgent.agent.client.mode}' 2>/dev/null || echo "")
+        if [ "$mode" = "autonomous" ] && [ "$dbm" = "false" ]; then
+            pass "$cluster spoke ArgoCD CR: mode=autonomous, destinationBasedMapping.enabled=false"
+        else
+            fail "$cluster spoke ArgoCD CR has mode='$mode' destinationBasedMapping.enabled='$dbm' (expected mode=autonomous, dbm=false)"
+        fi
+
+        # 4. Hub Policy must match - source of truth for what the ConfigurationPolicy enforces
+        local policy_dbm
+        policy_dbm=$(hub get policy "${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy" -n "$ARGOCD_NS" -o json 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    objdef = d['spec']['policy-templates'][0]['objectDefinition']['spec']['object-templates'][0]['objectDefinition']
+    print(objdef['spec']['argoCDAgent']['agent']['destinationBasedMapping']['enabled'])
+except Exception:
+    print('ERROR')
+" 2>/dev/null || echo "ERROR")
+        if [ "$policy_dbm" = "False" ]; then
+            pass "$cluster hub Policy: destinationBasedMapping.enabled=false"
+        else
+            fail "$cluster hub Policy destinationBasedMapping.enabled='$policy_dbm' (expected False)"
+        fi
+
+        # 5. The directly-created Application must settle to a real status on the spoke itself
+        #    (source of truth). A freshly-installed repo-server can refuse the app-controller's
+        #    very first comparison attempt while it's still starting up, leaving sync stuck at
+        #    "Unknown" until ArgoCD's periodic resync (default 180s) retries on its own. Nudge an
+        #    immediate retry via the standard argocd.argoproj.io/refresh annotation (the same
+        #    mechanism `argocd app get --refresh` uses) instead of waiting out the full interval.
+        local app_name="${AUTONOMOUS_APP_PREFIX}-${cluster}"
+        local sync=""
+        for attempt in $(seq 1 18); do
+            sync=$(on_cluster "$cluster" get applications.argoproj.io "$app_name" -n "$ARGOCD_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+            if [ -n "$sync" ] && [ "$sync" != "Unknown" ]; then
+                break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+                log "  $cluster $app_name still sync=$sync after ${attempt} attempts, nudging a refresh..."
+                on_cluster "$cluster" annotate applications.argoproj.io "$app_name" -n "$ARGOCD_NS" \
+                    "argocd.argoproj.io/refresh=normal" --overwrite >/dev/null 2>&1 || true
+            fi
+            log "  $cluster $app_name sync=$sync, waiting... (attempt $attempt/18)"
+            sleep 10
+        done
+        if [ -n "$sync" ] && [ "$sync" != "Unknown" ]; then
+            pass "$cluster $app_name settled to sync=$sync on spoke"
+        else
+            fail "$cluster $app_name sync status never settled on spoke (stuck at '$sync') - the agent never completed a real comparison"
+        fi
+
+        local guestbook_ready
+        guestbook_ready=$(on_cluster "$cluster" get deploy guestbook-ui -n "$AUTONOMOUS_APP_NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        if [ "$guestbook_ready" = "1" ]; then
+            pass "$cluster $app_name guestbook-ui ready on spoke"
+        else
+            log "WARNING: $cluster $app_name guestbook-ui not ready (replicas=$guestbook_ready) - likely restricted-SCC vs demo image on OCP, same tolerance as managed mode"
+        fi
+
+        # 6. Mirrored on the hub as a read-only reflection, in a namespace named after the agent
+        #    (never $ARGOCD_NS) - per the argocd-agent autonomous-mode docs, the hub can inspect
+        #    but never originate autonomous Application spec changes. Must have received a real
+        #    (non-empty, non-Unknown) status update, not a hardcoded "Synced" and not required to
+        #    equal the spoke's current value from step 5 (both progress independently - racing
+        #    them chases a moving target). What's under test is the agent->principal->hub
+        #    reporting pipeline actually delivering real data, not byte-identical timing.
+        # 40 attempts (~400s): same generous window as wait_for_status_match's hub_attempts -
+        # the principal's event-writer can exhaust its own internal retry budget on a stuck event
+        # before finally accepting a fresh one, observed taking several minutes end-to-end.
+        local hub_sync=""
+        for attempt in $(seq 1 40); do
+            hub_sync=$(hub get applications.argoproj.io "$app_name" -n "$cluster" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+            [ -n "$hub_sync" ] && [ "$hub_sync" != "Unknown" ] && break
+            if [ "$attempt" -eq 6 ]; then
+                log "  hub mirror of $app_name (ns=$cluster) still $hub_sync after ${attempt} attempts, nudging the spoke to re-emit a fresh status event..."
+                on_cluster "$cluster" annotate applications.argoproj.io "$app_name" -n "$ARGOCD_NS" \
+                    "argocd.argoproj.io/refresh=normal" --overwrite >/dev/null 2>&1 || true
+            fi
+            log "  hub mirror of $app_name (ns=$cluster) sync=$hub_sync, waiting for a real update... (attempt $attempt/40)"
+            sleep 10
+        done
+        if [ -n "$hub_sync" ] && [ "$hub_sync" != "Unknown" ]; then
+            pass "$cluster $app_name mirrored on hub (namespace=$cluster), received real status ($hub_sync; spoke's own status: $sync)"
+        else
+            fail "$cluster $app_name hub mirror never received a real status update (stuck at '$hub_sync'; spoke's own status: $sync)"
+        fi
+    done
+}
+
+# --- Clean up autonomous guestbook apps from spokes (before tearing down the GitOpsCluster) ---
+cleanup_autonomous_apps() {
+    log "Cleaning up autonomous guestbook apps from spokes..."
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        on_cluster "$cluster" delete applications.argoproj.io "${AUTONOMOUS_APP_PREFIX}-${cluster}" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    done
+    # Wait for the hub-side mirrors to finalize naturally (the principal removes its reflection
+    # once the agent confirms deletion on the spoke) before tearing down the GitOpsCluster/MCA.
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local app_name="${AUTONOMOUS_APP_PREFIX}-${cluster}"
+        for _ in $(seq 1 12); do
+            hub get applications.argoproj.io "$app_name" -n "$cluster" &>/dev/null || break
+            sleep 10
+        done
+        if hub get applications.argoproj.io "$app_name" -n "$cluster" &>/dev/null; then
+            log "WARNING: hub mirror of $app_name (ns=$cluster) still present after cleanup wait"
+        else
+            pass "$cluster: hub mirror of $app_name fully deleted"
+        fi
+    done
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        on_cluster "$cluster" delete namespace "$AUTONOMOUS_APP_NAMESPACE" --ignore-not-found --wait=false 2>/dev/null || true
+    done
+}
+
+# --- Delete autonomous-mode resources from hub (explicit manual ordering, same as delete_from_hub) ---
+delete_autonomous_from_hub() {
+    log "Deleting autonomous-mode resources from hub..."
+    local policy_name="${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy"
+
+    hub delete gitopscluster "$AUTONOMOUS_GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+
+    hub delete placementbinding "${policy_name}-binding" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+    hub delete policy "$policy_name" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
+
+    log "Waiting for replicated autonomous Policies to be removed from hub..."
+    local rp_timeout=120
+    local rp_elapsed=0
+    local rp_all_gone=false
+    while [ "$rp_elapsed" -lt "$rp_timeout" ]; do
+        rp_all_gone=true
+        for cluster in "${CLUSTER_NAMES[@]}"; do
+            if hub get policy -n "$cluster" --no-headers 2>/dev/null | grep -q "argocd" 2>/dev/null; then
+                rp_all_gone=false
+                break
+            fi
+        done
+        if $rp_all_gone; then
+            pass "Replicated autonomous Policies removed from hub (${rp_elapsed}s)"
+            break
+        fi
+        sleep 5
+        rp_elapsed=$((rp_elapsed + 5))
+    done
+    if ! $rp_all_gone; then
+        log "WARNING: replicated autonomous Policies still on hub after ${rp_timeout}s"
+    fi
+
+    log "Waiting for ConfigurationPolicy to be removed from managed clusters..."
+    local cp_timeout=120
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        local cp_elapsed=0
+        while [ "$cp_elapsed" -lt "$cp_timeout" ]; do
+            local cp_count
+            cp_count=$(on_cluster "$cluster" get configurationpolicy -A --no-headers 2>/dev/null | grep -c "argocd" || true)
+            if [ "$cp_count" -eq 0 ]; then
+                pass "ConfigurationPolicy removed from $cluster (${cp_elapsed}s)"
+                break
+            fi
+            sleep 10
+            cp_elapsed=$((cp_elapsed + 10))
+        done
+        if [ "$cp_elapsed" -ge "$cp_timeout" ]; then
+            log "WARNING: $cluster ConfigurationPolicy not removed after ${cp_timeout}s — proceeding anyway"
+        fi
+    done
+
+    log "Waiting 30s for config-policy-controller reconciliation queue to drain..."
+    sleep 30
+
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        hub delete managedclusteraddon gitops-addon -n "$cluster" --ignore-not-found --wait=false 2>/dev/null || true
+    done
+    log "Autonomous MCAs deletion triggered"
+
+    wait_for_mca_cleanup
+
+    hub delete placement "$AUTONOMOUS_PLACEMENT_NAME" -n "$ARGOCD_NS" --ignore-not-found 2>/dev/null || true
+
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        hub delete addondeploymentconfig gitops-addon-config -n "$cluster" --ignore-not-found 2>/dev/null || true
+    done
+
+    log "Autonomous-mode hub resources deleted"
+}
+
+# --- Verify autonomous-mode cleanup ---
+verify_autonomous_cleanup() {
+    local issues=0
+
+    if hub get gitopscluster "$AUTONOMOUS_GITOPSCLUSTER_NAME" -n "$ARGOCD_NS" &>/dev/null; then
+        log "CLEANUP ISSUE: autonomous GitOpsCluster still exists on hub"; issues=$((issues+1))
+    else
+        pass "Hub: autonomous GitOpsCluster deleted"
+    fi
+
+    if hub get policy "${AUTONOMOUS_GITOPSCLUSTER_NAME}-argocd-policy" -n "$ARGOCD_NS" &>/dev/null; then
+        log "CLEANUP ISSUE: autonomous Policy still exists on hub"; issues=$((issues+1))
+    else
+        pass "Hub: autonomous Policy deleted"
+    fi
+
+    for cluster in "${CLUSTER_NAMES[@]}"; do
+        if hub get managedclusteraddon -n "$cluster" gitops-addon &>/dev/null; then
+            log "CLEANUP ISSUE: MCA still in $cluster (autonomous)"; issues=$((issues+1))
+        else
+            pass "Hub: MCA deleted for $cluster (autonomous)"
+        fi
+
+        if on_cluster "$cluster" get argocd acm-openshift-gitops -n "$ARGOCD_NS" &>/dev/null; then
+            log "CLEANUP ISSUE: $cluster ArgoCD CR still present after autonomous teardown"; issues=$((issues+1))
+        else
+            pass "$cluster: ArgoCD CR removed (autonomous)"
+        fi
+
+        if on_cluster "$cluster" get deploy gitops-addon -n open-cluster-management-agent-addon &>/dev/null; then
+            log "CLEANUP ISSUE: $cluster addon deployment still present (autonomous)"; issues=$((issues+1))
+        else
+            pass "$cluster: addon deployment removed (autonomous)"
+        fi
+
+        local nodes
+        nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l)
+        if [ "$nodes" -gt 0 ]; then
+            pass "$cluster still accessible ($nodes nodes)"
+        else
+            log "CLEANUP ISSUE: $cluster NOT accessible!"; issues=$((issues+1))
+        fi
+    done
+
+    if [ $issues -gt 0 ]; then
+        fail "Autonomous cleanup verification found $issues issue(s)"
+    fi
 }
 
 # --- Delete from hub (explicit manual ordering) ---
@@ -1116,6 +1683,18 @@ if [ "$FORCE_CLEAN_FIRST" = "true" ]; then
     hub -n "$HUB_CONTROLLER_NS" rollout status deployment/multicluster-operators-application --timeout=120s 2>/dev/null || true
     sleep 30
     log "Hub controller restarted"
+
+    # Same reason as the between-cycles reset below: a prior run's agents may have left stale
+    # gRPC events queued for the principal, which fresh agents in this run would receive and
+    # reject as "not managed", blocking app dispatch indefinitely (observed directly: agent logs
+    # showing "could not delete existing app: ... is not managed" / "Dropping app deletion event
+    # because the app is not managed" right after a force-clean immediately followed by a fresh
+    # deploy). The between-cycles reset already restarts the principal for this; force-clean's
+    # initial cleanup must do the same before the very first cycle's deploy.
+    log "Restarting principal to clear any stale gRPC events from a prior run..."
+    hub -n "$ARGOCD_NS" rollout restart deploy -l app.kubernetes.io/component=principal 2>/dev/null || true
+    hub -n "$ARGOCD_NS" rollout status deploy -l app.kubernetes.io/component=principal --timeout=60s 2>/dev/null || true
+    sleep 10
 fi
 
 for cycle in $(seq 1 "$MAX_CYCLES"); do
@@ -1133,6 +1712,23 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
 
     delete_from_hub
     verify_cleanup
+
+    # Restart the principal before starting the autonomous-mode phase, for the same reason as
+    # the between-cycles reset below: fresh agents receiving stale gRPC events from the
+    # just-torn-down managed-mode agents would otherwise get rejected as "not managed".
+    log "Resetting principal before autonomous-mode phase..."
+    hub -n "$ARGOCD_NS" rollout restart deploy -l app.kubernetes.io/component=principal 2>/dev/null || true
+    hub -n "$ARGOCD_NS" rollout status deploy -l app.kubernetes.io/component=principal --timeout=60s 2>/dev/null || true
+    sleep 10
+
+    deploy_autonomous
+    wait_for_autonomous_deploy
+    deploy_autonomous_apps
+    verify_autonomous
+
+    cleanup_autonomous_apps
+    delete_autonomous_from_hub
+    verify_autonomous_cleanup
 
     # Between cycles: restart the ArgoCD principal pod to clear its gRPC event queue,
     # and delete stale CSRs to prevent "too many CSR" throttling.

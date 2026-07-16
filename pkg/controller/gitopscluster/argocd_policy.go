@@ -307,12 +307,16 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 	// The operator handles agent image selection via ARGOCD_AGENT_IMAGE env var (v1.20+),
 	// so we don't set the image in the ArgoCD CR - the operator picks the correct Red Hat image.
 	//
-	// destinationBasedMapping must be ENABLED on the agent to match the principal. The principal
-	// also has DBM enabled for routing (apps dispatched to agents based on spec.destination.name).
-	// Principal and agent must agree on this setting because it controls the Redis key separator
-	// used for resource tree data ('_' when enabled, '|' when disabled). A mismatch causes the
-	// ArgoCD UI live manifest to fail with "Resource not found in cluster" and agent logs showing
-	// "unexpected key format, missing '_'".
+	// destinationBasedMapping is only valid for MANAGED-mode agents: it must be ENABLED there to
+	// match the principal, which also has DBM enabled for routing (apps dispatched to agents
+	// based on spec.destination.name). Principal and agent must agree on this setting because it
+	// controls the Redis key separator used for resource tree data ('_' when enabled, '|' when
+	// disabled). A mismatch causes the ArgoCD UI live manifest to fail with "Resource not found
+	// in cluster" and agent logs showing "unexpected key format, missing '_'".
+	//
+	// AUTONOMOUS-mode agents don't participate in that principal-driven dispatch at all (they
+	// create Applications locally instead), and the argocd-agent binary fatally refuses to start
+	// with destinationBasedMapping enabled in that mode - so it must stay disabled there.
 	if argoCDAgentEnabled && gitOpsCluster.Spec.GitOpsAddon != nil && gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent != nil {
 		agentConfig := gitOpsCluster.Spec.GitOpsAddon.ArgoCDAgent
 		serverAddress := agentConfig.ServerAddress
@@ -324,6 +328,7 @@ func generateArgoCDSpec(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) string
 		if mode == "" {
 			mode = "managed"
 		}
+		destinationBasedMappingEnabled := mode != "autonomous"
 
 		spec += fmt.Sprintf(`
 argoCDAgent:
@@ -336,11 +341,11 @@ argoCDAgent:
       principalServerPort: "%s"
       mode: "%s"
     destinationBasedMapping:
-      enabled: true
+      enabled: %t
     tls:
       secretName: argocd-agent-client-tls
       rootCASecretName: argocd-agent-ca`,
-			serverAddress, serverPort, mode)
+			serverAddress, serverPort, mode, destinationBasedMappingEnabled)
 	}
 
 	return spec
