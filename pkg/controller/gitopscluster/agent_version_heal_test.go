@@ -268,6 +268,72 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 		assert.Equal(t, []interface{}{"*"}, updated)
 	})
 
+	t.Run("destinationBasedMapping is healed toward false for autonomous mode", func(t *testing.T) {
+		// Autonomous agents don't participate in principal-driven destination-name dispatch,
+		// and the argocd-agent binary refuses to start with destinationBasedMapping enabled in
+		// that mode. A policy that drifted (e.g. created while mode was managed, or hand-edited)
+		// must be corrected back to false when mode is autonomous.
+		agent := map[string]interface{}{
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": true,
+			},
+		}
+		mode := "autonomous"
+
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		wantDBM := mode != "autonomous"
+		needsUpdate := false
+		if dbm["enabled"] != wantDBM {
+			dbm["enabled"] = wantDBM
+			needsUpdate = true
+		}
+
+		assert.True(t, needsUpdate, "a stale enabled=true must be corrected for autonomous mode")
+		assert.Equal(t, false, dbm["enabled"], "destinationBasedMapping.enabled must be false for autonomous mode, or the agent fatally refuses to start")
+	})
+
+	t.Run("destinationBasedMapping is healed toward true for managed mode", func(t *testing.T) {
+		// The reverse direction: a policy stuck at false (e.g. left over from a mode switch away
+		// from autonomous) must be corrected back to true for managed mode, since the principal
+		// expects DBM enabled there for its destination-name based dispatch/Redis key scheme.
+		agent := map[string]interface{}{
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": false,
+			},
+		}
+		mode := "managed"
+
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		wantDBM := mode != "autonomous"
+		needsUpdate := false
+		if dbm["enabled"] != wantDBM {
+			dbm["enabled"] = wantDBM
+			needsUpdate = true
+		}
+
+		assert.True(t, needsUpdate, "a stale enabled=false must be corrected for managed mode")
+		assert.Equal(t, true, dbm["enabled"])
+	})
+
+	t.Run("destinationBasedMapping already correct for autonomous mode needs no update", func(t *testing.T) {
+		agent := map[string]interface{}{
+			"destinationBasedMapping": map[string]interface{}{
+				"enabled": false,
+			},
+		}
+		mode := "autonomous"
+
+		dbm := ensureNestedMap(agent, "destinationBasedMapping")
+		wantDBM := mode != "autonomous"
+		needsUpdate := false
+		if dbm["enabled"] != wantDBM {
+			dbm["enabled"] = wantDBM
+			needsUpdate = true
+		}
+
+		assert.False(t, needsUpdate, "no patch should be issued when the field already matches the mode")
+	})
+
 	t.Run("no update needed when all fields already correct", func(t *testing.T) {
 		agent := map[string]interface{}{
 			"enabled":          true,

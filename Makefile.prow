@@ -73,8 +73,15 @@ lint-go:
 # download the kubebuilder-tools to get kube-apiserver binaries from it
 .PHONY: setup-envtest
 setup-envtest: $(SETUP_ENVTEST)
+# Pinned (not @latest) - see the matching comment in Makefile: setup-envtest's newest tagged
+# releases (v0.24.0+) require go >= 1.26, newer than this repo's go.mod (go 1.25.0) /
+# controller-runtime v0.21.0 dependency. Keep this in sync with Makefile's SETUP_ENVTEST_VERSION.
+SETUP_ENVTEST_VERSION ?= v0.0.0-20250626154428-7fd020cb5fc3
 $(SETUP_ENVTEST): $(LOCALBIN)
-	test -s $(SETUP_ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	@if [ -s $(SETUP_ENVTEST) ] && [ "$$($(SETUP_ENVTEST) version 2>/dev/null | awk '{print $$NF}')" = "$(SETUP_ENVTEST_VERSION)" ]; then \
+		exit 0; \
+	fi; \
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
 test: test-unit
 

@@ -26,9 +26,15 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 		}
 		createBaseResources()
 		createGitOpsCluster(opts)
+		// e2e-Kind-only: see disableHubAppController's doc comment (ArgoCD version gap,
+		// argo-cd#26425/#26442) - not needed/used by gitopsaddon/test-cycle.sh against a real hub.
+		// The Local-Cluster Verification context below only checks secret/health shape, not app
+		// reconciliation, so it doesn't need the hub app-controller on.
+		disableHubAppController()
 	})
 
 	AfterAll(func() {
+		enableHubAppController()
 		safeCleanup(opts)
 	})
 
@@ -45,8 +51,12 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 			verifyArgoCDOnSpoke(8 * time.Minute)
 		})
 
-		It("should deploy ArgoCD agent pod on spoke", func() {
+		It("should deploy ArgoCD agent pod on spoke without crash-looping", func() {
 			verifyAgentPodRunning(10 * time.Minute)
+		})
+
+		It("should have destinationBasedMapping disabled on both hub Policy and spoke ArgoCD CR", func() {
+			verifyDestinationBasedMappingDisabledForAutonomous(gitopsClusterName, argoCDNamespace, 3*time.Minute)
 		})
 
 		It("should auto-discover principal server address from hub ArgoCD", func() {
@@ -82,9 +92,14 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 		})
 	})
 
-	Context("Autonomous Agent Application Sync via Policy", func() {
-		It("should deploy guestbook via Policy on spoke and verify sync", func() {
-			deployGuestbookAutonomousMode(15 * time.Minute)
+	// Deployed by connecting DIRECTLY to the managed cluster's own API server - never through
+	// the hub. That's the actual autonomous-mode contract: the spoke is the source of truth,
+	// and the hub only ever sees a read-only mirror. Delivering the same spec via a hub-authored
+	// Policy would exercise a hub-push path indistinguishable from managed mode and wouldn't
+	// prove autonomous mode's distinguishing behavior.
+	Context("Autonomous Agent Application Sync (direct spoke connection)", func() {
+		It("should sync a guestbook Application created directly on the spoke, and mirror it to the hub", func() {
+			deployGuestbookDirectlyOnSpoke(10 * time.Minute)
 		})
 	})
 
@@ -114,7 +129,7 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 
 	Context("Cleanup", func() {
 		It("should clean up guestbook resources", func() {
-			cleanupGuestbookAutonomous()
+			cleanupGuestbookDirectSpoke()
 		})
 
 		It("should delete all scenario resources in proper order", func() {

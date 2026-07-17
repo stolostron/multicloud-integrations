@@ -15,9 +15,11 @@ limitations under the License.
 package gitopscluster
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -364,6 +366,71 @@ func TestGenerateArgoCDSpec_NoAgentImageForAnyOperator(t *testing.T) {
 	assert.Contains(t, spec, "principalServerAddress: \"192.168.1.100\"")
 	assert.Contains(t, spec, "allowedNamespaces:")
 	assert.Contains(t, spec, "destinationBasedMapping:")
+}
+
+func TestGenerateArgoCDSpec_AutonomousModeDisablesDestinationBasedMapping(t *testing.T) {
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "192.168.1.100",
+					ServerPort:    "443",
+					Mode:          "autonomous",
+				},
+			},
+		},
+	}
+
+	spec := generateArgoCDSpec(gitOpsCluster)
+
+	// destinationBasedMapping must be disabled from the very first generation for autonomous
+	// mode - the argocd-agent binary fatally refuses to start with it enabled in that mode, and
+	// autonomous agents never participate in the principal-driven destination-name dispatch this
+	// setting exists for.
+	require.Contains(t, spec, "destinationBasedMapping:")
+	dbmIdx := strings.Index(spec, "destinationBasedMapping:")
+	afterDBM := spec[dbmIdx:]
+	assert.Contains(t, afterDBM, "enabled: false")
+	assert.Contains(t, spec, "mode: \"autonomous\"")
+}
+
+func TestGenerateArgoCDSpec_ManagedModeEnablesDestinationBasedMapping(t *testing.T) {
+	enabled := true
+	agentEnabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "openshift-gitops",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{
+					Enabled:       &agentEnabled,
+					ServerAddress: "192.168.1.100",
+					ServerPort:    "443",
+					Mode:          "managed",
+				},
+			},
+		},
+	}
+
+	spec := generateArgoCDSpec(gitOpsCluster)
+
+	// Managed-mode agents must match the principal's destinationBasedMapping setting (enabled),
+	// which the principal relies on for destination-name based dispatch/Redis key scheme.
+	require.Contains(t, spec, "destinationBasedMapping:")
+	dbmIdx := strings.Index(spec, "destinationBasedMapping:")
+	afterDBM := spec[dbmIdx:]
+	assert.Contains(t, afterDBM, "enabled: true")
 }
 
 func TestIndentYaml(t *testing.T) {

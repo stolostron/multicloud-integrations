@@ -368,11 +368,20 @@ func (r *ReconcileGitOpsCluster) reconcileArgoCDPolicyAgentSpec(instance *gitops
 					needsUpdate = true
 				}
 
+				// destinationBasedMapping must match the principal for managed-mode agents (it
+				// controls the routing/Redis-key scheme used when the principal dispatches apps
+				// to agents by destination name), but the argocd-agent binary refuses to start
+				// with it enabled at all in autonomous mode - autonomous agents don't participate
+				// in that principal-driven dispatch, since Applications are created locally on the
+				// spoke instead. Heal it toward the value that's actually correct for the
+				// configured mode, in both directions, so a policy that drifted (or was created
+				// under a different mode previously) always converges instead of getting stuck.
 				dbm := ensureNestedMap(agent, "destinationBasedMapping")
-				if dbm["enabled"] != true {
-					dbm["enabled"] = true
-					klog.Infof("Patching Policy %s/%s policy-templates[%d]: enabling argoCDAgent.agent.destinationBasedMapping",
-						instance.Namespace, policyName, ptIdx)
+				wantDBM := mode != "autonomous"
+				if dbm["enabled"] != wantDBM {
+					dbm["enabled"] = wantDBM
+					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.destinationBasedMapping.enabled=%t (mode=%s)",
+						instance.Namespace, policyName, ptIdx, wantDBM, mode)
 					needsUpdate = true
 				}
 

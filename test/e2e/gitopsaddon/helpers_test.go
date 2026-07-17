@@ -359,15 +359,48 @@ func deleteMCAWithFallback(ctx, addonName, ns string) {
 	}
 }
 
+// waitForPodPhase waits for a pod matching labelSelector to reach phase and STAY there across two
+// consecutive samples (same phase, same restart count) 5 seconds apart, not just to be observed
+// there once. A crash-looping container (start -> fatal error -> exit -> restart) can genuinely
+// report status.phase=Running for the brief window between container start and the fatal exit -
+// long enough that a single-sample poll has a real chance of sampling mid-flicker and reporting a
+// false pass while the pod is actually stuck restarting forever. Requiring the phase AND restart
+// count to be identical across two samples closes that gap: any restart in between changes the
+// restart count and forces another round.
 func waitForPodPhase(ctx, ns, labelSelector, phase string, timeout time.Duration) {
-	By(fmt.Sprintf("waiting for pod (%s) in %s to be %s", labelSelector, ns, phase))
-	Eventually(func(g Gomega) string {
-		out, err := kubectlCtx(ctx, "get", "pods", "-n", ns,
-			"-l", labelSelector,
-			"-o", "jsonpath={.items[0].status.phase}")
-		g.Expect(err).NotTo(HaveOccurred())
-		return out
-	}, timeout, 5*time.Second).Should(Equal(phase))
+	By(fmt.Sprintf("waiting for pod (%s) in %s to be stably %s (two consecutive stable samples)", labelSelector, ns, phase))
+	type sample struct {
+		phase    string
+		restarts string
+	}
+	var last *sample
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := kubectlCtx(ctx, "get", "pods", "-n", ns, "-l", labelSelector,
+			"-o", "jsonpath={.items[0].status.phase},{.items[0].status.containerStatuses[0].restartCount}")
+		var cur *sample
+		if err == nil {
+			parts := strings.SplitN(out, ",", 2)
+			s := sample{phase: parts[0]}
+			if len(parts) > 1 {
+				s.restarts = parts[1]
+			}
+			cur = &s
+		}
+		if cur != nil && cur.phase == phase && last != nil && *last == *cur {
+			return
+		}
+		last = cur
+		if time.Now().After(deadline) {
+			curPhase := "<error fetching pod>"
+			if cur != nil {
+				curPhase = cur.phase
+			}
+			Fail(fmt.Sprintf("pod (%s) in %s did not stably reach phase %s within %s (last observed phase: %s, err: %v)",
+				labelSelector, ns, phase, timeout, curPhase, err))
+		}
+		time.Sleep(5 * time.Second)
+	}
 }
 
 func waitForDeploymentReady(ctx, ns, name string, timeout time.Duration) {
@@ -890,23 +923,55 @@ subjects:
 		return replicas
 	}, timeout, 10*time.Second).Should(BeNumerically(">", 0))
 
-	// In agent mode, the hub-side sync status may report Unknown while the
-	// principal re-establishes connectivity after restarts. The actual app
-	// deployment on spoke was already verified above (guestbook-ui is running).
-	// Log the hub sync status for diagnostics but don't fail on it — this
-	// mirrors test-scenarios.sh which uses log_warn for agent sync status.
-	By("checking hub Application sync status (informational)")
-	Eventually(func() string {
-		out, _ := kubectlCtx(hubContext, "get", "application", appName,
+	// The spoke-side guestbook-ui check above only proves the agent successfully deployed the
+	// app - it says nothing about whether the principal actually dispatched status back to the
+	// hub. A broken agent<->principal connection would still let the spoke half of this test
+	// pass. This is the real functional proof for managed mode: the hub's own copy of the
+	// dispatched Application must receive a REAL (non-empty, non-Unknown) status update -
+	// proving the full dispatch+report round trip actually works. Deliberately does not require
+	// the hub's value to equal the spoke's value at this instant: both progress independently
+	// (observed live: the spoke can advance to a newer resourceVersion while the hub is still
+	// catching up on an older one), so racing them for exact equality chases a moving target.
+	// What matters is that the hub got SOME real update, not that they're byte-identical right
+	// now - and this also does not require a hardcoded "Synced": the app's actual GitOps outcome
+	// is a property of the demo repo/content (or environment quirks like restricted-SCC on OCP),
+	// not of whether this reporting pipeline works.
+	By("waiting for the spoke Application's sync status to settle to a real (non-Unknown) value")
+	var spokeSync string
+	Eventually(func(g Gomega) string {
+		out, err := kubectlCtx(spokeContext, "get", "application", appName,
+			"-n", argoCDNamespace, "-o", "jsonpath={.status.sync.status}")
+		g.Expect(err).NotTo(HaveOccurred())
+		spokeSync = out
+		return out
+	}, 5*time.Minute, 10*time.Second).ShouldNot(SatisfyAny(BeEmpty(), Equal("Unknown")))
+
+	// The principal's event-processor can get stuck retrying one stale (superseded) status-update
+	// event against a resourceVersion the hub has already moved past, logging "the server
+	// rejected our request due to an error in our request" repeatedly - self-heals once the
+	// spoke's next periodic resync (ArgoCD default 180s) sends a fresh event, but nudging another
+	// refresh on the spoke gets there faster than passively waiting out that timer.
+	By("verifying the hub Application received a real status update - proves the principal is relaying status from the agent")
+	hubCheckAttempt := 0
+	Eventually(func(g Gomega) string {
+		hubCheckAttempt++
+		out, err := kubectlCtx(hubContext, "get", "application", appName,
 			"-n", argoCDNamespace,
 			"-o", "jsonpath={.status.sync.status}")
+		if err != nil || out == "" || out == "Unknown" {
+			appSpokeInfo, _ := kubectlCtx(spokeContext, "get", "application",
+				appName, "-n", argoCDNamespace,
+				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
+			fmt.Fprintf(GinkgoWriter, "  [diag] hub Application %s sync=%q (spoke's own status: %q; spoke: %s)\n", appName, out, spokeSync, appSpokeInfo)
+			if hubCheckAttempt == 6 {
+				kubectlCtx(spokeContext, "annotate", "application", appName, "-n", argoCDNamespace,
+					"argocd.argoproj.io/refresh=normal", "--overwrite")
+			}
+		}
+		g.Expect(err).NotTo(HaveOccurred())
 		return out
-	}, 3*time.Minute, 10*time.Second).ShouldNot(BeEmpty())
-
-	hubSync, _ := kubectlCtx(hubContext, "get", "application", appName,
-		"-n", argoCDNamespace,
-		"-o", "jsonpath={.status.sync.status}")
-	fmt.Fprintf(GinkgoWriter, "  [info] hub Application %s sync status: %s\n", appName, hubSync)
+	}, 8*time.Minute, 10*time.Second).ShouldNot(SatisfyAny(BeEmpty(), Equal("Unknown")),
+		"hub Application %s never received a real status update - the principal must actually receive and reflect real status from the agent (spoke's own status: %q)", appName, spokeSync)
 
 	_ = appsetName
 }
@@ -1315,137 +1380,181 @@ func verifyAgentVersionDriftHeal(gitopsClusterName, ns string, timeout time.Dura
 
 // ---- Autonomous mode helpers ----
 
-func patchPolicyWithRBACAndApp(policyName, ns string) {
-	By(fmt.Sprintf("waiting for Policy %s to be created by controller", policyName))
-	waitForResourceExists(hubContext, "policy.policy.open-cluster-management.io",
-		policyName, ns, 2*time.Minute)
-
-	By("patching Policy with RBAC (cluster-admin) and guestbook Application")
-	patchJSON := fmt.Sprintf(`[{
-  "op": "add",
-  "path": "/spec/policy-templates/-",
-  "value": {
-    "objectDefinition": {
-      "apiVersion": "policy.open-cluster-management.io/v1",
-      "kind": "ConfigurationPolicy",
-      "metadata": { "name": "%s-rbac" },
-      "spec": {
-        "remediationAction": "enforce",
-        "severity": "medium",
-        "object-templates": [
-          {
-            "complianceType": "musthave",
-            "objectDefinition": {
-              "apiVersion": "rbac.authorization.k8s.io/v1",
-              "kind": "ClusterRoleBinding",
-              "metadata": { "name": "acm-openshift-gitops-cluster-admin" },
-              "roleRef": {
-                "apiGroup": "rbac.authorization.k8s.io",
-                "kind": "ClusterRole",
-                "name": "cluster-admin"
-              },
-              "subjects": [{
-                "kind": "ServiceAccount",
-                "name": "acm-openshift-gitops-argocd-application-controller",
-                "namespace": "%s"
-              }]
-            }
-          },
-          {
-            "complianceType": "musthave",
-            "objectDefinition": {
-              "apiVersion": "v1",
-              "kind": "Namespace",
-              "metadata": { "name": "guestbook" }
-            }
-          },
-          {
-            "complianceType": "musthave",
-            "objectDefinition": {
-              "apiVersion": "argoproj.io/v1alpha1",
-              "kind": "Application",
-              "metadata": {
-                "name": "guestbook",
-                "namespace": "%s"
-              },
-              "spec": {
-                "project": "default",
-                "source": {
-                  "repoURL": "https://github.com/argoproj/argocd-example-apps",
-                  "targetRevision": "HEAD",
-                  "path": "guestbook"
-                },
-                "destination": {
-                  "server": "https://kubernetes.default.svc",
-                  "namespace": "guestbook"
-                },
-                "syncPolicy": {
-                  "automated": { "prune": true, "selfHeal": true }
-                }
-              }
-            }
-          }
-        ]
-      }
-    }
-  }
-}]`, policyName, ns, ns)
-
-	_, err := kubectlCtx(hubContext, "patch", "policy.policy.open-cluster-management.io",
-		policyName, "-n", ns, "--type=json", fmt.Sprintf("-p=%s", patchJSON))
-	Expect(err).NotTo(HaveOccurred(), "failed to patch Policy with RBAC and guestbook Application")
-}
-
-func deployGuestbookAutonomousMode(timeout time.Duration) {
+// verifyDestinationBasedMappingDisabledForAutonomous confirms destinationBasedMapping is
+// disabled on both the hub's enforced Policy and the spoke's live ArgoCD CR - the two places
+// this field is set (initial generation and the drift-heal loop) must agree.
+func verifyDestinationBasedMappingDisabledForAutonomous(gitopsClusterName, ns string, timeout time.Duration) {
 	policyName := gitopsClusterName + "-argocd-policy"
 
-	ensureHubPrincipalRunning()
+	By("verifying hub Policy has destinationBasedMapping.enabled=false and mode=autonomous")
+	Eventually(func(g Gomega) {
+		dbm, mode := getPolicyDestinationBasedMappingAndMode(g, policyName, ns)
+		g.Expect(mode).To(Equal("autonomous"))
+		g.Expect(dbm).To(Equal(false))
+	}, timeout, 5*time.Second).Should(Succeed())
 
-	patchPolicyWithRBACAndApp(policyName, argoCDNamespace)
-
-	By("waiting for Policy to be Compliant (all templates enforced on spoke)")
-	Eventually(func(g Gomega) string {
-		out, err := kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
-			policyName, "-n", argoCDNamespace,
-			"-o", "jsonpath={.status.compliant}")
+	By("verifying spoke ArgoCD CR has destinationBasedMapping.enabled=false and mode=autonomous")
+	Eventually(func(g Gomega) {
+		dbm, err := getJSONPath(spokeContext, "argocd", "acm-openshift-gitops", argoCDNamespace,
+			"{.spec.argoCDAgent.agent.destinationBasedMapping.enabled}")
 		g.Expect(err).NotTo(HaveOccurred())
-		return out
-	}, 7*time.Minute, 10*time.Second).Should(Equal("Compliant"))
+		g.Expect(dbm).To(Equal("false"))
 
-	By("verifying guestbook-ui deployment exists on spoke via autonomous agent")
-	Eventually(func(g Gomega) int {
-		out, err := kubectlCtx(spokeContext, "get", "deployment", "guestbook-ui",
-			"-n", "guestbook",
-			"-o", "jsonpath={.status.availableReplicas}")
-		if err != nil {
-			appInfo, _ := kubectlCtx(spokeContext, "get", "applications.argoproj.io", "guestbook",
-				"-n", argoCDNamespace,
-				"-o", "jsonpath=sync={.status.sync.status} health={.status.health.status}")
-			fmt.Fprintf(GinkgoWriter, "  [diag] guestbook-ui not found on spoke; app: %s\n", appInfo)
-		}
+		mode, err := getJSONPath(spokeContext, "argocd", "acm-openshift-gitops", argoCDNamespace,
+			"{.spec.argoCDAgent.agent.client.mode}")
 		g.Expect(err).NotTo(HaveOccurred())
-		if out == "" {
-			return 0
-		}
-		replicas, convErr := strconv.Atoi(strings.TrimSpace(out))
-		g.Expect(convErr).NotTo(HaveOccurred())
-		return replicas
-	}, timeout, 10*time.Second).Should(BeNumerically(">", 0))
-
-	By("checking Application sync status on spoke (informational)")
-	spokeSync, _ := kubectlCtx(spokeContext, "get", "applications.argoproj.io", "guestbook",
-		"-n", argoCDNamespace,
-		"-o", "jsonpath={.status.sync.status}")
-	fmt.Fprintf(GinkgoWriter, "  [info] spoke Application guestbook sync status: %s\n", spokeSync)
+		g.Expect(mode).To(Equal("autonomous"))
+	}, timeout, 5*time.Second).Should(Succeed())
 }
 
-func cleanupGuestbookAutonomous() {
-	By("cleaning up guestbook app on spoke (deployed by Policy)")
+// getPolicyDestinationBasedMappingAndMode extracts destinationBasedMapping.enabled and
+// client.mode from the ArgoCD object-template inside the given Policy.
+func getPolicyDestinationBasedMappingAndMode(g Gomega, policyName, ns string) (bool, string) {
+	out, err := kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
+		policyName, "-n", ns, "-o", "json")
+	g.Expect(err).NotTo(HaveOccurred())
+
+	var policyObj map[string]interface{}
+	g.Expect(json.Unmarshal([]byte(out), &policyObj)).To(Succeed())
+	spec, _ := policyObj["spec"].(map[string]interface{})
+	templates, _ := spec["policy-templates"].([]interface{})
+	for _, pt := range templates {
+		ptMap, _ := pt.(map[string]interface{})
+		od, _ := ptMap["objectDefinition"].(map[string]interface{})
+		cpSpec, _ := od["spec"].(map[string]interface{})
+		ots, _ := cpSpec["object-templates"].([]interface{})
+		for _, ot := range ots {
+			otMap, _ := ot.(map[string]interface{})
+			objDef, _ := otMap["objectDefinition"].(map[string]interface{})
+			if objDef["kind"] != "ArgoCD" {
+				continue
+			}
+			agent := objDef["spec"].(map[string]interface{})["argoCDAgent"].(map[string]interface{})["agent"].(map[string]interface{})
+			dbm, _ := agent["destinationBasedMapping"].(map[string]interface{})["enabled"].(bool)
+			mode, _ := agent["client"].(map[string]interface{})["mode"].(string)
+			return dbm, mode
+		}
+	}
+	g.Expect(false).To(BeTrue(), "ArgoCD object-template not found in Policy %s", policyName)
+	return false, ""
+}
+
+// deployGuestbookDirectlyOnSpoke deploys the guestbook Application by connecting directly to the
+// managed cluster's own API server (kubectlCtx(spokeContext, ...)) and applying it there - never
+// through the hub. This is the actual autonomous-mode contract: "all configuration is first
+// created on the workload cluster" (see
+// https://argocd-agent.readthedocs.io/latest/concepts/agent-modes/autonomous/). Delivering the
+// same Application spec via a hub-authored Policy (as governance-policy-framework enforcement)
+// would exercise a hub-push delivery path indistinguishable from managed mode and wouldn't prove
+// autonomous mode's distinguishing property: the hub never originates or owns the config, it only
+// mirrors a read-only reflection of whatever the spoke's agent reports.
+func deployGuestbookDirectlyOnSpoke(timeout time.Duration) {
+	By("connecting directly to the spoke and creating the guestbook Application there (not via the hub)")
+	ensureArgoCDClusterAdmin(spokeContext, argoCDNamespace)
+	Expect(applyLiteral(spokeContext, guestbookAppYAML(argoCDNamespace, "https://kubernetes.default.svc"))).To(Succeed())
+
+	By("waiting for the Application's sync status to settle to a real (non-Unknown) value on the spoke itself (source of truth)")
+	var spokeSync string
+	Eventually(func(g Gomega) string {
+		out, err := kubectlCtx(spokeContext, "get", "applications.argoproj.io", "guestbook",
+			"-n", argoCDNamespace, "-o", "jsonpath={.status.sync.status}")
+		g.Expect(err).NotTo(HaveOccurred())
+		spokeSync = out
+		return out
+	}, timeout, 5*time.Second).ShouldNot(SatisfyAny(BeEmpty(), Equal("Unknown")))
+
+	By("verifying guestbook-ui deployment exists on the spoke")
+	verifyGuestbookDeployed(spokeContext, timeout)
+
+	// Deliberately does not require the hub's value to equal the spoke's value at this instant -
+	// both progress independently, so racing them for exact equality chases a moving target.
+	// What's under test is whether the hub's read-only mirror received a REAL (non-empty,
+	// non-Unknown) status update at all, not a hardcoded "Synced" and not byte-identical timing
+	// with the spoke.
+	By("verifying the Application is mirrored to the hub as a read-only reflection with a real status update (namespace named after the agent)")
+	mirrorCheckAttempt := 0
+	Eventually(func(g Gomega) string {
+		mirrorCheckAttempt++
+		out, err := kubectlCtx(hubContext, "get", "applications.argoproj.io", "guestbook",
+			"-n", spokeName, "-o", "jsonpath={.status.sync.status}")
+		g.Expect(err).NotTo(HaveOccurred())
+		if (out == "" || out == "Unknown") && mirrorCheckAttempt == 6 {
+			// See the nudge comment in deployGuestbookAgentMode - the principal's queue can get
+			// stuck retrying a stale status-update event; nudging the spoke to re-emit is faster
+			// than waiting out ArgoCD's own periodic resync.
+			kubectlCtx(spokeContext, "annotate", "applications.argoproj.io", "guestbook", "-n", argoCDNamespace,
+				"argocd.argoproj.io/refresh=normal", "--overwrite")
+		}
+		return out
+	}, timeout, 5*time.Second).ShouldNot(SatisfyAny(BeEmpty(), Equal("Unknown")),
+		"hub mirror never received a real status update (spoke's own status: %q)", spokeSync)
+}
+
+// cleanupGuestbookDirectSpoke deletes the guestbook Application by connecting directly to the
+// spoke, mirroring how deployGuestbookDirectlyOnSpoke created it.
+func cleanupGuestbookDirectSpoke() {
+	By("cleaning up guestbook app directly on the spoke")
 	kubectlCtx(spokeContext, "delete", "applications.argoproj.io", "guestbook",
 		"-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(spokeContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(spokeContext, "delete", "clusterrolebinding",
 		"acm-openshift-gitops-cluster-admin", "--ignore-not-found")
+}
+
+// disableHubAppController / enableHubAppController: e2e-Kind-environment-only toggle (no product
+// code involved) around the hub's own ArgoCD app-controller, needed ONLY here and NOT by
+// gitopsaddon/test-cycle.sh (which runs the exact same autonomous-mode + hybrid-mode combination
+// against a real hub and passes without this toggle).
+//
+// Both halves of hybrid mode's isolation mechanism ARE correctly wired for autonomous mode: the
+// argocd-agent principal rewrites a mirrored autonomous Application's spec.destination to
+// {name: <agent>} (principal/event.go in argoproj-labs/argocd-agent), and this repo's
+// CreateArgoCDAgentClusters unconditionally stamps that agent's cluster secret with
+// argocd.argoproj.io/skip-reconcile: "true" regardless of mode - confirmed by direct inspection
+// (kubectl get application -o jsonpath spec.destination, kubectl get secret cluster-<agent>
+// -o jsonpath annotations) against a live run of this exact suite.
+//
+// The remaining gap is an ArgoCD version limitation, not a bug in this repo: prior to
+// https://github.com/argoproj/argo-cd/pull/26442 (merged into argo-cd upstream master
+// 2026-02-19), skip-reconcile on a cluster secret only gated the sync/reconcile-action trigger,
+// not the periodic status-refresh/comparison path - so the app-controller still attempts to
+// resolve the mirrored Application's spec.project (rewritten by the principal to
+// "<agent>-<project>", which by design only ever exists on the spoke for autonomous mode), fails
+// with "AppProject not found", and flips status.sync.status to Unknown on every refresh cycle
+// (see https://github.com/argoproj/argo-cd/issues/26425, filed specifically about this
+// argocd-agent/app-controller conflict). PR #26442 centralizes the check into IsManagedCluster so
+// skip-reconcile now also gates canProcessApp/canHandleCluster/the cluster-info updater, closing
+// this exact gap - but it's a v3.4+ feature. The e2e Kind environment's upstream community
+// argocd-operator image resolves to ArgoCD v3.3.10 (confirmed via the application-controller
+// pod's own startup log), which predates the fix. The real-hub environment gitopsaddon/test-cycle.sh
+// runs against does not hit this, so its autonomous-mode phase intentionally leaves the hub
+// app-controller enabled throughout and asserts on it directly - do not add this toggle there.
+func disableHubAppController() {
+	By("disabling hub ArgoCD app-controller (e2e-only: this Kind environment's ArgoCD v3.3.10 predates argo-cd#26442, so skip-reconcile alone doesn't stop the app-controller's status-refresh path from racing the principal over the autonomous mirror's status)")
+	// A merge patch (not applyLiteral/kubectl apply) - the hub ArgoCD CR carries a full spec
+	// (applicationSet, argoCDAgent, sourceNamespaces) applied by setup_env.sh; a 3-way apply of a
+	// manifest containing only spec.controller would delete every other field via apply's
+	// last-applied-configuration diff. A merge patch touches only the field named.
+	_, err := kubectlCtx(hubContext, "patch", "argocd", "openshift-gitops", "-n", argoCDNamespace,
+		"--type=merge", "-p", `{"spec":{"controller":{"enabled":false}}}`)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func(g Gomega) string {
+		// "-o name" (not --no-headers) avoids kubectl's "No resources found in ... namespace."
+		// notice, which --no-headers still prints to stdout on a zero-match list and is not "".
+		out, _ := kubectlCtx(hubContext, "get", "pods", "-n", argoCDNamespace,
+			"-l", "app.kubernetes.io/name=openshift-gitops-application-controller",
+			"-o", "name")
+		return out
+	}, 2*time.Minute, 5*time.Second).Should(BeEmpty())
+}
+
+func enableHubAppController() {
+	By("re-enabling hub ArgoCD app-controller")
+	_, err := kubectlCtx(hubContext, "patch", "argocd", "openshift-gitops", "-n", argoCDNamespace,
+		"--type=merge", "-p", `{"spec":{"controller":{"enabled":true}}}`)
+	Expect(err).NotTo(HaveOccurred())
+	waitForPodPhase(hubContext, argoCDNamespace,
+		"app.kubernetes.io/name=openshift-gitops-application-controller", "Running", 3*time.Minute)
 }
 
 // ---- OLM Override helpers ----
