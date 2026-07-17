@@ -338,6 +338,25 @@ kubectl -n ocm rollout restart deployment/multicluster-operators-application
 2. Check principal logs: `kubectl logs -n openshift-gitops -l app.kubernetes.io/component=principal --tail=50`
 3. Check agent logs on spoke: `kubectl logs -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent --tail=50`
 
+### Hub App-Controller Fights the Principal Over an Autonomous Mirror's Status
+Symptom: an autonomous-mode Application mirrored to the hub flips `status.sync.status` back to
+`Unknown` on every refresh cycle even though the spoke's own copy is genuinely Synced, and the hub
+app-controller logs `error getting app project "<agent>-default": appproject.argoproj.io
+"<agent>-default" not found` for it. This is a real ArgoCD version gap, not a bug in this repo's
+code: `skip-reconcile` on the agent's cluster secret (confirmed correctly set by
+`CreateArgoCDAgentClusters` for every agent-connected cluster, managed or autonomous) and the
+principal's destination-rewrite to that named secret (confirmed correct in argocd-agent's
+`principal/event.go`) are both wired correctly - but versions of ArgoCD prior to
+[argo-cd#26442](https://github.com/argoproj/argo-cd/pull/26442) (merged 2026-02-19, reported as
+[argo-cd#26425](https://github.com/argoproj/argo-cd/issues/26425)) only had `skip-reconcile` gate
+the sync/reconcile-action trigger, not the periodic status-refresh/comparison path - so the hub's
+own app-controller still attempts to resolve the mirrored app's `spec.project` (rewritten by the
+principal to `<agent>-<project>`, which only ever exists on the spoke for autonomous mode) and
+errors on every attempt. Fix is an ArgoCD version bump to one that includes that PR - not a hub
+app-controller toggle or a code change here. Confirm which ArgoCD version you're running via the
+`application-controller` pod's startup log (`level=info msg="ArgoCD Application Controller is
+starting" ... version=vX.Y.Z`).
+
 ---
 
 ## Architecture
@@ -568,6 +587,10 @@ GitHub Actions (`.github/workflows/e2e.yml`): `e2e` (cluster-import), `e2e-gitop
 - **ACM 2.16→2.17 CRB roleRef immutability**: `deleteStaleClusterRoleBinding()` self-heals at startup.
 - **Addon agent race during cleanup**: `scaleDownAddonAgent()` scales to 0 before cleanup Job runs.
 - **local-cluster guestbook (hybrid mode)**: local-cluster is never agent-dispatched, so there is no hub-vs-spoke identity conflict to work around. Its Application is verified and finalized normally through the hub's own application controller, same as any other in-cluster ArgoCD destination - see "Deploy/Delete Cycle Testing" below.
+- **A single momentary "Running" or "Synced" sample is not proof of health**: a crash-looping container can genuinely report `status.phase: Running` for the brief window between container start and a fatal exit, long enough for a 5-10s poll to sample mid-flicker and report a false pass. Require 2 consecutive stable samples (same phase AND same restart count) before declaring a pod healthy, not a single `Eventually(...).Should(Equal("Running"))`. The same logic applies to any other "did it work" snapshot check - prefer confirming it *stayed* true, not that it was *observed* true once.
+- **Test the actual function, not a proxy for it**: for anything that reports status hub-side after a spoke-side action (agent-dispatched apps, autonomous mirrors), the strongest and simplest check is "did the hub receive a real update from the spoke at all" (non-empty, not stuck at the default `"Unknown"`), not "does the hub's value exactly equal the spoke's value right now" and not "does a specific log string never appear." Exact-match chases a moving target - the spoke and hub progress independently, and a strict-equality check can fail forever if the spoke advances to a new state before the hub catches up, even though the reporting pipeline is working fine. A broken pipeline naturally fails the "got any real update" check on its own; you don't need a separate implementation-specific log-grep for a known error string to catch it, and log-grepping is more fragile (ties the test to exact wording) than asserting on the real observable behavior.
+- **Don't gate a coarse readiness check on an unreachable end state**: e.g. requiring `health: Healthy` on the demo guestbook app before considering a deploy "done" - it structurally can't reach `Healthy` on OCP (the demo image runs as non-root binding port 80, which restricted SCC rejects), so that gate would time out on every run regardless of whether the actual thing under test works. Gate on something the environment can actually achieve (e.g. "has a real, non-Unknown sync status"), consistent with how the same known limitation is already tolerated (WARNING, not failure) elsewhere in the same test.
+- **Nudge instead of waiting out a timer**: when something is stuck because a component's next periodic action (a resync, a refresh) will naturally clear it, actively triggering that action (e.g. the `argocd.argoproj.io/refresh=normal` annotation) resolves it far faster than passively waiting out the interval. Worth doing partway through a retry loop (e.g. attempt 3-6) rather than only at the very start or not at all.
 
 ## Deploy/Delete Cycle Testing
 
@@ -606,6 +629,37 @@ Kind clusters. Plain `kubectl` against real remote clusters typically works fine
 escape hatch (outbound network is already shared); use `flatpak-spawn --host` for anything that
 needs the host's container/VM tooling specifically.
 
+### Real-infra timing behaviors worth knowing before tuning timeouts
+
+Observed running many `test-cycle.sh` cycles against real (AWS-hosted OCP + non-OCP) clusters —
+these are genuine, self-healing characteristics of the live system, not bugs to "fix" by weakening
+a check, but also not things a short timeout can paper over:
+
+- **Principal event-relay can get transiently stuck on one stale event.** The argocd-agent
+  principal's event-processor can retry one superseded status-update event against a
+  resourceVersion the hub has already moved past, logging `"the server rejected our request due
+  to an error in our request"` repeatedly with exponential backoff, and eventually `"Event failed
+  after N retries, giving up to unblock queue"`. It self-heals once the agent's own next periodic
+  resync (ArgoCD default 180s) sends a fresh event, or its own retry budget exhausts and it moves
+  on - either way this can take several minutes end-to-end. A short (~1-2 min) timeout on "did the
+  hub get a status update" will false-fail here even though nothing is actually broken; budget
+  ~400s and nudge (see above) to shorten the common case.
+- **A freshly-started agent can drop its own managed-app state while still stabilizing.** During
+  the already-documented CA-secret-propagation crash-loop window (see "Principal
+  CrashLoopBackOff"), an agent that's restarting can lose track of an app it was managing on a
+  reconnect/resync (`"Dropping app deletion event because the app is not managed"` /
+  `"could not delete existing app: ... is not managed"`), and that app is not automatically
+  redispatched once the agent stabilizes - something has to re-trigger dispatch (e.g. a principal
+  restart, or the next full reconcile). Waiting for the agent pod to be stable (2 consecutive
+  Running+Ready samples with an unchanged restart count, not just "Running once") *before* checking
+  application status avoids racing this window in the first place.
+- **`FORCE_CLEAN_FIRST`-style cleanup needs a principal restart too, not just a controller
+  restart.** Restarting the hub controller clears its own informer cache, but the principal
+  separately needs a restart to drop stale gRPC events queued from whatever was just torn down -
+  otherwise the next cycle's fresh agents can receive stale delete/update events and reject them
+  as "not managed" (same failure mode as the documented "between cycles" reset, just also needed
+  before the *first* cycle after a forced clean).
+
 ## Development Workflow
 
 1. Go 1.25+, Kubernetes cluster with OCM
@@ -614,6 +668,15 @@ needs the host's container/VM tooling specifically.
 4. `make manifests` after RBAC/CRD annotation changes
 5. Update `CLAUDE.md` after learning new context
 6. Ask before acting on ambiguous tasks
+
+**Never pin a dev-tool `go install` to `@latest` in the Makefile.** `setup-envtest` (used by
+`make test`) was pinned to `@latest` and broke with `requires go >= 1.26.0 (running go 1.25.11)`
+the moment a newer release shipped upstream - with no code change on this repo's side. Pin to a
+specific version (`SETUP_ENVTEST_VERSION` in `Makefile`/`Makefile.prow`) compatible with this
+repo's own `go.mod`/`controller-runtime` version, and key the "is it already installed" check on
+the *actual installed version* (`$(TOOL) version` output), not just "does the binary file exist" -
+otherwise bumping the pinned version later silently keeps using a stale cached binary from the old
+one.
 
 ## Known Limitations
 
