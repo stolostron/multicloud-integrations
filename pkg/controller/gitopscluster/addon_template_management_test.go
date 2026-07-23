@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
+	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -719,5 +720,194 @@ func TestEnsureAddOnTemplateDeletesLegacyStaticTemplate(t *testing.T) {
 	}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: getLegacyOLMAddOnTemplateName(gitOpsCluster)}, check); err == nil {
 		t.Errorf("dynamic legacy template %q should have been deleted by EnsureAddOnTemplate", getLegacyOLMAddOnTemplateName(gitOpsCluster))
+	}
+}
+
+// TestBuildAddonEnvVarsDeterministicOrder locks in the fix for a real (independent of the
+// no-op-update fix) bug: buildAddonEnvVars used to range over utils.DefaultOperatorImages (a
+// map) directly, so the env var order could differ across calls even though the content never
+// did - Go intentionally randomizes map iteration order. That alone would defeat any later
+// attempt to detect "did anything actually change" by comparing the built manifest.
+func TestBuildAddonEnvVarsDeterministicOrder(t *testing.T) {
+	first := buildAddonEnvVars()
+	for i := 0; i < 20; i++ {
+		next := buildAddonEnvVars()
+		if len(next) != len(first) {
+			t.Fatalf("buildAddonEnvVars() length changed across calls: %d vs %d", len(first), len(next))
+		}
+		for j := range first {
+			if first[j].Name != next[j].Name {
+				t.Fatalf("buildAddonEnvVars() order not deterministic at index %d: %q vs %q (run %d)",
+					j, first[j].Name, next[j].Name, i)
+			}
+		}
+	}
+}
+
+// TestExtractDeploymentImage covers the targeted-decode helper used by addOnTemplateNeedsUpdate:
+// finding the Deployment manifest among a mixed list and pulling its container image, without
+// needing to fully unmarshal every manifest into a typed object.
+func TestExtractDeploymentImage(t *testing.T) {
+	manifests := buildAddonManifests("test-ns", "quay.io/example/addon:v1")
+
+	image, ok := extractDeploymentImage(manifests)
+	if !ok {
+		t.Fatal("extractDeploymentImage() ok = false, want true")
+	}
+	if image != "quay.io/example/addon:v1" {
+		t.Errorf("extractDeploymentImage() = %q, want %q", image, "quay.io/example/addon:v1")
+	}
+
+	t.Run("no deployment present", func(t *testing.T) {
+		_, ok := extractDeploymentImage(nil)
+		if ok {
+			t.Error("extractDeploymentImage(nil) ok = true, want false")
+		}
+	})
+
+	t.Run("malformed manifest is skipped, not fatal", func(t *testing.T) {
+		manifests := buildAddonManifests("test-ns", "quay.io/example/addon:v2")
+		// Corrupt the first manifest's raw JSON; extractDeploymentImage must skip it and keep
+		// looking rather than erroring out.
+		manifests[0].Raw = []byte("not-json")
+		image, ok := extractDeploymentImage(manifests)
+		if !ok || image != "quay.io/example/addon:v2" {
+			t.Errorf("extractDeploymentImage() with one malformed manifest = (%q, %v), want (%q, true)",
+				image, ok, "quay.io/example/addon:v2")
+		}
+	})
+}
+
+// TestAddOnTemplateNeedsUpdate covers the targeted comparison that replaced the previous
+// unconditional Update(): only the addon image and the CA/argoNamespace can ever legitimately
+// differ across reconciles of the same GitOpsCluster, so those are the only two things compared.
+func TestAddOnTemplateNeedsUpdate(t *testing.T) {
+	buildExisting := func(image, argoNamespace string) *addonv1alpha1.AddOnTemplate {
+		return &addonv1alpha1.AddOnTemplate{
+			Spec: addonv1alpha1.AddOnTemplateSpec{
+				AddonName: "gitops-addon",
+				AgentSpec: workv1.ManifestWorkSpec{
+					Workload: workv1.ManifestsTemplate{Manifests: buildAddonManifests("openshift-gitops", image)},
+				},
+				Registration: []addonv1alpha1.RegistrationSpec{
+					{
+						CustomSigner: &addonv1alpha1.CustomSignerRegistrationConfig{
+							SigningCA: addonv1alpha1.SigningCARef{Name: "argocd-agent-ca", Namespace: argoNamespace},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("identical inputs need no update", func(t *testing.T) {
+		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
+		if addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+			t.Error("addOnTemplateNeedsUpdate() = true for identical inputs, want false")
+		}
+	})
+
+	t.Run("image change needs update", func(t *testing.T) {
+		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v2", "openshift-gitops") {
+			t.Error("addOnTemplateNeedsUpdate() = false after image change, want true")
+		}
+	})
+
+	t.Run("argoNamespace change needs update", func(t *testing.T) {
+		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "custom-argocd-ns") {
+			t.Error("addOnTemplateNeedsUpdate() = false after argoNamespace change, want true")
+		}
+	})
+
+	t.Run("missing Registration fails open to needs-update", func(t *testing.T) {
+		existing := &addonv1alpha1.AddOnTemplate{
+			Spec: addonv1alpha1.AddOnTemplateSpec{
+				AgentSpec: workv1.ManifestWorkSpec{
+					Workload: workv1.ManifestsTemplate{Manifests: buildAddonManifests("openshift-gitops", "quay.io/example/addon:v1")},
+				},
+			},
+		}
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+			t.Error("addOnTemplateNeedsUpdate() = false with no Registration, want true (fail open)")
+		}
+	})
+
+	t.Run("undecodable manifests fail open to needs-update", func(t *testing.T) {
+		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
+		existing.Spec.AgentSpec.Workload.Manifests = nil
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+			t.Error("addOnTemplateNeedsUpdate() = false with no manifests, want true (fail open)")
+		}
+	})
+}
+
+// TestEnsureAddOnTemplateSkipsNoOpUpdate is the regression test for the actual reported bug: an
+// unconditional Update() on every reconcile bumped the AddOnTemplate's generation and
+// resourceVersion even when nothing had changed, which made the OCM addon framework re-render
+// and roll every managed cluster's gitops-addon ManifestWork/Deployment approximately every
+// reconcile interval. Calling EnsureAddOnTemplate twice with identical inputs must not touch the
+// stored object at all the second time.
+func TestEnsureAddOnTemplateSkipsNoOpUpdate(t *testing.T) {
+	os.Setenv(ControllerImageEnvVar, "test-controller:v1")
+	defer os.Unsetenv(ControllerImageEnvVar)
+
+	scheme := runtime.NewScheme()
+	_ = addonv1alpha1.AddToScheme(scheme)
+	_ = gitopsclusterV1beta1.AddToScheme(scheme)
+
+	gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "test-namespace"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: scheme}
+
+	if err := r.EnsureAddOnTemplate(gitOpsCluster); err != nil {
+		t.Fatalf("EnsureAddOnTemplate() create error = %v", err)
+	}
+
+	templateName := getAddOnTemplateName(gitOpsCluster)
+	afterCreate := &addonv1alpha1.AddOnTemplate{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: templateName}, afterCreate); err != nil {
+		t.Fatalf("failed to get AddOnTemplate after create: %v", err)
+	}
+
+	// Reconcile again several times with nothing changed - none of these should touch the object.
+	for i := 0; i < 3; i++ {
+		if err := r.EnsureAddOnTemplate(gitOpsCluster); err != nil {
+			t.Fatalf("EnsureAddOnTemplate() no-op reconcile %d error = %v", i, err)
+		}
+	}
+
+	afterNoOps := &addonv1alpha1.AddOnTemplate{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: templateName}, afterNoOps); err != nil {
+		t.Fatalf("failed to get AddOnTemplate after no-op reconciles: %v", err)
+	}
+	if afterNoOps.ResourceVersion != afterCreate.ResourceVersion {
+		t.Errorf("resourceVersion changed across no-op reconciles (%s -> %s) - Update() was called when nothing changed",
+			afterCreate.ResourceVersion, afterNoOps.ResourceVersion)
+	}
+	if afterNoOps.Generation != afterCreate.Generation {
+		t.Errorf("generation changed across no-op reconciles (%d -> %d) - this is exactly the reported churn bug",
+			afterCreate.Generation, afterNoOps.Generation)
+	}
+
+	// Now change the controller image - this time an update MUST happen.
+	os.Setenv(ControllerImageEnvVar, "test-controller:v2")
+	if err := r.EnsureAddOnTemplate(gitOpsCluster); err != nil {
+		t.Fatalf("EnsureAddOnTemplate() after image change error = %v", err)
+	}
+	afterImageChange := &addonv1alpha1.AddOnTemplate{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: templateName}, afterImageChange); err != nil {
+		t.Fatalf("failed to get AddOnTemplate after image change: %v", err)
+	}
+	if afterImageChange.ResourceVersion == afterNoOps.ResourceVersion {
+		t.Error("resourceVersion did not change after a real image change - Update() should have been called")
+	}
+	newImage, ok := extractDeploymentImage(afterImageChange.Spec.AgentSpec.Workload.Manifests)
+	if !ok || newImage != "test-controller:v2" {
+		t.Errorf("deployment image after update = (%q, %v), want (%q, true)", newImage, ok, "test-controller:v2")
 	}
 }

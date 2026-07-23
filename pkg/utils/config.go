@@ -14,7 +14,10 @@ limitations under the License.
 
 package utils
 
-import "os"
+import (
+	"os"
+	"sort"
+)
 
 // Environment variable names for GitOps addon configuration.
 // These are the canonical names used throughout the system:
@@ -115,12 +118,18 @@ var hubOnlyEnvVars = map[string]bool{
 func SpokeConfigEnvVars() []string {
 	vars := make([]string, 0, len(DefaultOperatorImages)+7)
 
-	// Add image env vars (excluding hub-only vars)
+	// Add image env vars (excluding hub-only vars), sorted: ranging over a map directly
+	// randomizes iteration order on every call (Go intentionally randomizes map iteration), so
+	// callers that build ordered/positional output from this list would otherwise see a
+	// different order on every call despite identical content.
+	imageEnvKeys := make([]string, 0, len(DefaultOperatorImages))
 	for envKey := range DefaultOperatorImages {
 		if !hubOnlyEnvVars[envKey] {
-			vars = append(vars, envKey)
+			imageEnvKeys = append(imageEnvKeys, envKey)
 		}
 	}
+	sort.Strings(imageEnvKeys)
+	vars = append(vars, imageEnvKeys...)
 
 	// Add proxy env vars
 	vars = append(vars, EnvHTTPProxy, EnvHTTPSProxy, EnvNoProxy)
@@ -136,10 +145,13 @@ func SpokeConfigEnvVars() []string {
 func AllConfigEnvVars() []string {
 	vars := make([]string, 0, len(DefaultOperatorImages)+7)
 
-	// Add all image env vars
+	// Add all image env vars, sorted (see SpokeConfigEnvVars for why).
+	imageEnvKeys := make([]string, 0, len(DefaultOperatorImages))
 	for envKey := range DefaultOperatorImages {
-		vars = append(vars, envKey)
+		imageEnvKeys = append(imageEnvKeys, envKey)
 	}
+	sort.Strings(imageEnvKeys)
+	vars = append(vars, imageEnvKeys...)
 
 	// Add proxy env vars
 	vars = append(vars, EnvHTTPProxy, EnvHTTPSProxy, EnvNoProxy)

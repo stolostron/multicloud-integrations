@@ -322,6 +322,19 @@ Missing secrets. Create a GitOpsCluster with `argoCDAgent.enabled: true` — the
 ### Policy Not Compliant
 Check replicated policy: `kubectl get policy -n <cluster-name>`. Common causes: `openshift-gitops` namespace doesn't exist yet (addon still installing operator), ArgoCD CRD not registered yet (operator starting up).
 
+### ManagedClusterAddOn Stuck Deleting Forever (addon-pre-delete finalizer)
+A `ManagedClusterAddOn`'s `addon.open-cluster-management.io/addon-pre-delete` finalizer only
+clears once the pre-delete cleanup `ManifestWork`/Job reports success back to the hub. If the
+managed cluster is genuinely gone (deregistered, deleted, unreachable — e.g. a Kind cluster whose
+container was removed outside of OCM's knowledge), that feedback can never arrive and the MCA (and
+its addon `Deployment`/`Job` `ManifestWork`s) will sit `deletionTimestamp`-set forever. This is one
+of the few legitimate exceptions to "never force-strip finalizers": once the target is confirmed
+dead (not just slow — check `ManagedCluster` `Available` condition and try reaching the spoke's
+own kubeconfig directly first), delete the addon's `ManifestWork`s in that cluster's namespace and
+then merge-patch the MCA's `finalizers` to `[]` to unblock cleanup. If the whole `ManagedCluster`
+is also being decommissioned, deleting the `ManagedCluster` object itself (which tears down its
+namespace) is cleaner than clearing individual finalizers one at a time.
+
 ### Hub Controller UID Mismatch
 `StorageError: invalid object, UID mismatch` after rapid delete/recreate. Fix:
 ```bash
@@ -474,6 +487,45 @@ Always in `openshift-gitops-operator` ns. OperatorGroup must be AllNamespaces (n
 
 ### Addon RBAC
 `gitops-addon` ClusterRole (fine-grained, not cluster-admin). Defined in both `addonTemplates.yaml` (static) and `addon_template_management.go` (dynamic). Separate `gitops-addon-cleanup` ClusterRole annotated `addon-pre-delete` for cleanup Job RBAC. Includes `escalate`/`bind` for operator leader-election Role.
+
+### No-Op-Update Guards on Hub-Owned Objects (AddOnTemplate, AddOnDeploymentConfig)
+Both `EnsureAddOnTemplate` and the `AddOnDeploymentConfig` path in `addon_management.go` rebuild
+their desired object from scratch every reconcile, then must compare against what's already
+stored before calling `Update()` — an unconditional `Update()` bumps `resourceVersion` (and, for
+spec changes, `.metadata.generation`) even when nothing meaningfully changed, and the OCM addon
+framework treats a generation bump on an `AddOnTemplate` as "the workload changed," re-rendering
+and rolling every managed cluster's addon `Deployment` in response. Confirmed on a real hub: an
+`AddOnTemplate` left running for ~6 days accumulated generation 4157 (~2 min/update) purely from
+this pattern, with zero real config change during that window.
+
+**How to design the comparison, not just "add one":** don't reflexively deep-`Equal` the whole
+built object — trace which of its inputs are actually capable of changing across reconciles of
+the *same* parent resource. Identity fields (name/namespace-derived) and anything hardcoded are
+permanently constant once the object exists; only genuinely external, mutable inputs (a
+controller's own image, a user-editable CR field) are worth comparing, and usually there are only
+one or two. Comparing just those is cheaper, isn't fooled by incidental formatting/ordering noise
+in unrelated parts of the object, and can't produce false "changed" reports that bring back the
+same churn under a different guise. `customizedVariablesEqual` (order-insensitive map comparison)
+is the existing pattern for `AddOnDeploymentConfig`; `addOnTemplateNeedsUpdate` (direct comparison
+of just the image and CA namespace, extracted with a narrow targeted JSON decode rather than a
+full manifest unmarshal) is the pattern for `AddOnTemplate`.
+
+**A stale map-iteration order can independently defeat any such guard.** Building an ordered
+`[]corev1.EnvVar` (or any positional/ordered output) by ranging directly over a `map[string]string`
+picks up Go's intentionally-randomized iteration order — the same *content* can serialize in a
+different *order* on every single call, which a naive equality check (or even a correct one, if it
+compares raw bytes/ordered slices instead of decoded/set content) will see as "changed" forever.
+Sort the keys before iterating whenever the output must be stable across calls, independent of
+whether anything is currently comparing it — otherwise a future correctness fix elsewhere can
+silently stop working the moment it starts relying on this output being stable.
+
+**Verifying a no-op-update fix on a live, leader-elected controller:** `kubectl rollout status`
+reporting a deployment fully rolled out does NOT mean the new pod has taken over reconciling -
+leader election makes the new pod wait out the *previous* holder's full lease duration
+(`leaseDuration`, minutes) before "Successfully acquired lease" appears in its logs, regardless of
+how quickly the old pod terminated. Check for that log line (or an actual "Process `<resource>`"
+line) before concluding a just-applied config change didn't take effect - the more likely
+explanation is the new pod simply hasn't started reconciling yet.
 
 ### Cleanup Rules
 **NEVER list-and-delete blindly.** Only delete: (1) gitopsaddon-labeled ArgoCD CRs (waits for operator finalizer), (2) OLM Subscription/CSV on OCP, (3) gitopsaddon-labeled operator resources on embedded. ArgoCD workloads are the operator's responsibility. Never force-strip ArgoCD CR finalizer. On OCP, skip `deleteOperatorResources` — OLM handles it. `templateAndApplyChart` labels all resources with `apps.open-cluster-management.io/gitopsaddon: "true"`.
