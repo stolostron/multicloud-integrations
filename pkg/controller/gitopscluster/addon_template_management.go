@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -157,6 +158,33 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 		return fmt.Errorf("cannot create addon template: %w", err)
 	}
 
+	argoNamespace := GetEffectiveArgoNamespace(gitOpsCluster)
+
+	// Check if AddOnTemplate already exists. Every input that feeds the template below
+	// (namespace/name-derived identity, the manifest RBAC/ServiceAccount/Deployment shape) is
+	// fixed for the lifetime of this object - the only two values that can ever legitimately
+	// differ across reconciles are the controller's own image (changes on a controller upgrade)
+	// and the CA namespace (changes only if the GitOpsCluster CR's own argoNamespace is edited).
+	// Compare only those two directly instead of deep-comparing the full (large,
+	// template-heavy) Spec: a whole-object comparison would (a) depend on the manifests' raw
+	// JSON bytes being byte-identical across an etcd round-trip, which isn't guaranteed, and
+	// (b) spuriously report "changed" on every single call regardless, because
+	// buildAddonEnvVars iterates a Go map whose iteration order is randomized per-process - see
+	// its own comment. An unconditional Update() here bumps the AddOnTemplate's generation every
+	// reconcile, which makes the OCM addon framework re-render and roll every managed cluster's
+	// gitops-addon ManifestWork/Deployment (same class of bug already fixed for
+	// AddOnDeploymentConfig via customizedVariablesEqual in addon_management.go).
+	existingTemplate := &addonv1alpha1.AddOnTemplate{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: templateName}, existingTemplate)
+	if err == nil {
+		if !addOnTemplateNeedsUpdate(existingTemplate, addonImage, argoNamespace) {
+			klog.V(2).Infof("AddOnTemplate %s is up to date, skipping update", templateName)
+			return nil
+		}
+	} else if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get AddOnTemplate: %w", err)
+	}
+
 	// Build the AddOnTemplate for argocd-agent mode
 	addonTemplate := &addonv1alpha1.AddOnTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -184,34 +212,72 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 						// system:open-cluster-management:cluster:<cluster-name>:addon:gitops-addon:agent:gitops-addon-agent
 						// The ArgoCD principal is configured with a custom auth regex to extract
 						// just the cluster name from this full path.
-					SigningCA: addonv1alpha1.SigningCARef{
-						Name:      "argocd-agent-ca",
-						Namespace: GetEffectiveArgoNamespace(gitOpsCluster),
-					},
+						SigningCA: addonv1alpha1.SigningCARef{
+							Name:      "argocd-agent-ca",
+							Namespace: argoNamespace,
+						},
 					},
 				},
 			},
 		},
 	}
 
-	// Check if AddOnTemplate already exists
-	existing := &addonv1alpha1.AddOnTemplate{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: templateName}, existing)
 	if err == nil {
-		// AddOnTemplate exists, update it
-		klog.V(2).Infof("Updating AddOnTemplate %s", templateName)
-		existing.Spec = addonTemplate.Spec
-		existing.Labels = addonTemplate.Labels
-		return r.Update(context.Background(), existing)
-	}
-
-	if !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("failed to get AddOnTemplate: %w", err)
+		// existingTemplate was found above and addOnTemplateNeedsUpdate returned true.
+		klog.Infof("Updating AddOnTemplate %s (image or argoNamespace changed)", templateName)
+		existingTemplate.Spec = addonTemplate.Spec
+		existingTemplate.Labels = addonTemplate.Labels
+		return r.Update(context.Background(), existingTemplate)
 	}
 
 	// Create new AddOnTemplate
 	klog.Infof("Creating AddOnTemplate %s", templateName)
 	return r.Create(context.Background(), addonTemplate)
+}
+
+// addOnTemplateNeedsUpdate reports whether the existing AddOnTemplate's meaningful inputs
+// differ from the desired image/argoNamespace. Any decode failure on the existing object is
+// treated as "needs update" (fail open) so a parse error can never silently freeze the template.
+func addOnTemplateNeedsUpdate(existing *addonv1alpha1.AddOnTemplate, wantImage, wantArgoNamespace string) bool {
+	if len(existing.Spec.Registration) == 0 ||
+		existing.Spec.Registration[0].CustomSigner == nil ||
+		existing.Spec.Registration[0].CustomSigner.SigningCA.Namespace != wantArgoNamespace {
+		return true
+	}
+
+	currentImage, ok := extractDeploymentImage(existing.Spec.AgentSpec.Workload.Manifests)
+	if !ok || currentImage != wantImage {
+		return true
+	}
+
+	return false
+}
+
+// extractDeploymentImage finds the gitops-addon Deployment manifest among the AddOnTemplate's
+// manifests and returns its first container's image. Only decodes the handful of fields it
+// needs, rather than fully unmarshaling every manifest into a typed Deployment.
+func extractDeploymentImage(manifests []workv1.Manifest) (string, bool) {
+	for _, m := range manifests {
+		var probe struct {
+			Kind string `json:"kind"`
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Image string `json:"image"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(m.Raw, &probe); err != nil {
+			continue
+		}
+		if probe.Kind == "Deployment" && len(probe.Spec.Template.Spec.Containers) > 0 {
+			return probe.Spec.Template.Spec.Containers[0].Image, true
+		}
+	}
+	return "", false
 }
 
 // buildAddonManifests builds the manifest list for the AddOnTemplate (argocd-agent without OLM)
@@ -586,11 +652,19 @@ func buildAddonEnvVars() []corev1.EnvVar {
 		},
 	})
 
-	// Add all image environment variables (excluding hub-only vars like ARGOCD_PRINCIPAL_IMAGE)
+	// Add all image environment variables (excluding hub-only vars like ARGOCD_PRINCIPAL_IMAGE).
+	// Sorted: ranging over a map directly would randomize iteration order on every call (Go
+	// intentionally randomizes map iteration), producing a differently-ordered but
+	// identical-content Env list on every reconcile - harmless on its own, but it defeats any
+	// later attempt to detect "did anything actually change" by comparing this manifest.
+	imageEnvKeys := make([]string, 0, len(utils.DefaultOperatorImages))
 	for envKey := range utils.DefaultOperatorImages {
-		if utils.IsHubOnlyEnvVar(envKey) {
-			continue
+		if !utils.IsHubOnlyEnvVar(envKey) {
+			imageEnvKeys = append(imageEnvKeys, envKey)
 		}
+	}
+	sort.Strings(imageEnvKeys)
+	for _, envKey := range imageEnvKeys {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  envKey,
 			Value: fmt.Sprintf("{{%s}}", envKey),
