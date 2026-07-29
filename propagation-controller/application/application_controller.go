@@ -38,6 +38,7 @@ import (
 
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
 	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
@@ -171,7 +172,7 @@ func (r *ApplicationReconciler) discoverAndFetchAppProject(application *unstruct
 	// 2. Fall back to trying common ArgoCD namespaces
 	candidateNamespaces := []string{
 		application.GetNamespace(), // Try application's namespace first
-		utils.GitOpsNamespace,         // Default OpenShift GitOps namespace
+		utils.GitOpsNamespace,      // Default OpenShift GitOps namespace
 		"argocd",                   // Common ArgoCD namespace
 	}
 
@@ -380,6 +381,15 @@ func (r *ApplicationReconciler) generateManifestWork(name, namespace string, app
 
 // Reconcile create/update/delete ManifestWork with the Application as its payload
 func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Checked fresh on every reconcile, not cached at startup: a Deployment rolling restart can
+	// briefly run the old (not-yet-disabled) pod alongside the new (disabled, already-swept) one,
+	// and a cached flag would let that old pod's in-flight reconcile re-create a ManifestWork the
+	// new pod's sweep had just frozen. A live read closes that window regardless of which pod
+	// processes the event. See pkg/pullmodelconfig.
+	if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+		return ctrl.Result{}, nil
+	}
+
 	log := log.FromContext(ctx)
 	log.Info("reconciling Application...")
 

@@ -47,6 +47,7 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	appsetreport "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
+	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
 )
 
 const (
@@ -117,6 +118,23 @@ func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize 
 		token = mgr.GetConfig().BearerToken
 	}
 
+	// Add() runs before mgr.Start(), so mgr.GetClient() (a cached client here) isn't usable
+	// yet -- use a direct, uncached client for this one-time startup read/create.
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return err
+	}
+
+	pullModelCfg, err := pullmodelconfig.LoadOrCreate(context.TODO(), directClient)
+	if err != nil {
+		klog.Errorf("unable to load multicluster-integrations-config, defaulting to basic pull model enabled: %v", err)
+		pullModelCfg = &pullmodelconfig.ControllerConfig{}
+	}
+
+	if pullModelCfg.PullModel.Basic.Disabled {
+		klog.Info("basic pull model is disabled via multicluster-integrations-config; search sync will not run")
+	}
+
 	gitopsSyncResc := &GitOpsSyncResource{
 		Client:             mgr.GetClient(),
 		Interval:           interval,
@@ -128,7 +146,7 @@ func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize 
 	}
 
 	// Create resourceDir if it does not exist
-	_, err := os.Stat(resourceDir)
+	_, err = os.Stat(resourceDir)
 	if err != nil && os.IsNotExist(err) {
 		err = os.MkdirAll(resourceDir, 0750)
 		if err != nil {
@@ -142,6 +160,13 @@ func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize 
 
 func (r *GitOpsSyncResource) Start(ctx context.Context) error {
 	go wait.Until(func() {
+		// Checked fresh on every tick, not cached at startup: a Deployment rolling restart can
+		// briefly run the old (not-yet-disabled) pod alongside the new (disabled) one, and a
+		// cached flag would let that old pod's next tick run anyway. See pkg/pullmodelconfig.
+		if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+			return
+		}
+
 		err := r.syncResources()
 		if err != nil {
 			klog.Error("error syncing resources from search", err)

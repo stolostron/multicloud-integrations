@@ -56,11 +56,29 @@ Then install governance addons (`governance-policy-framework` + `config-policy-c
 
 ## Repository Overview
 
-Two components from the same image (`quay.io/stolostron/multicloud-integrations`):
+Every binary below is built from the same image (`quay.io/stolostron/multicloud-integrations`),
+but shipped as **two separate Deployments** on the hub — don't assume "the controller" means only
+one of them:
 
-1. **gitopscluster** — Hub-side controller in `multicluster-operators-application` deployment. Reconciles `GitOpsCluster` CRs, creates Policies, MCAs, ADCs, AddOnTemplates, cluster secrets, TLS certs, and handles agent version drift healing.
+1. **gitopscluster** — Hub-side controller in the `multicluster-operators-application` deployment.
+   Reconciles `GitOpsCluster` CRs, creates Policies, MCAs, ADCs, AddOnTemplates, cluster secrets,
+   TLS certs, and handles agent version drift healing. This is the argocd-agent (principal/agent)
+   integration — see "Agent Modes" and "Hybrid Mode" below.
 
-2. **gitopsaddon** — Addon agent on each managed cluster. Installs OpenShift GitOps operator (OLM on OCP, embedded Helm chart on non-OCP), creates ArgoCD CR, manages image pull secrets, patches ServiceAccounts. Deployed by OCM addon framework.
+2. **gitopsaddon** — Addon agent on each managed cluster. Installs OpenShift GitOps operator (OLM
+   on OCP, embedded Helm chart on non-OCP), creates ArgoCD CR, manages image pull secrets, patches
+   ServiceAccounts, and optionally deploys the argocd-agent. Deployed by the OCM addon framework —
+   runs regardless of which integration model (agent or basic pull model) is in use, since both
+   need an ArgoCD instance actually installed on the spoke.
+
+3. **gitopssyncresc / multiclusterstatusaggregation / propagation** — the older, still-shipping
+   **basic pull model** integration (in the `multicluster-integrations` deployment on the hub, a
+   *third*, separate Deployment from the two above). Predates argocd-agent, has no dedicated spoke
+   agent process, and reuses the standard OCM klusterlet work-agent (`ManifestWork`) that every
+   managed cluster already has. See "Basic Pull Model" under Architecture, and "Basic Pull Model
+   Setup — Full YAML" below, for the full picture. `maestropropagation`/`maestroaggregation` are an
+   opt-in, Maestro-backed alternative to this same model for very large scale (not deployed by
+   default).
 
 ## Common Commands
 
@@ -249,6 +267,467 @@ spec:
 EOF
 ```
 
+## Basic Pull Model Setup — Full YAML
+
+The basic pull model needs no agent, no principal, no certs — just a `GitOpsCluster` with
+`gitopsAddon.enabled: true` and **no `argoCDAgent` block at all**, so the addon installs a plain
+(non-agent) ArgoCD instance on the spoke, plus an `ApplicationSet` (or a single `Application`)
+carrying the pull label/annotation. **OCP-only**: this integration is only supported for OCP
+managed clusters (OLM-installed operator) — it is not validated or supported on non-OCP (embedded
+Helm chart) spokes.
+
+```bash
+# 1. Placement selecting only the target (OCP) managed cluster(s) — reuse the same
+#    ManagedClusterSetBinding/AppProject setup as agent mode (see "Agent Mode Setup" above).
+kubectl apply -f - <<'EOF'
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: pull-model-placement
+  namespace: openshift-gitops
+spec:
+  clusterSets: [global]
+  predicates:
+  - requiredClusterSelector:
+      labelSelector:
+        matchExpressions:
+        - key: name
+          operator: In
+          values: [<ocp-managed-cluster-name>]
+EOF
+
+# 2. GitOpsCluster with gitopsAddon enabled and argoCDAgent OMITTED (not disabled — omitted).
+#    This forces createBlankClusterSecrets=true internally and installs a plain, non-agent
+#    ArgoCD via the static "gitops-addon" AddOnTemplate + OLM subscription.
+kubectl apply -f - <<'EOF'
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: pull-model-gitops
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: pull-model-placement
+  gitopsAddon:
+    enabled: true
+EOF
+
+# 3. Wait for the spoke's ArgoCD (application-controller, redis, repo-server — "server" is
+#    disabled by default for both agent and pull-model spokes, this is expected, see Architecture).
+#    Then create an ApplicationSet whose template carries the pull label/annotation:
+kubectl apply -f - <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: pull-model-guestbook-appset
+  namespace: openshift-gitops
+spec:
+  generators:
+  - clusterDecisionResource:
+      configMapRef: acm-placement
+      labelSelector:
+        matchLabels:
+          cluster.open-cluster-management.io/placement: pull-model-placement
+      requeueAfterSeconds: 30
+  template:
+    metadata:
+      name: '{{name}}-guestbook'
+      namespace: openshift-gitops
+      labels:
+        apps.open-cluster-management.io/pull-to-ocm-managed-cluster: 'true'
+      annotations:
+        # Required whenever the hub's own app-controller is enabled (hybrid mode) and the
+        # template's destination.server is the in-cluster address — otherwise the hub tries to
+        # reconcile this placeholder Application locally in ADDITION to it being propagated.
+        argocd.argoproj.io/skip-reconcile: 'true'
+        apps.open-cluster-management.io/ocm-managed-cluster: '{{name}}'
+        apps.open-cluster-management.io/ocm-managed-cluster-app-namespace: openshift-gitops
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/argoproj/argocd-example-apps.git
+        targetRevision: HEAD
+        path: guestbook
+      destination:
+        server: https://kubernetes.default.svc   # rewritten to the spoke's in-cluster server on delivery
+        namespace: guestbook
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+        syncOptions: [CreateNamespace=true]
+EOF
+
+# 4. Verify (see "Basic Pull Model" under Architecture for what each layer means):
+kubectl get applications.argoproj.io -n openshift-gitops                     # hub placeholder — always specify the group, see Troubleshooting
+kubectl get manifestwork -n <ocp-managed-cluster-name> | grep guestbook      # delivery vehicle
+kubectl get multiclusterapplicationsetreports -n openshift-gitops           # aggregated status back on the hub
+# on the spoke itself:
+kubectl get applications.argoproj.io -n openshift-gitops                    # propagated copy, should be Synced
+kubectl get pods -n guestbook
+```
+
+Confirmed end-to-end on a real OCP-managed cluster: the `ApplicationSet` generated the hub
+placeholder `Application`, the propagation controller wrapped it into a `ManifestWork`, the
+spoke's existing klusterlet work-agent delivered it with no new agent process involved, the
+spoke's ArgoCD `application-controller` reconciled it (`Synced`), and both status paths reported
+back correctly — the `ManifestWork` status-feedback path fed `multiclusterstatusaggregation`,
+which produced a `MulticlusterApplicationSetReport` with `syncStatus: Synced` and the real
+`guestbook-ui` `Deployment`/`Service` listed under `resources`, and `application_status_controller`
+separately reflected the same sync/health/operation state onto the hub's own `Application.status`
+(with a synthetic `AdditionalStatusReport` condition pointing at the report and the spoke
+Application for further detail). The demo `guestbook-ui` pod itself does not reach `Healthy` on
+OCP — this is the same pre-existing, non-pull-model-related restricted-SCC limitation already
+documented under "E2E Testing Gotchas" (non-root process binding port 80); `Synced` is the correct
+success bar for this specific demo image on OCP, not `Healthy`.
+
+## Disabling the Basic Pull Model (multicluster-integrations-config)
+
+The basic pull model can be turned off hub-wide via a ConfigMap, without deleting anything or
+disrupting real workloads. This is the first step of the migration runbook below, but it's a
+standalone feature in its own right — flip it whenever you want the basic-pull-model controllers to
+stop doing any work.
+
+- **ConfigMap name**: `multicluster-integrations-config`. **Namespace**: the same namespace the
+  `multicluster-integrations` pod itself runs in — resolved dynamically at runtime (`POD_NAMESPACE`
+  env var, falling back to reading the pod's mounted service-account namespace file), never
+  hardcoded to `open-cluster-management`. Package: `pkg/pullmodelconfig`.
+- **Self-provisioning**: if the ConfigMap doesn't exist, whichever of the three containers starts
+  first creates it with defaults (`pullModel.basic.disabled: false`) — race-safe across the sibling
+  containers in the same pod (Create, falling back to Get on `AlreadyExists`).
+- **Schema** (`data["config.yaml"]`, parsed as YAML):
+  ```yaml
+  pullModel:
+    basic:
+      disabled: true
+  ```
+  Nested under `pullModel.basic` specifically to disambiguate from argocd-agent, which is *also* a
+  pull-based model in the generic sense — this switch only ever affects the classic
+  ManifestWork-based basic pull model, never argocd-agent.
+- **Checked live, not cached at startup.** Each of the three components re-reads this ConfigMap
+  (a real `Get`, via `pullmodelconfig.LoadOrCreate`) at the point where the decision matters —
+  `propagation-controller/application`'s two reconcilers check it as the first thing inside every
+  single `Reconcile()` call, and `gitopssyncresc`/`multiclusterstatusaggregation` check it on every
+  tick of their periodic loop, not once when the process started. **This was a deliberate fix, not
+  the original design**: an earlier version cached the flag once at process startup, which left a
+  real race during a `kubectl rollout restart` — the OLD (not-yet-disabled) pod and the NEW
+  (disabled, already-swept) pod briefly run side by side (`RollingUpdate`'s default `maxSurge`), and
+  the old pod's cached-`false` reconciler could process one more in-flight event and recreate a
+  `ManifestWork` with `ServerSideApply` *after* the new pod's sweep had just set it to `ReadOnly`.
+  Reading live on every check closes this window regardless of which pod (old or new) happens to
+  process a given event, since both read the same up-to-date ConfigMap. Toggling the flag therefore
+  takes effect within one reconcile/tick — no restart needed for the guards themselves.
+- **The one-time `ManifestWork` sweep is the one exception that still needs a restart.** It only
+  runs once, at process startup in the propagation container's `main.go`, gated on the config value
+  read at that moment — so to sweep any `ManifestWork` that predates flipping the flag, you still
+  need `kubectl rollout restart deployment multicluster-integrations -n <namespace>`.
+- **What `disabled: true` actually does, at the code level**, across all three containers in the
+  `multicluster-integrations` Deployment:
+  - `propagation-controller/application`'s `ApplicationReconciler` and
+    `ApplicationStatusReconciler` both return `ctrl.Result{}, nil` as soon as a live config check
+    says disabled — for every event, not just filtered out at the watch/predicate level. No
+    `ManifestWork` is created, updated, or deleted by this component while disabled.
+  - `gitopssyncresc`'s periodic loop (`Start()`'s `wait.Until` body) skips `syncResources()` for any
+    tick where the live check says disabled — no ACM Search API polling that tick.
+  - `multiclusterstatusaggregation`'s periodic loop skips `houseKeeping()` the same way — no
+    `MulticlusterApplicationSetReport` generation/cleanup that tick.
+  - Once, at process startup (in the propagation container's `main.go`, before the reconcilers are
+    registered), `application.SweepManifestWorksToReadOnly` lists every `ManifestWork`
+    cluster-wide, content-matches the pull-model-owned ones (has the hub-application-name
+    annotation, and carries either the ApplicationSet-owned or standalone-pull label), and — for
+    each one's `applications`-resource `manifestConfigs` entry specifically, never by positional
+    index — sets `updateStrategy: ReadOnly` if it isn't already. This is what stops the spoke's
+    klusterlet work-agent from continuing to enforce already-delivered Application specs, without
+    deleting any ManifestWork. Idempotent: a re-run (e.g. next pod restart) finds nothing left to
+    do and is a fast no-op.
+  - None of this imports or touches `pkg/controller/gitopscluster` — verified zero coupling in
+    either direction. Disabling the basic pull model cannot affect argocd-agent.
+- **This is a hub-wide switch**, not per-app or per-cluster: it affects every basic-pull-model app
+  across every managed cluster simultaneously. There is no code path to disable it for one app or
+  one cluster only.
+- **Re-enabling** (`disabled: false` + restart) resumes normal reconciliation, but does **not**
+  automatically revert any `ManifestWork` the sweep already set to `ReadOnly` — there is no
+  "undo" sweep. If you want a specific app's `ManifestWork` back under active enforcement, patch its
+  `updateStrategy` back explicitly.
+- **RBAC**: no changes needed — `multicloud-integrations-role` already grants full CRUD on
+  `configmaps` and `manifestworks`/`manifestworks/status` cluster-wide (confirmed in
+  `deploy/controller/role.yaml`).
+
+## Migrating an App from Basic Pull Model to argocd-agent
+
+A step-by-step operator runbook with copy-pasteable commands lives in
+`docs/basic-pull-to-argocd-agent-migration.md`. This works whether the pull model was set up via
+`gitopsAddon.enabled: true` or via `GitOpsCluster.spec.createBlankClusterSecrets: true` directly —
+the latter being how the pull model predates and can exist entirely independently of the
+addon/agent machinery (see "Basic Pull Model" under Architecture).
+
+**Goal**: argocd-agent takes over the **same** Application object — same name, same UID, no new
+`Application` or `ApplicationSet` ever created — with zero pod restart/recreation, and without the
+old pull-model controllers (`multicluster-integrations`'s propagation controller) continuing to
+touch it afterward. Two earlier, more roundabout designs were tried and rejected; see "Designs
+that were rejected" below for why creating a second Application (even under a different name) is
+unnecessary and worse than this one. Getting genuine agent management (not just a hub `Application`
+that merely *looks* migrated) additionally requires step 5 below — see it for why.
+
+**Not every pull-model app has an `ApplicationSet` owner.** The propagation controller only
+requires the pull label + `ocm-managed-cluster*`/`skip-reconcile` annotations on the `Application`
+itself — a hand-created, standalone `Application` carrying them gets pulled and reconciled exactly
+like an `ApplicationSet`-generated one (the only difference: `multiclusterstatusaggregation` keys
+its `MulticlusterApplicationSetReport` generation off the `application-set` label, which only an
+`ApplicationSet`-owned app has — see Known Limitations #13). Steps 1-3 below are identical for both
+kinds; only step 4 (the takeover) branches, since a standalone app has no template to edit.
+
+### The verified sequence: transform the existing ApplicationSet's template in place
+
+The pull-model `ApplicationSet`'s own template is *already* the durable, self-enforcing source of
+truth for the generated `Application` object (that's why Step 2 below works at all — anything you
+change in the template, the `ApplicationSet` controller keeps re-asserting on the live object,
+including fields you didn't touch). Migrating to argocd-agent means changing what that template
+*says* — from "pull-model, hub-side placeholder" to "agent-routed, hub-dispatched" — never
+replacing the object it manages.
+
+1. **Disable the basic pull model hub-wide** via the `multicluster-integrations-config` ConfigMap
+   (see "Disabling the Basic Pull Model" above) and restart the pod. This freezes every existing
+   pull-model `ManifestWork`'s `applications` manifestConfig to `updateStrategy: ReadOnly` in one
+   pass — no need to find and patch it by hand per app. This stops the spoke's klusterlet
+   work-agent from re-asserting/enforcing the delivered Application's spec, without deleting
+   anything: drifting the spoke Application's `spec.syncPolicy` or a label afterward is not
+   reverted, while `statusFeedBackRules` (health/sync/operation status) keeps flowing to the hub the
+   whole time. **Never delete any pull-model ManifestWork, at any point, ever** — see "Designs that
+   were rejected" below; this holds regardless of which overall design you use.
+2. **Enable `argoCDAgent` on the SAME `GitOpsCluster`** (patch it in place; if the cluster never had
+   `gitopsAddon` at all, this is the first time it gets set, which is fine) — do this **before**
+   touching the `ApplicationSet` template's destination (step 4), so the agent cluster secret
+   already exists by the time the destination needs to resolve against it. Wait for
+   `AddOnDeploymentConfig`'s `ARGOCD_AGENT_ENABLED=true` (a few reconcile passes — cert chain
+   generation is sequential, this is the "Expected Waits (Not Bugs)" pattern, not a stuck reconcile)
+   and for `cluster-<name>` to appear in the ArgoCD namespace with the
+   `argocd-agent.argoproj-labs.io/agent-name` label.
+3. **If the managed cluster already had its OWN, differently-named ArgoCD CR** (e.g. a manually
+   installed default `openshift-gitops` instance, as opposed to the addon-managed
+   `acm-openshift-gitops` one that argocd-agent mode creates) — **delete that old ArgoCD CR now.**
+   ArgoCD's core settings (`argocd-cm`, `argocd-rbac-cm`, `argocd-secret`, etc.) are shared
+   per-namespace, not per-CR-instance; two ArgoCD CRs in the same namespace fight over them
+   continuously (observed live: `argocd-server` stuck restarting on `"url modified. restarting"`
+   forever). Deleting the old ArgoCD CR is safe — it does not cascade to the Applications or
+   real workloads it was reconciling (those aren't Kubernetes-owned by the ArgoCD CR itself), only
+   to the ArgoCD control-plane components (application-controller, repo-server, redis, server).
+   Confirmed live: the managed pod's `uid` was unchanged across this deletion. This step does not
+   apply if the cluster's ArgoCD instance was already the addon-managed `acm-openshift-gitops` one.
+   Then wait for the agent pod to reach 2 consecutive stable `Running` samples.
+4. **Take over the app** — this is the actual takeover, and the only step that touches the app's own
+   identity. Which object you patch depends on whether the app has an `ApplicationSet` owner
+   (`kubectl get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o jsonpath='{.metadata.ownerReferences}'`):
+
+   **`ApplicationSet`-owned**: patch the `ApplicationSet`'s template in place — the
+   `ApplicationSet` controller re-asserts the change onto the existing `Application`:
+   - remove the pull-specific label (`apps.open-cluster-management.io/pull-to-ocm-managed-cluster`)
+   - remove the two `ocm-managed-cluster`/`ocm-managed-cluster-app-namespace` annotations
+   - remove `argocd.argoproj.io/skip-reconcile` (this one now needs to come OFF, unlike the
+     rejected designs below — the whole point is for this Application to actually be reconciled
+     now, by the agent, instead of sitting inert)
+   - change `spec.destination` from the literal `server: https://kubernetes.default.svc` to
+     `name: '{{name}}'`, which resolves through the agent cluster secret from step 2
+
+   ```bash
+   kubectl patch applicationset $PULL_APPSET -n $ARGOCD_NS --type=json -p='[
+     {"op":"remove","path":"/spec/template/metadata/labels/apps.open-cluster-management.io~1pull-to-ocm-managed-cluster"},
+     {"op":"remove","path":"/spec/template/metadata/annotations/apps.open-cluster-management.io~1ocm-managed-cluster"},
+     {"op":"remove","path":"/spec/template/metadata/annotations/apps.open-cluster-management.io~1ocm-managed-cluster-app-namespace"},
+     {"op":"remove","path":"/spec/template/metadata/annotations/argocd.argoproj.io~1skip-reconcile"},
+     {"op":"remove","path":"/spec/template/spec/destination/server"},
+     {"op":"add","path":"/spec/template/spec/destination/name","value":"{{name}}"}
+   ]'
+   ```
+
+   **Standalone** (no `ApplicationSet`): there's no template — patch the `Application` object
+   itself, directly and once (nothing else re-asserts its spec, so this is permanent). Same fields,
+   but on `/metadata` and `/spec` directly, and `destination.name` is the literal cluster name
+   (there's no `{{name}}` generator to template it):
+
+   ```bash
+   kubectl patch applications.argoproj.io $APP_NAME -n $ARGOCD_NS --type=json -p='[
+     {"op":"remove","path":"/metadata/labels/apps.open-cluster-management.io~1pull-to-ocm-managed-cluster"},
+     {"op":"remove","path":"/metadata/annotations/apps.open-cluster-management.io~1ocm-managed-cluster"},
+     {"op":"remove","path":"/metadata/annotations/apps.open-cluster-management.io~1ocm-managed-cluster-app-namespace"},
+     {"op":"remove","path":"/metadata/annotations/argocd.argoproj.io~1skip-reconcile"},
+     {"op":"remove","path":"/spec/destination/server"},
+     {"op":"add","path":"/spec/destination/name","value":"'"$CLUSTER_NAME"'"}
+   ]'
+   ```
+
+   The hub `Application`'s `.metadata.uid` **must not change** across this patch — it's a genuine
+   in-place field update, not a delete/recreate: for the `ApplicationSet`-owned case, the
+   `ApplicationSet` controller reconciles an existing same-name Application by patching it, not by
+   replacing it; for the standalone case, it's simply the same direct `kubectl patch` target. If
+   the uid changes, something deleted and recreated the object instead of updating it — stop and
+   investigate before proceeding. The Application goes `Synced` within seconds — **but see step 5
+   below before trusting that this means the agent is actually managing it.** Also confirm the
+   propagation controller is permanently inert with a touch-test (annotate the app, confirm the
+   ManifestWork's `.metadata.generation` does not bump).
+5. **Confirm genuine agent management — do not skip this.** The `Synced` status from step 4 can be
+   misleading. This app was, by definition, delivered to the spoke at least once via the classic
+   pull model — the klusterlet work-agent applied it there directly as a plain object. That
+   pre-existing spoke-side copy is invisible to argocd-agent's own bookkeeping (it has no record of
+   ever creating it), so the agent cannot take real control of it. Step 4 only changes the hub's
+   view; the spoke's copy is not automatically replaced and can keep being reconciled by whatever
+   was already reconciling it before, which still reports back `Synced` even though the agent isn't
+   managing anything. Check directly:
+   ```bash
+   kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o jsonpath='{.spec.destination}'
+   ```
+   - `{"name":"in-cluster", ...}` (or another agent-resolved name) — genuine agent control already
+     achieved, nothing more to do.
+   - `{"server":"https://kubernetes.default.svc", ...}` (the old pull-model value) — not yet taken
+     over. Replace the stale spoke copy: remove `syncPolicy.automated` on the **spoke's** copy
+     first (so the delete below doesn't prune the real resources), strip its `finalizers` to `[]`
+     and delete it directly on the spoke, confirm the real workload's pod `uid` is unchanged, then
+     nudge a fresh dispatch from the hub (any harmless annotation touch — the first create attempt
+     right after the stale copy disappears can race and silently fail once). Recheck
+     `spec.destination` on the spoke again after ~30s; it should now be `name`-based. Confirmed
+     live for both `ApplicationSet`-owned and standalone apps: the workload's pod `uid` never
+     changes across this replacement, because `automated` (and its `prune: true`) was removed from
+     the spoke copy before it was deleted.
+
+That's the whole migration. **No new `Application`, no new `ApplicationSet`, nothing to detach or
+delete afterward** — for the `ApplicationSet`-owned case, the same `ApplicationSet` that generated
+the pull-model app is now the permanent, ongoing manager of the agent-dispatched one, exactly like
+any other agent-mode ApplicationSet; for the standalone case, the `Application` you patched is now
+a normal, permanent agent-dispatched app with nothing else managing it. The old, now-`ReadOnly`
+`ManifestWork` is the only leftover either way, and it's inert — leave it in place permanently (see
+below for why deleting it later is still a bad idea).
+
+### Designs that were rejected (and why)
+
+Two earlier designs were tried, both created a **second** Application/ApplicationSet instead of
+transforming the original in place, and both were rejected once their actual failure modes were
+understood:
+
+1. **Strip the old Application's `ownerReferences`, delete the old `ApplicationSet`, then create a
+   NEW agent `ApplicationSet` reusing the exact same Application name.** This passed every
+   immediate, automated check across 3 script cycles and then **destroyed the live
+   Deployment/Service** when the identical steps were replayed manually with realistic pauses
+   between them. Root cause: deleting an `ApplicationSet` that still (or very recently did) own an
+   Application carrying `resources-finalizer.argocd.argoproj.io` triggers a delete-cascade that is
+   **not instantaneous** — it can take real minutes to finish. The fast automated checks sampled a
+   window where the bookkeeping objects were already gone but the cascade toward the real resources
+   hadn't arrived yet.
+2. **Create a NEW agent `ApplicationSet` with a DIFFERENT Application name** (e.g. `<name>-agent`),
+   leaving the old pull-model `ApplicationSet`/Application alone, then separately detach the old one
+   (finalizer-strip, then delete directly on the spoke). This one was actually safe — proven with
+   3 full cycles and extended waits — but is objectively worse than transforming in place: it
+   creates a second, differently-named `Application` object for something that is, from the user's
+   perspective, the same app; it needs an explicit detach step for the old one; and — discovered
+   while tearing down THIS test's own demo apps afterward — **deleting an `ApplicationSet` whose
+   generated Application has `resources-finalizer.argocd.argoproj.io` and `automated.prune: true`
+   is *always* dangerous, permanently, not just during migration** — the exact same destructive
+   cascade from design #1 reproduced again, unrelated to migration, just from ordinary test
+   cleanup. Transforming the existing `ApplicationSet` in place (the sequence above) has no
+   `ApplicationSet` deletion anywhere in it, so this whole class of hazard never comes up.
+
+**Standing caution, not specific to migration**: never delete an `ApplicationSet` whose generated
+`Application` has an active `resources-finalizer.argocd.argoproj.io` *while `syncPolicy.automated`
+is still set* — that combination is what deletes the real managed resources. This applies to
+decommissioning a **still-pull-model** app (one you've decided not to migrate): disable
+`syncPolicy.automated` on the `ApplicationSet`'s template first, confirm that reached the live
+Application (`spec.syncPolicy` no longer has `automated`), **then delete the `ApplicationSet`**,
+and only then strip the orphaned Application's `finalizers` to `[]` and delete it directly.
+Confirmed live this order the other way around does not reliably work: with the `ApplicationSet`
+still present, stripping the Application's finalizers to `[]` gets silently reverted — something
+(the `ApplicationSet` controller's own periodic template reconcile, independent of `automated`)
+re-adds `resources-finalizer.argocd.argoproj.io` moments later, and a `kubectl delete --wait=true`
+issued right after the strip times out waiting on a finalizer that's already back. Deleting the
+`ApplicationSet` first removes whatever keeps re-adding it, and is safe specifically because
+`automated` (and therefore the prune-on-delete cascade) was already confirmed off the live
+Application before that delete — the real workload's pod `uid` was confirmed unchanged across this
+sequence.
+
+**Force-stripping the finalizer is wrong once an app has already been migrated — prefer a normal
+delete, and always verify the spoke copy is actually gone afterward regardless.** The force-strip
+technique above exists because a still-pull-model app's destination is a fake, unreachable URL, so
+ArgoCD's own finalize-then-remove-finalizer flow can never complete on its own. Once an app is
+agent-routed (post-migration), its destination is real and reachable, so a normal
+`kubectl delete applications.argoproj.io $APP_NAME -n $ARGOCD_NS --wait=true` should be preferred
+(force-stripping pre-emptively guarantees the relay-to-agent never gets a chance to happen at all).
+
+**But even a clean, non-force-stripped delete is not guaranteed to relay to the agent — always
+explicitly verify the spoke's copy is actually gone, every time.** Confirmed live, for apps that
+existed before argoCDAgent was ever enabled on their cluster (true of any migrated pull-model app,
+by definition): in one case the relay was rejected outright, logged on the agent as `source UID
+annotation is not found for app: <name>`, leaving the hub object stuck `Terminating` until its
+finalizer was cleared manually; in another, a `--wait=true` delete completed on the hub with no
+error at all, yet the spoke's mirrored `Application` (and its real workload) was silently left
+behind regardless. Both were only caught by directly checking the spoke:
+
+```bash
+kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS
+# if found with no corresponding hub object, it's an orphan -- delete it directly, on the spoke:
+kubectl --kubeconfig $SPOKE_KUBECONFIG delete applications.argoproj.io $APP_NAME -n $ARGOCD_NS --wait=true
+```
+
+An orphaned spoke copy isn't just inert leftover clutter — it keeps actively reconciling its
+resources and will fight any later, unrelated app that reuses the same destination namespace and
+resource names, both apps repeatedly overwriting each other's `argocd.argoproj.io/tracking-id`,
+with the affected app flapping `Synced`/`OutOfSync` indefinitely until the orphan is removed.
+
+### Other gotchas hit while building and testing this
+
+- **An immediate post-action check is not sufficient proof of safety — always re-verify after a
+  real wait.** This is the single biggest lesson from the rejected design #1 above: a pod `uid`
+  unchanged 1 second after a risky operation does not mean the operation was safe, only that
+  nothing had cascaded *yet*. Every step in the sequence above was re-confirmed after an explicit
+  ~3 minute wait, not just immediately.
+- **Deleting the wrong Policy name leaves the ArgoCD CR fighting cleanup forever.** The governance
+  root `Policy` lives in the ArgoCD namespace as `<gitopscluster-name>-argocd-policy`; the
+  *replica* in the managed cluster's own namespace is named
+  `<argocd-namespace>.<gitopscluster-name>-argocd-policy` (root namespace prefixed). Deleting only
+  the replica — or using the un-prefixed name in the managed cluster's namespace — does nothing:
+  the root `Policy` keeps re-enforcing, so `config-policy-controller` on the spoke recreates the
+  ArgoCD CR every time a `ManagedClusterAddOn` pre-delete cleanup Job deletes it, until the Job's
+  own timeout is exhausted and it fails permanently, wedging the MCA in `Terminating`. Always
+  delete the root `Policy` + its `PlacementBinding` in the ArgoCD namespace, before deleting the
+  MCA, per the documented cleanup order.
+- **A default OLM install of the operator does NOT get the same RBAC the addon normally
+  provisions.** A manually-installed (not addon-managed) ArgoCD instance's application-controller
+  ServiceAccount is scoped read-only outside its own namespace by default — the very first sync of
+  anything into another namespace fails with `services is forbidden` / `deployments.apps is
+  forbidden` and exhausts ArgoCD's 5-retry budget. Grant `cluster-admin` (or a narrower equivalent)
+  to `<argocd-name>-argocd-application-controller` before the first sync, same pattern as the
+  Hybrid Mode / RBAC-before-first-sync guidance elsewhere in this doc — and note the SA name
+  changes when the ArgoCD instance's own name changes (e.g. after step 4 above swaps
+  `openshift-gitops` for `acm-openshift-gitops`).
+- **A shell script's `wait_for`-style helper that shells out via `bash -c "..."` does not inherit
+  parent shell functions or variables.** If `wait_for` (or any retry loop) spawns a *new* bash
+  process to evaluate its condition, any helper functions (e.g. a `hub() { kubectl --kubeconfig
+  ... }` wrapper) and the variables they close over must be `export -f`'d and `export`'d
+  respectively, or the subshell silently falls through to kubectl's `localhost:8080` default and
+  the condition can never become true — the loop just hangs forever with no error, which looks
+  identical to a slow reconcile.
+- **kubectl JSONPath bracket-filters on dotted annotation/label keys are fragile** (e.g.
+  `{.items[?(@.metadata.annotations.foo\.bar=='x')]}`). Prefer `-o json | python3 -c "..."` for
+  anything beyond a simple field path — it's slower to write but doesn't silently return empty on
+  syntax the kubectl JSONPath parser doesn't like.
+- **ArgoCD component pod label selectors are not always `app.kubernetes.io/component=<name>`** —
+  e.g. the application-controller StatefulSet pod carries
+  `app.kubernetes.io/name=<argocd-cr-name>-application-controller`, not a generic `component`
+  label. When scripting a wait condition, prefer matching on the pod *name* (`-o name | grep
+  application-controller`) over guessing a label schema.
+- **`kubectl get subscription` is ambiguous on an ACM hub**, same trap as `kubectl get application`
+  documented under Troubleshooting — both `apps.open-cluster-management.io/v1 Subscription` (OCM's
+  classic app-lifecycle CRD) and `operators.coreos.com/v1alpha1 Subscription` (OLM) register the
+  same plural. Always use `kubectl get subscriptions.operators.coreos.com` when checking OLM
+  install state on a hub or spoke that also has ACM's app-lifecycle CRDs installed.
+- **A duplicate `OperatorGroup` in the same namespace silently breaks OLM resolution.** If a
+  namespace already has one (e.g. a leftover `gitops-addon-operator-group` from a previous
+  addon-managed install), creating a second one produces `MultipleOperatorGroupsFound` and the
+  `Subscription` never progresses past `CatalogSourcesUnhealthy: false` / no `InstallPlan` at all —
+  no obvious error on the `Subscription` itself, only on the `OperatorGroup`'s own status
+  conditions. Check `kubectl get operatorgroup -A -o yaml` for this condition before assuming a
+  stuck install is a catalog or network problem.
+
 ## Creating and Importing a Kind Managed Cluster
 
 ```bash
@@ -308,6 +787,30 @@ GitOpsCluster deletion is a no-op (no finalizer). You must delete resources in t
 
 **Key constraints**: GitOpsCluster BEFORE MCAs. Policy BEFORE MCAs. ADC/AddOnTemplate must still exist when MCAs are deleted.
 
+**Confirm an Application is actually gone (not just `--wait=false` "issued") before deleting the
+GitOpsCluster/agent/cluster-secret underneath it — for an agent-routed (post-migration) app,
+skipping this can wedge it in `Terminating` forever.** If the Application still carries
+`resources-finalizer.argocd.argoproj.io` when you request its deletion, some ArgoCD app-controller
+has to actually finish pruning against its `spec.destination` before the finalizer clears — for a
+`destination.name`-based (agent-routed) app, that means the agent's own ArgoCD instance on the
+spoke, not the hub. If you delete the `GitOpsCluster`/MCA (tearing down the agent) or the cluster
+secret the destination name resolves through while that finalizer is still pending, nothing can
+ever finish the prune, and the Application sits `Terminating` indefinitely with
+`status.conditions[].type: DeletionError` referencing a destination that no longer exists.
+Confirmed live: with two migrated Applications from two different test cycles both targeting a
+cluster named `ocp-cluster1`, letting cycle 1's stuck deletion linger while cycle 2 created its own
+(differently-shaped) `ocp-cluster1`-named cluster secret caused cycle 1's app-controller retry to
+resolve `ocp-cluster1` to *cycle 2's* secret and report `DeletionError`s against a completely
+unrelated fake URL — a confusing, misleading symptom that's really just "the destination this app
+needs to reach doesn't exist by that name anymore." Once the real workload is independently
+confirmed gone (e.g. manually verified on the spoke), it's safe to force-clear the stuck
+finalizer directly (`kubectl patch applications.argoproj.io <name> -n <ns> --type=merge -p
+'{"metadata":{"finalizers":null}}'`) — same "target confirmed dead, mechanism to clear it
+naturally can't work anymore" reasoning as the documented `ManagedClusterAddOn`
+`addon-pre-delete`-finalizer exception above. Prefer not needing this: always
+`kubectl delete applications.argoproj.io <name> -n <ns> --wait=true` (or poll for `NotFound`)
+before proceeding to the next cleanup step, not `--wait=false`.
+
 ## Troubleshooting
 
 ### Apps Stuck at OutOfSync/Missing After RBAC Fix
@@ -350,6 +853,24 @@ kubectl -n ocm rollout restart deployment/multicluster-operators-application
 1. Check principal pod: `kubectl get pods -n openshift-gitops -l app.kubernetes.io/component=principal`
 2. Check principal logs: `kubectl logs -n openshift-gitops -l app.kubernetes.io/component=principal --tail=50`
 3. Check agent logs on spoke: `kubectl logs -n openshift-gitops -l app.kubernetes.io/part-of=argocd-agent --tail=50`
+
+### Basic Pull Model: Blank Cluster Secret Creation Fails ("found existing non-ACM ArgoCD clusters secrets")
+Symptom: `GitOpsCluster` status shows `ClustersRegistered: False`, message `found existing non-ACM
+ArgoCD clusters secrets for cluster: <name>`. Cause: a stale/orphaned cluster secret for that
+cluster already exists in the ArgoCD namespace — most commonly an old argocd-agent secret
+(`argocd-agent.argoproj-labs.io/agent-name` label, `managed-by: argocd-agent` annotation) left
+behind by a previously deleted `GitOpsCluster` that had agent mode enabled for the same cluster
+name. The blank-secret creation path refuses to overwrite a secret it doesn't recognize as its own
+placeholder. Fix: confirm the existing secret really is orphaned (its owning `GitOpsCluster` is
+gone), then delete it — the next reconcile creates a fresh blank secret.
+
+### `kubectl get application` Silently Returns Nothing on an ACM Hub
+An ACM hub has more than one CRD registered under the bare kind `Application` (ArgoCD's
+`applications.argoproj.io` and the older `applications.app.k8s.io` from the classic
+subscription/channel model). An unqualified `kubectl get application` can resolve to the wrong one
+and print `No resources found` even though the ArgoCD Application you're looking for exists.
+Always use the fully-qualified `kubectl get applications.argoproj.io` when inspecting pull-model
+or agent-mode Applications on a real hub.
 
 ### Hub App-Controller Fights the Principal Over an Autonomous Mirror's Status
 Symptom: an autonomous-mode Application mirrored to the hub flips `status.sync.status` back to
@@ -446,6 +967,72 @@ namespace with its own agent-connected ArgoCD instance) has been removed.
   app-controllers) in whatever destination namespaces those apps create — do this **before**
   creating the AppSet, or the first sync attempt exhausts ArgoCD's 5-retry budget and self-heal
   won't retry a revision that already failed that many times.
+
+### Basic Pull Model (Classic ManifestWork-Based Delivery)
+
+The original (2023) integration, predating argocd-agent and still shipping by default alongside
+it — the two are **intentionally coexisting alternatives, not a deprecated/replacement pair**.
+Nothing in the code or git history marks the pull model itself as deprecated (only the
+`MulticlusterApplicationSetReport` v1alpha1 CRD carries a Kubernetes-convention deprecation
+warning — a data-model sunset note, not a statement that the mechanism is going away).
+
+**Key distinction from argocd-agent**: no new agent process, no gRPC, no principal/cert
+machinery. It reuses the **klusterlet work-agent every managed cluster already has** (the same
+channel used for Policies and classic Subscriptions) via the standard `ManifestWork` API.
+
+Data flow:
+1. Hub creates a **blank/dummy cluster secret** per target cluster (`createBlankClusterSecrets`,
+   forced `true` whenever `gitopsAddon` is enabled) — `server: https://<cluster>-control-plane`,
+   a deliberately fake/unreachable URL. Its only purpose is making ArgoCD's `ApplicationSet`
+   `clusterDecisionResource` generator treat the cluster as a valid destination; nothing ever
+   actually connects to that URL.
+2. The **propagation controller** (`propagation-controller/application/`, part of the
+   `multicluster-integrations` deployment) watches `Application` objects cluster-wide for label
+   `apps.open-cluster-management.io/pull-to-ocm-managed-cluster: "true"` plus annotation
+   `apps.open-cluster-management.io/ocm-managed-cluster: <cluster-name>`. On match, it wraps the
+   Application (destination rewritten to `https://kubernetes.default.svc`, i.e. "reconcile
+   in-cluster" — meaning in the *spoke's* own cluster once delivered) plus its `Namespace` and
+   `AppProject` (skipped if it's just the default `default`/`openshift-gitops` pair, since every
+   ArgoCD install already has that) into a `ManifestWork` in the target cluster's hub namespace,
+   with `FeedbackRules` requesting health/sync/operation status back.
+3. The spoke's own existing klusterlet work-agent pulls that `ManifestWork` down and applies it —
+   no new network channel, no addon-specific delivery path.
+4. The spoke's own ArgoCD (installed by `gitopsaddon`, same as agent mode, just without the
+   `argoCDAgent` block) reconciles the delivered Application against its local API server.
+5. Status returns two ways: `ManifestWork.status.resourceStatus` feedback is consumed by
+   `multiclusterstatusaggregation`, merged with fine-grained detail polled from ACM's
+   `search-search-api` by `gitopssyncresc` (communicated between the two sidecar containers via a
+   shared `emptyDir`, not an API), into a `MulticlusterApplicationSetReport` CR — and separately,
+   `application_status_controller` (same `propagation-controller` binary) watches that report and
+   reflects health/sync/operation state directly onto the hub's own placeholder `Application`
+   object, plus a synthetic `AdditionalStatusReport` condition pointing users at the report and
+   the spoke's own Application for full detail.
+6. Only Applications generated by an `ApplicationSet` (i.e. carrying an `ApplicationSet`
+   `ownerReference`) get the `apps.open-cluster-management.io/application-set` label on their
+   `ManifestWork` — a hand-created, non-ApplicationSet-owned `Application` still gets pulled and
+   reconciled, but produces no `MulticlusterApplicationSetReport` (`multiclusterstatusaggregation`
+   only lists `ManifestWork`s carrying that label).
+
+**Coexistence with hybrid mode / argocd-agent**: if the hub's own app-controller is enabled
+(hybrid mode, `controller.enabled: true`) and the pull-model placeholder Application's
+`destination.server` is the in-cluster address, the hub app-controller would otherwise try to
+reconcile that same placeholder locally, on top of the propagation controller delivering it to the
+spoke. Set `argocd.argoproj.io/skip-reconcile: "true"` directly on the pull-model Application
+itself (not just on cluster secrets — this is the same generic upstream ArgoCD annotation, applied
+at a different level) to keep the hub's copy inert.
+
+**OCP-only**: this integration is supported only for OCP managed clusters. Both OCP and non-OCP
+spokes get a real ArgoCD instance from `gitopsaddon`, but the pull model has not been validated
+against the non-OCP embedded-chart path.
+
+**`local-cluster` support is currently dormant, not actively gated**: an earlier iteration
+supported pulling Applications onto `local-cluster` itself, via a dedicated `gitopsaddon`-deployed
+ArgoCD instance in a `local-cluster` namespace. That dedicated instance was removed when hybrid
+mode replaced it with the plain in-cluster `cluster-local-cluster` secret (see "Hybrid Mode"
+above), and the e2e coverage for pull-model-on-local-cluster was deleted at the same time. No
+explicit code-level guard currently blocks targeting `local-cluster` with a pull-model Application
+(unlike the Maestro variant, which explicitly skips it), but the mechanism it used to depend on no
+longer exists in the same shape — treat this path as unverified.
 
 ### Package Structure
 
@@ -744,6 +1331,18 @@ one.
 8. **OCP OLM timing**: 30-120s. Use 600s timeouts.
 9. **DBM must match principal and agent**: Mismatched = "Resource not found" in UI.
 10. **Agent SA view ClusterRole**: Not auto-provisioned. Add manually or via Policy.
+11. **Basic pull model is OCP-only**: not validated/supported against non-OCP (embedded Helm
+    chart) managed clusters. See "Basic Pull Model" under Architecture.
+12. **Basic pull model on `local-cluster` is dormant**: the dedicated `local-cluster`-namespace
+    ArgoCD instance it depended on was removed by hybrid mode; no code-level guard blocks it, but
+    it is unverified. See "Basic Pull Model" under Architecture.
+13. **Basic pull model status aggregation requires an `ApplicationSet` owner**: a hand-created
+    `Application` with the pull label/annotation still gets delivered and reconciled, but produces
+    no `MulticlusterApplicationSetReport` — only `ApplicationSet`-generated Applications get the
+    `application-set` label needed for `multiclusterstatusaggregation` to pick them up.
+14. **Never delete a pull-model `ManifestWork` for an app you want to keep**: proven destructive in
+    live testing regardless of `updateStrategy: ReadOnly` or an explicit `orphaningRules` entry —
+    see "Migrating an App from Basic Pull Model to argocd-agent" above for the actual safe sequence.
 
 ## Container Registry
 
