@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsetreportV1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
+	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
 )
 
 // ApplicationStatusReconciler reconciles a Application object
@@ -55,6 +56,12 @@ func (re *ApplicationStatusReconciler) SetupWithManager(mgr ctrl.Manager) error 
 
 // Reconcile populates the Application status based on the MulticlusterApplicationSetReport
 func (r *ApplicationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Checked fresh on every reconcile -- see the matching comment in application_controller.go's
+	// Reconcile for why this can't be a flag cached once at startup.
+	if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+		return ctrl.Result{}, nil
+	}
+
 	log := log.FromContext(ctx)
 	log.Info("reconciling Application for status update..")
 	defer log.Info("done reconciling Application for status update")
