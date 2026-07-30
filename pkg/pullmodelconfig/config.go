@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +47,13 @@ const (
 
 	podNamespaceEnvVar          = "POD_NAMESPACE"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+	// LoadTimeout bounds a single LoadOrCreate call. Per-reconcile/per-tick callers should derive
+	// a child context via context.WithTimeout(ctx, pullmodelconfig.LoadTimeout) before calling
+	// LoadOrCreate, so a slow or unresponsive API server can't block that reconcile/tick
+	// indefinitely -- the ambient ctx passed in from controller-runtime (or a periodic loop's
+	// process-lifetime ctx) otherwise carries no deadline of its own.
+	LoadTimeout = 10 * time.Second
 )
 
 // ControllerConfig is the top-level shape of the multicluster-integrations-config ConfigMap.
@@ -111,7 +119,7 @@ func ResolveNamespace() (string, error) {
 func LoadOrCreate(ctx context.Context, c client.Client) (*ControllerConfig, error) {
 	ns, err := ResolveNamespace()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("LoadOrCreate: %w", err)
 	}
 
 	cm := &corev1.ConfigMap{}
@@ -123,7 +131,7 @@ func LoadOrCreate(ctx context.Context, c client.Client) (*ControllerConfig, erro
 	case apierrors.IsNotFound(err):
 		return createDefault(ctx, c, ns)
 	default:
-		return nil, err
+		return nil, fmt.Errorf("failed to get %s/%s: %w", ns, ConfigMapName, err)
 	}
 }
 

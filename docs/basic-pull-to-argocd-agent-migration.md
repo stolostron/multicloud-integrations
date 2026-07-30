@@ -104,10 +104,42 @@ do not need to repeat it per app or per cluster, and you do not need to manually
    ```
 
    If it doesn't exist, one of the controller's containers will self-create it with defaults the
-   first time it starts — in that case just wait for it to appear, or create it yourself with the
-   content below.
+   first time it starts — either wait for it to appear, or create it yourself directly:
 
-   Set (or add) `pullModel.basic.disabled: true` under the `config.yaml` key:
+   ```bash
+   cat > /tmp/config.yaml <<'EOF'
+   pullModel:
+     basic:
+       disabled: true
+   EOF
+   kubectl create configmap multicluster-integrations-config -n <namespace> \
+     --from-file=config.yaml=/tmp/config.yaml
+   ```
+
+   `--from-file=config.yaml=<path>` stores the file's raw bytes under that key with no shell
+   quoting/escaping involved at all — simpler than the patch form below, and the right choice
+   whenever the ConfigMap doesn't exist yet. If it already exists, `kubectl create` just fails
+   with `AlreadyExists` — fall through to editing it in place instead.
+
+   Set (or add) `pullModel.basic.disabled: true` under the `config.yaml` key on an **existing**
+   ConfigMap. `config.yaml` is a
+   single YAML blob (not flat ConfigMap keys), so a merge patch on `data` replaces the **entire**
+   string — do not just paste a `pullModel`-only patch if the ConfigMap already has other sections
+   under `config.yaml` (current or future). Edit the existing content instead:
+
+   ```bash
+   kubectl get configmap multicluster-integrations-config -n <namespace> -o jsonpath='{.data.config\.yaml}' > /tmp/config.yaml
+   # edit /tmp/config.yaml: add or change pullModel.basic.disabled: true, leaving any other
+   # sections untouched
+   # jq --rawfile safely JSON-encodes the file's content (quotes, backslashes, newlines) --
+   # do not hand-build the JSON string with sed/string interpolation, it will break on any
+   # YAML value containing a quote or backslash.
+   kubectl patch configmap multicluster-integrations-config -n <namespace> --type=merge \
+     -p "$(jq -n --rawfile cfg /tmp/config.yaml '{"data":{"config.yaml":$cfg}}')"
+   ```
+
+   If you know the ConfigMap has no other sections yet (a fresh install), the simpler one-shot form
+   is fine:
 
    ```bash
    kubectl patch configmap multicluster-integrations-config -n <namespace> --type=merge -p '{
@@ -164,10 +196,14 @@ What just happened, at the code level:
   this component from this point on.
 - `gitopssyncresc` (the ACM Search polling loop) and `multiclusterstatusaggregation` (the
   `MulticlusterApplicationSetReport` generator) both skip their periodic work entirely.
-- Every existing pull-model `ManifestWork` had its `applications` manifest config's
-  `updateStrategy` set to `ReadOnly` — this stops the spoke's klusterlet work-agent from
-  re-asserting the delivered `Application` spec, without deleting anything. Health/sync/operation
-  status feedback continues flowing normally; only spec enforcement stops.
+- The sweep is **best-effort, not guaranteed**: each matching `ManifestWork`'s `applications`
+  manifest config gets its `updateStrategy` set to `ReadOnly`, but a failed update (e.g. a
+  resourceVersion conflict) is logged and skipped rather than retried indefinitely — check the log
+  line from step 4 above and the per-`ManifestWork` verification in step 5 below; if any row isn't
+  `ReadOnly`, either fix it directly or rerun the sweep (restart the pod again) before migrating
+  that app. Once genuinely applied, this stops the spoke's klusterlet work-agent from re-asserting
+  the delivered `Application` spec, without deleting anything. Health/sync/operation status
+  feedback continues flowing normally; only spec enforcement stops.
 - None of this touches `pkg/controller/gitopscluster` or anything used by argocd-agent — this is a
   pure basic-pull-model shutoff switch.
 
@@ -205,9 +241,25 @@ expected, not a stuck reconcile):
 kubectl get addondeploymentconfig gitops-addon-config -n $CLUSTER_NAME \
   -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_ENABLED")].value}'
 
-# agent cluster secret appears on the hub
-kubectl get secret cluster-$CLUSTER_NAME -n $ARGOCD_NS \
-  -o jsonpath='{.metadata.labels.argocd-agent\.argoproj-labs\.io/agent-name}'
+# agent cluster secret appears on the hub, correctly labeled AND annotated skip-reconcile: "true"
+# (skip-reconcile is what keeps the hub's own app-controller from fighting the agent for this
+# cluster -- see CLAUDE.md -> "Skip-Reconcile Annotation on Agent Cluster Secrets"). Assert both
+# explicitly rather than just eyeballing the printed value -- proceeding with either one missing
+# means either the agent was never actually wired up, or the hub app-controller will fight the
+# agent for this cluster once Step 4 dispatches to it.
+AGENT_NAME_LABEL=$(kubectl get secret cluster-$CLUSTER_NAME -n $ARGOCD_NS \
+  -o jsonpath='{.metadata.labels.argocd-agent\.argoproj-labs\.io/agent-name}')
+if [ "$AGENT_NAME_LABEL" != "$CLUSTER_NAME" ]; then
+  echo "agent cluster secret is missing its agent-name label (got '$AGENT_NAME_LABEL') -- stop, do not proceed to Step 3/4" >&2
+  exit 1
+fi
+
+SKIP_RECONCILE=$(kubectl get secret cluster-$CLUSTER_NAME -n $ARGOCD_NS \
+  -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/skip-reconcile}')
+if [ "$SKIP_RECONCILE" != "true" ]; then
+  echo "agent cluster secret is missing skip-reconcile: \"true\" (got '$SKIP_RECONCILE') -- stop, do not proceed to Step 3/4" >&2
+  exit 1
+fi
 ```
 
 ## Step 3 — Resolve a pre-existing, differently-named ArgoCD instance (if any)
@@ -222,14 +274,30 @@ permanently restarting on `"url modified. restarting"`).
 
 ```bash
 kubectl --kubeconfig $SPOKE_KUBECONFIG get argocd -n $ARGOCD_NS
-# if you see both acm-openshift-gitops AND some other name:
+```
+
+**Before deleting the other instance, inventory every `Application` in this namespace** — deleting
+it removes its control-plane, so *every* `Application` it was reconciling (not just the one you're
+migrating) loses that reconciliation, not only the app you're migrating:
+
+```bash
+kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io -n $ARGOCD_NS
+```
+
+For each app in that list other than the one you're migrating, either plan to migrate it too (repeat
+this runbook for it) or explicitly accept that it stops being reconciled once the old instance is
+gone. Do not delete the old ArgoCD CR until you've made a call on every app it lists — an app
+silently losing reconciliation is easy to miss until something drifts.
+
+```bash
+# only once you've accounted for every app the old instance was reconciling:
 kubectl --kubeconfig $SPOKE_KUBECONFIG delete argocd <the-other-name> -n $ARGOCD_NS
 ```
 
-This is safe — deleting an ArgoCD CR does not cascade to the Applications or real workloads it was
-reconciling (they aren't Kubernetes-owned by the ArgoCD CR), only to its own control-plane
-components (application-controller, repo-server, redis, server). Confirm the workload's pod `uid`
-is unchanged before and after.
+This is safe for the workloads themselves — deleting an ArgoCD CR does not cascade to the
+Applications or real workloads it was reconciling (they aren't Kubernetes-owned by the ArgoCD CR),
+only to its own control-plane components (application-controller, repo-server, redis, server).
+Confirm the workload's pod `uid` is unchanged before and after.
 
 Then wait for the agent pod to reach **two consecutive stable `Running` samples**, not just one — a
 crash-looping pod can report `Running` momentarily between restarts:
@@ -324,10 +392,11 @@ spoke's copy does not automatically get replaced, and can keep being reconciled 
 already reconciling it before — which, from the hub's perspective, still reports back as `Synced`,
 even though the agent isn't actually managing anything.
 
-Check the spoke's copy directly:
+Check the spoke's copy directly (`-o json | jq` rather than `-o jsonpath` on the whole object, since
+`jsonpath`'s formatting of a nested object isn't reliably valid JSON across `kubectl` versions):
 
 ```bash
-kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o jsonpath='{.spec.destination}'
+kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o json | jq '.spec.destination'
 ```
 
 - `{"name":"in-cluster", ...}` (or another agent-resolved name) — the agent already has genuine
@@ -336,13 +405,57 @@ kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n
   **not** taken over. The spoke's stale copy needs to be replaced:
 
 ```bash
-# On the SPOKE: remove automated first, so the delete below does not prune the real resources
-kubectl --kubeconfig $SPOKE_KUBECONFIG patch applications.argoproj.io $APP_NAME -n $ARGOCD_NS \
-  --type=json -p='[{"op":"remove","path":"/spec/syncPolicy/automated"}]'
+set -e   # fail closed: stop at the first error rather than risk deleting under an unverified state
 
-# On the SPOKE: strip the finalizer and delete the stale copy directly
+# On the SPOKE: remove automated first, so the delete below does not prune the real resources.
+# A merge patch setting it to null is idempotent -- unlike a JSON-patch "remove", it does not
+# error if automated is already absent (e.g. you're re-running this after a partial attempt).
 kubectl --kubeconfig $SPOKE_KUBECONFIG patch applications.argoproj.io $APP_NAME -n $ARGOCD_NS \
-  --type=merge -p '{"metadata":{"finalizers":[]}}'
+  --type=merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+
+# On the SPOKE: remove ONLY the ArgoCD finalizer -- preserve any other, unrelated finalizer the
+# object might carry, rather than blindly clearing the whole list. Make this patch conditional on
+# the resourceVersion we just read: including metadata.resourceVersion in a merge-patch body is a
+# genuine, server-enforced precondition -- unlike the finalizer list itself, resourceVersion is
+# never merged, so if the object changed since our read (e.g. something re-added the finalizer
+# concurrently) the API server rejects the whole patch with a 409 Conflict instead of silently
+# clobbering whatever is there. This is a real optimistic-concurrency check, not just an
+# application-level read-then-act race (confirmed live: a merge patch carrying a stale
+# resourceVersion is rejected with "Operation cannot be fulfilled ... the object has been
+# modified").
+CURRENT=$(kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o json)
+CURRENT_RV=$(echo "$CURRENT" | jq -r '.metadata.resourceVersion')
+NEW_FINALIZERS=$(echo "$CURRENT" | jq -c '[.metadata.finalizers[]? | select(. != "resources-finalizer.argocd.argoproj.io")]')
+PATCHED=$(kubectl --kubeconfig $SPOKE_KUBECONFIG patch applications.argoproj.io $APP_NAME -n $ARGOCD_NS \
+  --type=merge -o json -p "{\"metadata\":{\"resourceVersion\":\"$CURRENT_RV\",\"finalizers\":$NEW_FINALIZERS}}") || {
+  echo "finalizer-removal patch was rejected (object changed since our read) -- stop, re-verify before retrying" >&2
+  exit 1
+}
+
+# The patch response above IS the server's confirmed post-patch state -- no separate read-back is
+# needed to check the finalizer list, since the conditional patch already proves nothing else
+# touched the object between our read and this write. Only something reconciling in the instant
+# AFTER our patch succeeded could still re-add a finalizer, which the delete-time check below
+# catches.
+REMAINING=$(echo "$PATCHED" | jq -c '.metadata.finalizers // []')
+if [ "$REMAINING" != "[]" ]; then
+  echo "finalizer(s) still present after patch ($REMAINING) -- stop, do not delete, investigate before retrying" >&2
+  exit 1
+fi
+
+# kubectl delete has no resourceVersion precondition flag at all -- "the delete command does NOT
+# do resource version checks" (kubectl delete --help, verified against a live cluster). This
+# immediate re-check right before deleting is the closest practical equivalent: abort if the
+# object changed again in the (now much smaller) window between our just-confirmed atomic patch
+# above and this delete call, rather than deleting an object we no longer have a verified-clean
+# view of.
+RESOURCE_VERSION=$(echo "$PATCHED" | jq -r '.metadata.resourceVersion')
+CURRENT_RESOURCE_VERSION=$(kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS \
+  -o jsonpath='{.metadata.resourceVersion}')
+if [ "$CURRENT_RESOURCE_VERSION" != "$RESOURCE_VERSION" ]; then
+  echo "object changed (resourceVersion $RESOURCE_VERSION -> $CURRENT_RESOURCE_VERSION) since the patch -- stop, re-verify before retrying" >&2
+  exit 1
+fi
 kubectl --kubeconfig $SPOKE_KUBECONFIG delete applications.argoproj.io $APP_NAME -n $ARGOCD_NS --wait=true
 
 # Confirm the real workload survived this (pod uid unchanged from what you recorded earlier)
@@ -443,7 +556,7 @@ kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n
 
 # 3b. It's Synced via the agent for real, not just coincidentally still Synced from before
 # (see Step 5 -- this is the check that actually distinguishes the two)
-kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o jsonpath='{.spec.destination}'
+kubectl --kubeconfig $SPOKE_KUBECONFIG get applications.argoproj.io $APP_NAME -n $ARGOCD_NS -o json | jq '.spec.destination'
 #    ^ must show a name-based destination (e.g. "in-cluster") -- NOT server: https://kubernetes.default.svc
 
 # 4. The real workload was never touched
@@ -464,10 +577,16 @@ import json, sys
 d = json.load(sys.stdin)
 for i in d['items']:
     ann = i.get('metadata', {}).get('annotations', {}) or {}
-    if ann.get('apps.open-cluster-management.io/hub-application-name') == '$APP_NAME':
-        print(i['metadata']['name'], i['spec']['manifestConfigs'][0]['updateStrategy']['type'])
+    if ann.get('apps.open-cluster-management.io/hub-application-name') != '$APP_NAME':
+        continue
+    for mc in i['spec'].get('manifestConfigs', []):
+        ri = mc.get('resourceIdentifier', {})
+        if ri.get('group') == 'argoproj.io' and ri.get('resource') == 'applications':
+            print(i['metadata']['name'], (mc.get('updateStrategy') or {}).get('type'))
 "
-#    ^ should show "ReadOnly" -- never "ServerSideApply"/"Update" for this app again
+#    ^ should show "ReadOnly" -- never "ServerSideApply"/"Update" for this app again -- match by
+#    resourceIdentifier, not position: a ManifestWork can carry other manifestConfigs entries
+#    (e.g. a Namespace) ahead of the applications one
 ```
 
 ## Re-enabling the basic pull model

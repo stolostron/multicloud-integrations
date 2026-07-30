@@ -57,7 +57,7 @@ Then install governance addons (`governance-policy-framework` + `config-policy-c
 ## Repository Overview
 
 Every binary below is built from the same image (`quay.io/stolostron/multicloud-integrations`),
-but shipped as **two separate Deployments** on the hub — don't assume "the controller" means only
+but shipped as **three separate Deployments** on the hub — don't assume "the controller" means only
 one of them:
 
 1. **gitopscluster** — Hub-side controller in the `multicluster-operators-application` deployment.
@@ -583,14 +583,25 @@ replacing the object it manages.
      achieved, nothing more to do.
    - `{"server":"https://kubernetes.default.svc", ...}` (the old pull-model value) — not yet taken
      over. Replace the stale spoke copy: remove `syncPolicy.automated` on the **spoke's** copy
-     first (so the delete below doesn't prune the real resources), strip its `finalizers` to `[]`
-     and delete it directly on the spoke, confirm the real workload's pod `uid` is unchanged, then
-     nudge a fresh dispatch from the hub (any harmless annotation touch — the first create attempt
-     right after the stale copy disappears can race and silently fail once). Recheck
-     `spec.destination` on the spoke again after ~30s; it should now be `name`-based. Confirmed
-     live for both `ApplicationSet`-owned and standalone apps: the workload's pod `uid` never
-     changes across this replacement, because `automated` (and its `prune: true`) was removed from
-     the spoke copy before it was deleted.
+     first (so the delete below doesn't prune the real resources), then remove *only*
+     `resources-finalizer.argocd.argoproj.io` from its `finalizers` — preserve any other,
+     unrelated finalizer the object might carry rather than clearing the whole list — and
+     **read `.metadata.finalizers` back** before deleting — the `ApplicationSet` controller (or
+     ArgoCD's own defaulting) can silently re-add `resources-finalizer.argocd.argoproj.io` moments
+     later, the same behavior documented in "Designs that were rejected" below. If the read-back
+     is non-empty, stop and do not delete — automated is off, so there is no destructive cascade
+     in that scenario, but a delete against a re-added finalizer just times out. `kubectl` has no
+     direct delete-precondition flag, so as the closest practical equivalent, also capture
+     `.metadata.resourceVersion` from that same read-back and re-check it immediately before
+     deleting — if it changed in that window (e.g. a finalizer got re-added right after the clean
+     read-back), stop instead of deleting an object no longer confirmed clean. Only once both
+     checks pass, delete it directly on the spoke, confirm the real workload's pod `uid` is
+     unchanged, then nudge a fresh dispatch from the hub (any harmless annotation touch — the
+     first create attempt right after the stale copy disappears can race and silently fail once).
+     Recheck `spec.destination` on the spoke again after ~30s; it should now be `name`-based.
+     Confirmed live for both `ApplicationSet`-owned and standalone apps: the workload's pod `uid`
+     never changes across this replacement, because `automated` (and its `prune: true`) was removed
+     from the spoke copy before it was deleted.
 
 That's the whole migration. **No new `Application`, no new `ApplicationSet`, nothing to detach or
 delete afterward** — for the `ApplicationSet`-owned case, the same `ApplicationSet` that generated

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -66,28 +67,31 @@ func SweepManifestWorksToReadOnly(ctx context.Context, c client.Client) error {
 			continue
 		}
 
-		changed := false
-
-		for j := range mw.Spec.ManifestConfigs {
-			mc := &mw.Spec.ManifestConfigs[j]
-			if mc.ResourceIdentifier.Group != "argoproj.io" || mc.ResourceIdentifier.Resource != "applications" {
-				continue
-			}
-
-			if mc.UpdateStrategy != nil && mc.UpdateStrategy.Type == workv1.UpdateStrategyTypeReadOnly {
-				continue
-			}
-
-			mc.UpdateStrategy = &workv1.UpdateStrategy{Type: workv1.UpdateStrategyTypeReadOnly}
-			changed = true
-		}
-
-		if !changed {
+		if !needsReadOnly(mw) {
 			alreadyDone++
 			continue
 		}
 
-		if err := c.Update(ctx, mw); err != nil {
+		key := client.ObjectKeyFromObject(mw)
+
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			// Re-fetch on every attempt (including the first) so a resourceVersion conflict
+			// from a concurrent update (e.g. status feedback from the work-agent) is retried
+			// against the latest object, not the same stale copy that just failed.
+			fresh := &workv1.ManifestWork{}
+			if getErr := c.Get(ctx, key, fresh); getErr != nil {
+				return fmt.Errorf("failed to get ManifestWork %s for pull-model disable sweep: %w", key, getErr)
+			}
+
+			if !needsReadOnly(fresh) {
+				return nil
+			}
+
+			setReadOnly(fresh)
+
+			return c.Update(ctx, fresh)
+		})
+		if err != nil {
 			klog.Errorf("pull-model disable sweep: failed to patch ManifestWork %s/%s to ReadOnly: %v", mw.Namespace, mw.Name, err)
 			continue
 		}
@@ -100,6 +104,36 @@ func SweepManifestWorksToReadOnly(ctx context.Context, c client.Client) error {
 		swept, alreadyDone, skipped)
 
 	return nil
+}
+
+// needsReadOnly reports whether mw's applications manifestConfigs entry (matched by
+// resourceIdentifier, never by position) is not yet updateStrategy=ReadOnly.
+func needsReadOnly(mw *workv1.ManifestWork) bool {
+	for i := range mw.Spec.ManifestConfigs {
+		mc := &mw.Spec.ManifestConfigs[i]
+		if mc.ResourceIdentifier.Group != "argoproj.io" || mc.ResourceIdentifier.Resource != "applications" {
+			continue
+		}
+
+		if mc.UpdateStrategy == nil || mc.UpdateStrategy.Type != workv1.UpdateStrategyTypeReadOnly {
+			return true
+		}
+	}
+
+	return false
+}
+
+// setReadOnly sets updateStrategy=ReadOnly on mw's applications manifestConfigs entry
+// (matched by resourceIdentifier, never by position), leaving every other entry untouched.
+func setReadOnly(mw *workv1.ManifestWork) {
+	for i := range mw.Spec.ManifestConfigs {
+		mc := &mw.Spec.ManifestConfigs[i]
+		if mc.ResourceIdentifier.Group != "argoproj.io" || mc.ResourceIdentifier.Resource != "applications" {
+			continue
+		}
+
+		mc.UpdateStrategy = &workv1.UpdateStrategy{Type: workv1.UpdateStrategyTypeReadOnly}
+	}
 }
 
 // isPullModelManifestWork reports whether mw is one this propagation controller generated,

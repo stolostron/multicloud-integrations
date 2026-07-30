@@ -386,11 +386,17 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// and a cached flag would let that old pod's in-flight reconcile re-create a ManifestWork the
 	// new pod's sweep had just frozen. A live read closes that window regardless of which pod
 	// processes the event. See pkg/pullmodelconfig.
-	if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+	log := log.FromContext(ctx)
+
+	loadCtx, cancel := context.WithTimeout(ctx, pullmodelconfig.LoadTimeout)
+	defer cancel()
+
+	if cfg, err := pullmodelconfig.LoadOrCreate(loadCtx, r.Client); err != nil {
+		log.Error(err, "unable to load multicluster-integrations-config, proceeding as if basic pull model is enabled")
+	} else if cfg.PullModel.Basic.Disabled {
 		return ctrl.Result{}, nil
 	}
 
-	log := log.FromContext(ctx)
 	log.Info("reconciling Application...")
 
 	application := &unstructured.Unstructured{}

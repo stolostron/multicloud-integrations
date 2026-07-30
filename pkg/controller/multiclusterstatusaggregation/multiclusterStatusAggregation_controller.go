@@ -119,7 +119,12 @@ func (r *ReconcilePullModelAggregation) Start(ctx context.Context) error {
 		// Checked fresh on every tick, not cached at startup: a Deployment rolling restart can
 		// briefly run the old (not-yet-disabled) pod alongside the new (disabled) one, and a
 		// cached flag would let that old pod's next tick run anyway. See pkg/pullmodelconfig.
-		if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+		loadCtx, cancel := context.WithTimeout(ctx, pullmodelconfig.LoadTimeout)
+		defer cancel()
+
+		if cfg, err := pullmodelconfig.LoadOrCreate(loadCtx, r.Client); err != nil {
+			klog.Errorf("unable to load multicluster-integrations-config, proceeding as if basic pull model is enabled: %v", err)
+		} else if cfg.PullModel.Basic.Disabled {
 			return
 		}
 

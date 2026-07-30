@@ -141,6 +141,30 @@ func TestLoadOrCreate_MissingDataKeyDefaultsGracefully(t *testing.T) {
 	}
 }
 
+func TestCreateDefault_AlreadyExistsReturnsWinnersConfig(t *testing.T) {
+	// Simulates the race two sibling containers in the same pod can hit: this call loses the
+	// Create race because another container already won it and wrote a non-default config.
+	// createDefault must not error out or overwrite the winner -- it should just re-Get and
+	// return whatever the winner actually wrote.
+	scheme := newTestScheme(t)
+	winner := &corev1.ConfigMap{
+		ObjectMeta: objMeta(ConfigMapName, "test-ns"),
+		Data: map[string]string{
+			ConfigMapDataKey: "pullModel:\n  basic:\n    disabled: true\n",
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(winner).Build()
+
+	cfg, err := createDefault(context.Background(), c, "test-ns")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.PullModel.Basic.Disabled {
+		t.Fatal("expected the AlreadyExists race loser to return the winner's disabled:true config, not overwrite it with defaults")
+	}
+}
+
 func TestLoadOrCreate_MalformedYAMLErrors(t *testing.T) {
 	t.Setenv(podNamespaceEnvVar, "test-ns")
 
