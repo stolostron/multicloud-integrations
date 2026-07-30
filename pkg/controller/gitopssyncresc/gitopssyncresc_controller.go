@@ -99,7 +99,12 @@ func (c *HTTPDataSender) Send(httpClient *http.Client, req *http.Request) (map[s
 }
 
 type GitOpsSyncResource struct {
-	Client             client.Client
+	Client client.Client
+	// ConfigClient is a direct, uncached client used only for the per-tick pull-model-disabled
+	// check in Start() -- Client above is the manager's regular (cached) client, and this
+	// controller's manager does not override its default client to be non-caching, so reusing
+	// Client there would read a potentially-stale informer cache instead of the live ConfigMap.
+	ConfigClient       client.Client
 	Interval           int
 	ResourceDir        string
 	SearchBatchSize    int
@@ -119,13 +124,18 @@ func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize 
 	}
 
 	// Add() runs before mgr.Start(), so mgr.GetClient() (a cached client here) isn't usable
-	// yet -- use a direct, uncached client for this one-time startup read/create.
+	// yet -- use a direct, uncached client for this one-time startup read/create, and for the
+	// per-tick disabled check in Start() below (this manager's default client stays cached
+	// even after Start(), unlike propagation's and multiclusterstatusaggregation's).
 	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to construct direct client for pull-model config: %w", err)
 	}
 
-	pullModelCfg, err := pullmodelconfig.LoadOrCreate(context.TODO(), directClient)
+	bootstrapCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pullModelCfg, err := pullmodelconfig.LoadOrCreate(bootstrapCtx, directClient)
 	if err != nil {
 		klog.Errorf("unable to load multicluster-integrations-config, defaulting to basic pull model enabled: %v", err)
 		pullModelCfg = &pullmodelconfig.ControllerConfig{}
@@ -137,6 +147,7 @@ func Add(mgr manager.Manager, interval int, resourceDir string, searchBatchSize 
 
 	gitopsSyncResc := &GitOpsSyncResource{
 		Client:             mgr.GetClient(),
+		ConfigClient:       directClient,
 		Interval:           interval,
 		ResourceDir:        resourceDir,
 		SearchBatchSize:    searchBatchSize,
@@ -163,7 +174,15 @@ func (r *GitOpsSyncResource) Start(ctx context.Context) error {
 		// Checked fresh on every tick, not cached at startup: a Deployment rolling restart can
 		// briefly run the old (not-yet-disabled) pod alongside the new (disabled) one, and a
 		// cached flag would let that old pod's next tick run anyway. See pkg/pullmodelconfig.
-		if cfg, err := pullmodelconfig.LoadOrCreate(ctx, r.Client); err == nil && cfg.PullModel.Basic.Disabled {
+		// Uses ConfigClient (uncached), not Client -- this manager's default client stays a
+		// cached informer-backed client even after Start(), which would otherwise read a
+		// potentially-stale view of the ConfigMap instead of the live value.
+		loadCtx, cancel := context.WithTimeout(ctx, pullmodelconfig.LoadTimeout)
+		defer cancel()
+
+		if cfg, err := pullmodelconfig.LoadOrCreate(loadCtx, r.ConfigClient); err != nil {
+			klog.Errorf("unable to load multicluster-integrations-config, proceeding as if basic pull model is enabled: %v", err)
+		} else if cfg.PullModel.Basic.Disabled {
 			return
 		}
 
