@@ -196,7 +196,7 @@ func (r *GitOpsSyncResource) syncResources() error {
 				appsetNsn := strings.Split(hostingAppsetName.(string), "/")
 				if len(appsetNsn) != 3 {
 					err := fmt.Errorf("_hostingResource is not in the correct format: %v", hostingAppsetName)
-					klog.Infof(err.Error())
+					klog.Info(err.Error())
 
 					return err
 				}
