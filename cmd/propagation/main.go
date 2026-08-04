@@ -39,6 +39,7 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	appsetreportV1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
+	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
 	"open-cluster-management.io/multicloud-integrations/propagation-controller/application"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -169,6 +170,26 @@ func main() {
 		} else {
 			setupLog.Error(err, "failed to find CRD applications.argoproj.io, checking again after 10s")
 			time.Sleep(10 * time.Second)
+		}
+	}
+
+	pullModelCfg, err := pullmodelconfig.LoadOrCreate(context.TODO(), mgr.GetClient())
+	if err != nil {
+		setupLog.Error(err, "unable to load multicluster-integrations-config, defaulting to basic pull model enabled")
+		pullModelCfg = &pullmodelconfig.ControllerConfig{}
+	}
+
+	basicPullModelDisabled := pullModelCfg.PullModel.Basic.Disabled
+
+	if basicPullModelDisabled {
+		setupLog.Info("basic pull model is disabled via multicluster-integrations-config; sweeping existing ManifestWorks to ReadOnly")
+
+		if err := application.SweepManifestWorksToReadOnly(context.TODO(), mgr.GetClient()); err != nil {
+			// Best-effort: Reconcile is already disabled below regardless of whether this
+			// sweep succeeds, so a failure here doesn't compromise the "no new ManifestWork
+			// gets created" guarantee -- it just means pre-existing ManifestWorks may need
+			// this to be retried (e.g. on the next pod restart, where it will run again).
+			setupLog.Error(err, "pull-model disable sweep did not complete successfully")
 		}
 	}
 
