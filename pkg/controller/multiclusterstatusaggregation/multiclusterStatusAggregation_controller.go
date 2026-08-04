@@ -38,6 +38,7 @@ import (
 	"k8s.io/klog"
 	workv1 "open-cluster-management.io/api/work/v1"
 	appsetreportV1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
+	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
 	propagation "open-cluster-management.io/multicloud-integrations/propagation-controller/application"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -91,6 +92,19 @@ func (a AppSetClusterConditionsSorter) Swap(i, j int)      { a[i], a[j] = a[j], 
 func (a AppSetClusterConditionsSorter) Less(i, j int) bool { return a[i].Cluster < a[j].Cluster }
 
 func Add(mgr manager.Manager, interval int, resourceDir string) error {
+	// This manager's GetClient() is already a non-caching, direct client (see
+	// NewNonCachingClient in cmd/multiclusterstatusaggregation/exec/manager.go), so it's
+	// safe to use here even though Add() runs before mgr.Start().
+	pullModelCfg, err := pullmodelconfig.LoadOrCreate(context.TODO(), mgr.GetClient())
+	if err != nil {
+		klog.Errorf("unable to load multicluster-integrations-config, defaulting to basic pull model enabled: %v", err)
+		pullModelCfg = &pullmodelconfig.ControllerConfig{}
+	}
+
+	if pullModelCfg.PullModel.Basic.Disabled {
+		klog.Info("basic pull model is disabled via multicluster-integrations-config; status aggregation will not run")
+	}
+
 	dsRS := &ReconcilePullModelAggregation{
 		Client:      mgr.GetClient(),
 		Interval:    interval,
@@ -102,6 +116,18 @@ func Add(mgr manager.Manager, interval int, resourceDir string) error {
 
 func (r *ReconcilePullModelAggregation) Start(ctx context.Context) error {
 	go wait.Until(func() {
+		// Checked fresh on every tick, not cached at startup: a Deployment rolling restart can
+		// briefly run the old (not-yet-disabled) pod alongside the new (disabled) one, and a
+		// cached flag would let that old pod's next tick run anyway. See pkg/pullmodelconfig.
+		loadCtx, cancel := context.WithTimeout(ctx, pullmodelconfig.LoadTimeout)
+		defer cancel()
+
+		if cfg, err := pullmodelconfig.LoadOrCreate(loadCtx, r.Client); err != nil {
+			klog.Errorf("unable to load multicluster-integrations-config, proceeding as if basic pull model is enabled: %v", err)
+		} else if cfg.PullModel.Basic.Disabled {
+			return
+		}
+
 		r.houseKeeping()
 	}, time.Duration(r.Interval)*time.Second, ctx.Done())
 
