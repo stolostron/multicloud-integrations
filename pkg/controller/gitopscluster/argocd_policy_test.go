@@ -84,12 +84,56 @@ func TestGenerateArgoCDPolicyYaml(t *testing.T) {
 	assert.Contains(t, yamlString, "remediationAction: enforce")
 	// ArgoCD CR should be orphaned when policy is deleted (cleanup job handles deletion)
 	assert.Contains(t, yamlString, "pruneObjectBehavior: None")
-	// ArgoCD namespace is always the effective ArgoCD namespace (openshift-gitops here) - no
-	// per-cluster branching for local-cluster (hybrid mode: local-cluster is never a Policy target).
+	// The ArgoCD CR the Policy enforces on the MANAGED cluster must always target the fixed
+	// utils.GitOpsNamespace ("openshift-gitops"), never the hub's own (possibly different)
+	// effective ArgoCD namespace -- see TestGenerateArgoCDPolicyYaml_SpokeNamespaceIsAlwaysFixed
+	// below for the case where those two actually differ.
 	assert.Contains(t, yamlString, "namespace: 'openshift-gitops'",
-		"hybrid mode must consistently deploy the ArgoCD CR into the effective ArgoCD namespace (openshift-gitops here)")
+		"the managed-cluster ArgoCD CR must always land in the standard openshift-gitops namespace")
 	assert.NotContains(t, yamlString, "local-cluster",
 		"the Policy must never target local-cluster - it already has its own ArgoCD instance and is not an addon-install target")
+}
+
+// TestGenerateArgoCDPolicyYaml_SpokeNamespaceIsAlwaysFixed reproduces the bug where a
+// GitOpsCluster living in a custom hub namespace (e.g. "argocd-principal") caused the Policy to
+// enforce the ArgoCD CR and default AppProject in that SAME namespace on the MANAGED cluster,
+// where it doesn't exist -- the Policy went permanently NonCompliant with "namespaces
+// '<hub-namespace>' not found". The managed-cluster namespace must always be the fixed
+// utils.GitOpsNamespace regardless of where the hub's own GitOpsCluster/ArgoCD instance lives.
+func TestGenerateArgoCDPolicyYaml_SpokeNamespaceIsAlwaysFixed(t *testing.T) {
+	enabled := true
+	gitOpsCluster := gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gitops",
+			Namespace: "argocd-principal",
+			UID:       "test-uid",
+		},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			PlacementRef: &v1.ObjectReference{
+				Name: "test-placement",
+				Kind: "Placement",
+			},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	yamlString := generateArgoCDPolicyYaml(gitOpsCluster)
+
+	// The Policy/PlacementBinding/ConfigurationPolicy metadata correctly lives alongside the
+	// GitOpsCluster CR on the hub, in its own custom namespace.
+	assert.Contains(t, yamlString, "namespace: argocd-principal",
+		"the Policy's own hub-side metadata must stay in the GitOpsCluster's namespace")
+
+	// But the object-template contents -- the ArgoCD CR AND the default AppProject (agent is not
+	// enabled in this fixture, so both are included) that get enforced ON THE MANAGED CLUSTER --
+	// must always target the fixed spoke namespace, never the hub's.
+	assert.Contains(t, yamlString, "kind: AppProject")
+	assert.Equal(t, 2, strings.Count(yamlString, "namespace: 'openshift-gitops'"),
+		"both the managed-cluster ArgoCD CR and AppProject must land in openshift-gitops even when the hub's own GitOpsCluster lives elsewhere")
+	assert.NotContains(t, yamlString, "namespace: 'argocd-principal'",
+		"the managed-cluster object-templates must never be targeted at the hub's own custom ArgoCD namespace")
 }
 
 func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
@@ -117,9 +161,9 @@ func TestGenerateArgoCDPolicyYaml_IncludesDefaultAppProject(t *testing.T) {
 	assert.Contains(t, yamlString, "kind: AppProject")
 	assert.Contains(t, yamlString, "name: default")
 
-	// AppProject namespace should also be the effective ArgoCD namespace (same as ArgoCD CR namespace)
+	// AppProject namespace must always be the fixed spoke namespace too (same as the ArgoCD CR)
 	assert.Contains(t, yamlString, "namespace: 'openshift-gitops'",
-		"hybrid mode must consistently deploy the AppProject into the effective ArgoCD namespace (openshift-gitops here)")
+		"the managed-cluster AppProject must land in the standard openshift-gitops namespace")
 
 	// AppProject should have permissive spec for default project
 	assert.Contains(t, yamlString, "clusterResourceWhitelist:")

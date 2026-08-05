@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // ErrPolicyFrameworkNotAvailable is returned when the governance-policy-framework is not installed.
@@ -198,12 +199,20 @@ func generateArgoCDPolicyYaml(gitOpsCluster gitopsclusterV1beta1.GitOpsCluster) 
 	}
 
 	// Use a ConfigurationPolicy template to deploy the ArgoCD CR to the standard
-	// "openshift-gitops" namespace (or the GitOpsCluster's effective ArgoCD namespace).
+	// "openshift-gitops" namespace on the MANAGED cluster. This is deliberately NOT
+	// GetEffectiveArgoNamespace(&gitOpsCluster) -- that returns the HUB's own ArgoCD namespace
+	// (spec.argoServer.argoNamespace, or else the GitOpsCluster CR's own namespace), which can be
+	// any arbitrary namespace the user chose on the hub (e.g. "argocd-principal") and has no
+	// reason to exist on the spoke. Using it here made the Policy enforce a nonexistent
+	// destination namespace on the managed cluster, going permanently NonCompliant. The addon
+	// agent's own install path (gitopsaddon) defaults to the same fixed utils.GitOpsNamespace
+	// absent an ARGOCD_NAMESPACE override, so this keeps the Policy-enforced ArgoCD CR consistent
+	// with where the addon itself expects to find/manage it.
 	// This Policy's Placement must never select local-cluster: local-cluster already has its
 	// own ArgoCD instance (the one hosting the argocd-agent principal) and reconciles hub-
 	// targeted Applications directly via that instance's application controller (hybrid mode) -
 	// it is not an addon-install target (see IsLocalCluster call sites).
-	namespaceTemplate := fmt.Sprintf("'%s'", GetEffectiveArgoNamespace(&gitOpsCluster))
+	namespaceTemplate := fmt.Sprintf("'%s'", utils.GitOpsNamespace)
 
 	yamlString := fmt.Sprintf(`
 apiVersion: policy.open-cluster-management.io/v1

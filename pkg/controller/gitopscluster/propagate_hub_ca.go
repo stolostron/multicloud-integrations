@@ -28,6 +28,7 @@ import (
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
+	"open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 // hasSkipHubCAPropagationAnnotation returns true when the GitOpsCluster has the
@@ -62,7 +63,12 @@ func (r *ReconcileGitOpsCluster) PropagateHubCA(
 			continue
 		}
 
-		managedNamespace := GetEffectiveArgoNamespace(gitOpsCluster)
+		// The CA secret is delivered into the SPOKE's ArgoCD namespace, which is always the
+		// fixed utils.GitOpsNamespace -- NOT GetEffectiveArgoNamespace(gitOpsCluster) (the hub's
+		// own, possibly-custom ArgoCD namespace). See the matching comment in
+		// argocd_policy.go's generateArgoCDPolicyYaml for why reusing the hub's namespace here
+		// is wrong: the spoke has no reason to have a namespace matching the hub's.
+		managedNamespace := utils.GitOpsNamespace
 
 		manifestWork := r.createArgoCDAgentManifestWork(managedCluster.Name, managedNamespace, caCert)
 
