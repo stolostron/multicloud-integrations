@@ -298,6 +298,58 @@ func TestPropagateHubCA(t *testing.T) {
 			existingObjects: []client.Object{},
 			expectedError:   true,
 		},
+		{
+			// Reproduces the bug where a GitOpsCluster living in a custom hub namespace (e.g.
+			// "argocd-principal") caused the argocd-agent-ca secret to be delivered into that
+			// SAME namespace on the managed cluster via the ManifestWork, instead of the fixed
+			// spoke namespace where the agent's ArgoCD instance actually lives.
+			name: "GitOpsCluster in custom hub namespace still delivers CA into openshift-gitops on the spoke",
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster",
+					Namespace: "argocd-principal",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd-principal",
+					},
+				},
+			},
+			managedClusters: []*spokeclusterv1.ManagedCluster{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "remote-cluster",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&v1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "argocd-agent-ca",
+						Namespace: "argocd-principal",
+					},
+					Type: v1.SecretTypeTLS,
+					Data: map[string][]byte{
+						"tls.crt": []byte("test-ca-certificate"),
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, managedClusters []*spokeclusterv1.ManagedCluster) {
+				mw := &workv1.ManifestWork{}
+				err := c.Get(context.TODO(), types.NamespacedName{
+					Name:      "argocd-agent-ca-mw",
+					Namespace: "remote-cluster",
+				}, mw)
+				require.NoError(t, err, "ManifestWork should be created for remote-cluster")
+
+				require.Len(t, mw.Spec.Workload.Manifests, 1)
+				secret := &v1.Secret{}
+				err = json.Unmarshal(mw.Spec.Workload.Manifests[0].RawExtension.Raw, secret)
+				require.NoError(t, err)
+				assert.Equal(t, utils.GitOpsNamespace, secret.Namespace,
+					"the CA secret must always land in the fixed spoke namespace, never the hub's custom ArgoCD namespace")
+			},
+		},
 	}
 
 	for _, tt := range tests {

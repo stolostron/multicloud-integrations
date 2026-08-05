@@ -47,7 +47,13 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		utils.EnvArgoCDAgentEnabled: "false", // Default value
 	}
 
-	managedVariables["ARGOCD_NAMESPACE"] = GetEffectiveArgoNamespace(gitOpsCluster)
+	// ARGOCD_NAMESPACE tells the gitopsaddon agent which namespace to install ArgoCD into ON
+	// THE SPOKE. This is always the fixed utils.GitOpsNamespace -- NOT
+	// GetEffectiveArgoNamespace(gitOpsCluster) (the HUB's own, possibly-custom ArgoCD
+	// namespace, e.g. "argocd-principal"). The spoke has no reason to have a namespace named
+	// after wherever the hub's GitOpsCluster CR happens to live; see the matching comment in
+	// argocd_policy.go's generateArgoCDPolicyYaml for the full explanation of this bug.
+	managedVariables["ARGOCD_NAMESPACE"] = utils.GitOpsNamespace
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
 	r.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
