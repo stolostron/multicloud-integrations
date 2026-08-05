@@ -857,8 +857,95 @@ kubectl -n ocm rollout restart deployment/multicluster-operators-application
 ```
 
 ### ArgoCD UI Live Manifest "Resource not found"
-1. **DBM mismatch**: Principal has `destinationBasedMapping: true` but agent doesn't. Fix: add `spec.argoCDAgent.agent.client.destinationBasedMapping: true` to agent ArgoCD CR in Policy.
+1. **DBM mismatch**: Principal has `destinationBasedMapping: true` but agent doesn't. Fix: add `spec.argoCDAgent.agent.destinationBasedMapping.enabled: true` to agent ArgoCD CR in Policy (sibling of `agent.client`, not nested inside it — confirmed against `generateArgoCDSpec` in `argocd_policy.go` and a live managed cluster's `ArgoCD` CR).
 2. **Agent SA missing view ClusterRole**: `kubectl create clusterrolebinding acm-openshift-gitops-argocd-agent-cluster-reader --clusterrole=view --serviceaccount=openshift-gitops:acm-openshift-gitops-agent-agent` on spoke.
+
+### Hybrid Mode: local-cluster's ArgoCD UI Resource-Tree/Manifest Drill-Down Is Broken (upstream argocd-agent bug, not fixed here yet)
+Symptom: in an ApplicationSet that targets both `local-cluster` and real managed clusters (the
+standard hybrid-mode pattern), the managed-cluster app's resource tree/live manifest drill-down
+works fine in the ArgoCD UI, but `local-cluster`'s does not — clicking into it shows no
+nodes/manifest data. **Sync and health status on the Application object look completely normal the
+whole time** (`Synced`, real health), which is what makes this easy to miss: it's specifically the
+UI's resource-tree/manifest API that's broken, not reconciliation.
+
+Confirmed live against the actual ArgoCD `/api/v1/applications/{app}/resource-tree` endpoint the
+UI calls (not just the Application's status fields) — this is a **real, 100%-reproducible bug in
+the deployed argocd-agent principal** (`v0.9.0`, logged at principal startup as `Starting
+argocd-agent (server) v0.9.0`), **not a bug in this repo's code**, and not flakiness (ruled out:
+stale/corrupted Redis data — the cached blob decompresses to valid JSON when read directly with
+`redis-cli`; a stale connection pool — a fresh `argocd-server` restart reproduces it immediately;
+version skew — `argocd-server` and `application-controller` run the identical image digest):
+
+- With `destinationBasedMapping: true`, the principal's `newAppCallback` and `updateAppCallback`
+  (`principal/callbacks.go` in argocd-agent) both call `trackAppToAgent(app,
+  app.Spec.Destination.Name)` to record which agent an Application's Redis cache traffic should be
+  routed to. **Neither validated that `Destination.Name` actually corresponds to a connected agent
+  in the deployed v0.9.0** (no `clusterMgr.HasMapping()` check in either callback). Upstream
+  `main` has since closed the direct create/update path: commit `0554ad8` ("fix: cleanup agent
+  resources after the deletion of the agent cluster secret", #1034, merged 2026-07-29) added a
+  `HasMapping` guard to *both* `newAppCallback` and `updateAppCallback`'s own bodies — so a fresh
+  `local-cluster` Application created with `destination.name: local-cluster` from the start is
+  already safe on current `main` (still not on any released version, including the deployed
+  v0.9.0). The guard does **not** cover `handleAppAgentChange` (also in `principal/callbacks.go`,
+  called from inside `updateAppCallback` before its own guard runs), which handles the case where
+  an existing app's `destination.Name` *changes* — e.g. an ApplicationSet template edit, or any
+  direct `kubectl patch`, moving an app from a real agent's name onto `local-cluster`. That
+  function still calls `trackAppToAgent` for the new agent name unconditionally, so the bug
+  persists specifically for apps that get migrated onto `local-cluster` after creation, even on
+  current `main`. Reproduced 100% with a from-scratch Kind-based argocd-agent-only setup (no
+  ACM/OCM): create an app targeting a real agent, confirm its resource tree loads, then patch
+  `spec.destination.name` to `local-cluster` — the resource tree breaks immediately after. A fix
+  (add the same `HasMapping` guard to `handleAppAgentChange`'s new-agent branch) has been written
+  and verified end-to-end (bug reproduced pre-fix, confirmed resolved post-fix, twice, across full
+  Kind-cluster teardown/rebuild cycles) but exists only as an unpushed local commit (`a2af478`) on
+  a fork checkout at `/home/ming/argocd-agent` — it is not part of any upstream PR, `main`, or
+  release yet. Since `local-cluster`'s Application legitimately has `destination.name:
+  local-cluster` (a real, valid cluster secret — see `ensureLocalClusterSecret` — just not an
+  agent-connected one), this poisons the principal's in-memory `appToAgent` map for it as soon as
+  a destination-changing update lands (which happens quickly after creation whenever an
+  ApplicationSet template is what actually sets `destination.name: local-cluster`, since the
+  generator/template rendering path goes through an update rather than staying on the original
+  create).
+- The principal's Redis proxy (`principal/redisproxy/redisproxy.go`,
+  `extractAgentNameFromRedisCommandKey`) consults that same poisoned map for every
+  `app|resources-tree|...`/`app|managed-resources|...` Redis key belonging to that app, and —
+  believing `local-cluster` is an agent — tries to forward the read to that (nonexistent) agent
+  connection instead of the principal's own Redis. The agent never responds (confirmed in principal
+  logs: `msg="no response from agent" ... getKey="app|resources-tree|guestbook-local-cluster|..."`
+  followed by `msg="exit due to unable to handle agent get" error="unexpected nil in get
+  response"`), and argocd-server ends up gunzip'ing an effectively-empty response, producing exactly
+  `error getting cached app resource tree: EOF` — an empty byte slice hitting `gzip.NewReader()`
+  returns `io.EOF`, which matches precisely.
+- **This is a name collision, not a DBM correctness issue**: the moment `destination.Name` is
+  non-empty and matches *any* real cluster secret name (agent-connected or not), the bug fires. A
+  real spoke's Application is unaffected only because for spokes, being routed to its own agent is
+  the *correct* behavior — the missing validation happens to not matter there. Restarting
+  `argocd-server`, hard-refreshing the Application, or waiting does not clear it, because the
+  poisoned mapping lives in the **principal's** in-memory state, not in argocd-server or Redis
+  itself — nothing in the normal reconcile/refresh loop ever un-poisons it once set.
+- **Confirmed (but not yet implemented anywhere) workaround**: give `local-cluster`'s generated
+  Application a `destination.server: https://kubernetes.default.svc` instead of
+  `destination.name: local-cluster` — both resolve to the exact same physical destination. Since
+  `getAgentNameForApp` returns `app.Spec.Destination.Name` directly when DBM is enabled, an empty
+  `Destination.Name` (server-based destination) means the resolved agent name is `""`, and both
+  callbacks' existing `if agentName == "" { return }` guard correctly skips `trackAppToAgent`
+  entirely for it. Verified live: 10/10 consecutive resource-tree fetches succeeded after manually
+  switching an ApplicationSet's template to this shape (using `goTemplate: true` and a Go-template
+  conditional keyed on the cluster name), versus 0/10 before, with the running workload's pod UID
+  confirmed unchanged across the switch (no disruption). This is deliberately **not yet applied to
+  `gitopsaddon/test-cycle.sh` or anywhere else in this repo** — the real fix belongs upstream in
+  argocd-agent (adding the missing `HasMapping` guard to `handleAppAgentChange`'s new-agent branch
+  — see above; a candidate fix already exists as an unpushed local commit, not yet a PR), and that
+  upstream work is still to be done. Only every *other* (real, agent-routed) cluster should ever
+  use `destination.name` — switching those to server-based destinations too would break event
+  dispatch to their agents entirely, since
+  destination name is what the principal's dispatch queueing keys off of, not just the Redis proxy
+  lookup.
+- **Nothing in `pkg/controller/gitopscluster` can fix this**: no code in this repo generates the
+  ApplicationSet's `destination` field — that YAML is authored by whoever creates the
+  ApplicationSet (a real user, or `gitopsaddon/test-cycle.sh`'s own hardcoded template for
+  testing). A code-level fix is not possible from this repo's side; only a workaround at the
+  ApplicationSet-authoring layer (see above) or an upstream argocd-agent fix resolves it.
 
 ### Agent Not Connecting
 1. Check principal pod: `kubectl get pods -n openshift-gitops -l app.kubernetes.io/component=principal`
@@ -1312,7 +1399,7 @@ a check, but also not things a short timeout can paper over:
 
 ## Development Workflow
 
-1. Go 1.25+, Kubernetes cluster with OCM
+1. Go 1.26+ (see `go.mod`), Kubernetes cluster with OCM
 2. `make test` before submitting
 3. `make generate` after API type changes
 4. `make manifests` after RBAC/CRD annotation changes
@@ -1357,4 +1444,4 @@ one.
 
 ## Container Registry
 
-Default: `quay.io/stolostron`. Configure via `REGISTRY` and `VERSION` env vars.
+Default: `quay.io/stolostron`. Configure via `REGISTRY` and `VERSION` make variables (`make REGISTRY=... VERSION=...` — these are simple `=` assignments in the Makefile, so exporting them as shell env vars alone won't override the default; pass them on the `make` command line).
