@@ -197,6 +197,47 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 			},
 		},
 		{
+			// Reproduces the bug: a GitOpsCluster whose own hub-side ArgoCD namespace is a
+			// custom, non-standard value (e.g. "argocd-principal") must NOT propagate that value
+			// into ARGOCD_NAMESPACE - the addon agent on the spoke reads this env var to decide
+			// where to install ArgoCD, and the spoke has no reason to have a namespace named
+			// after the hub's own custom choice.
+			name: "GitOpsCluster with custom hub ArgoCD namespace still gets standard ARGOCD_NAMESPACE",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "argocd-principal",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{
+						ArgoNamespace: "argocd-principal",
+					},
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "test-operator-image:latest",
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				assert.Equal(t, utils.GitOpsNamespace, varMap["ARGOCD_NAMESPACE"],
+					"ARGOCD_NAMESPACE must stay the standard GitOps namespace even when the hub's own GitOpsCluster lives in a custom namespace")
+			},
+		},
+		{
 			name: "update existing AddOnDeploymentConfig: managed vars updated, user vars preserved",
 			managedCluster: &spokeclusterv1.ManagedCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
