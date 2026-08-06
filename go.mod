@@ -1,6 +1,6 @@
 module open-cluster-management.io/multicloud-integrations
 
-go 1.25.8
+go 1.26
 
 require (
 	github.com/ghodss/yaml v1.0.1-0.20220118164431-d8423dcdf344
