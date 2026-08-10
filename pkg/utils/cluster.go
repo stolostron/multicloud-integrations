@@ -15,6 +15,7 @@
 package utils
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"io/ioutil"
@@ -164,11 +165,22 @@ var ManagedServiceAccountPredicateFunc = predicate.TypedFuncs[*authv1beta1.Manag
 		oldmsa := e.ObjectOld
 		newmsa := e.ObjectNew
 
-		secretUpdated := !reflect.DeepEqual(oldmsa.Status.TokenSecretRef, newmsa.Status.TokenSecretRef)
+		// Fire on TokenSecretRef changes (new secret name or LastRefreshTimestamp bump).
+		// LastRefreshTimestamp is updated by the addon agent whenever the token is refreshed
+		// in-place (same secret name, new token payload), so this catches the common rotation
+		// case where only the token data changes.
+		secretRefUpdated := !reflect.DeepEqual(oldmsa.Status.TokenSecretRef, newmsa.Status.TokenSecretRef)
 
-		klog.Infof("Managed service account (%v/%v) tokenSecrefRef updated: %v", newmsa.GetNamespace(), newmsa.GetName(), secretUpdated)
+		// Also fire when ExpirationTimestamp changes, which signals that the managed-serviceaccount
+		// controller has issued a new token and updated the expiry window.
+		expirationUpdated := !reflect.DeepEqual(oldmsa.Status.ExpirationTimestamp, newmsa.Status.ExpirationTimestamp)
 
-		return secretUpdated
+		triggered := secretRefUpdated || expirationUpdated
+
+		klog.Infof("Managed service account (%v/%v) status changed: tokenSecretRef=%v expirationTimestamp=%v -> reconcile=%v",
+			newmsa.GetNamespace(), newmsa.GetName(), secretRefUpdated, expirationUpdated, triggered)
+
+		return triggered
 	},
 	CreateFunc: func(e event.TypedCreateEvent[*authv1beta1.ManagedServiceAccount]) bool {
 		msa := e.Object
@@ -191,6 +203,33 @@ var ManagedServiceAccountPredicateFunc = predicate.TypedFuncs[*authv1beta1.Manag
 		klog.Infof("Managed service account doesn't have tokenSecrefRef: %v/%v", e.Object.GetNamespace(), e.Object.GetName())
 
 		return false
+	},
+}
+
+// MSATokenSecretPredicateFunc fires when the token payload of an MSA token secret changes.
+// MSA token secrets carry the label
+// "authentication.open-cluster-management.io/is-managed-serviceaccount=true" and live in
+// managed-cluster namespaces on the hub. The managed-serviceaccount addon agent refreshes
+// these secrets in-place (same name, new token bytes), so a TokenSecretRef name change is
+// NOT triggered in that scenario. This predicate closes that gap by watching the raw token
+// bytes directly. It is used together with a secondary cache scoped to the MSA label so
+// that the controller does not watch all secrets cluster-wide.
+var MSATokenSecretPredicateFunc = predicate.TypedFuncs[*v1.Secret]{
+	UpdateFunc: func(e event.TypedUpdateEvent[*v1.Secret]) bool {
+		oldToken := e.ObjectOld.Data["token"]
+		newToken := e.ObjectNew.Data["token"]
+		if len(oldToken) == len(newToken) && subtle.ConstantTimeCompare(oldToken, newToken) == 1 {
+			return false
+		}
+		klog.Infof("MSA token secret %v/%v: token data changed, triggering reconcile",
+			e.ObjectNew.GetNamespace(), e.ObjectNew.GetName())
+		return true
+	},
+	CreateFunc: func(e event.TypedCreateEvent[*v1.Secret]) bool {
+		return len(e.Object.Data["token"]) > 0
+	},
+	DeleteFunc: func(e event.TypedDeleteEvent[*v1.Secret]) bool {
+		return true
 	},
 }
 
