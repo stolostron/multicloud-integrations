@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1018,7 +1019,7 @@ func TestReconcileRequest(t *testing.T) {
 				},
 			},
 			existingObjects: []client.Object{},
-			expectedResult:  reconcile.Result{},
+			expectedResult:  reconcile.Result{RequeueAfter: 5 * time.Minute},
 		},
 	}
 

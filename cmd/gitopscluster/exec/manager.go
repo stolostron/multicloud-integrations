@@ -75,7 +75,12 @@ func RunManager() {
 		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
 			opts.ByObject = map[client.Object]cache.ByObject{
 				&v1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{"apps.open-cluster-management.io/cluster-name,argocd.argoproj.io/secret-type": "cluster"}),
+					// Watch only ArgoCD cluster secrets (written by this controller into the
+					// ArgoCD server namespace). The original selector used a single key
+					// containing a comma — "cluster-name,argocd.argoproj.io/secret-type" —
+					// which is not a valid Kubernetes label key. We use the canonical ArgoCD
+					// cluster-secret label instead.
+					Label: labels.SelectorFromSet(labels.Set{"argocd.argoproj.io/secret-type": "cluster"}),
 				}}
 			return cache.New(config, opts)
 		},
