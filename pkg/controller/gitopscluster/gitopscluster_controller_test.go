@@ -1541,6 +1541,16 @@ func TestReconcileGitOpsCluster_RejectsLocalClusterInPlacement(t *testing.T) {
 				},
 			},
 		},
+		// GitOpsCluster lives in "test-ns" while argoNamespace is "argocd" - a cross-namespace
+		// configuration. verifyArgoNamespaceAuthorized requires the target namespace to exist and
+		// carry LabelKeyAllowedArgoNamespace=true, or reconcile is rejected before ever reaching the
+		// local-cluster-in-Placement check this test targets.
+		&v1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "argocd",
+				Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
+			},
+		},
 		createTestArgoCDRedisSecret("argocd"),
 		createTestArgoCDJWTSecret("argocd"),
 		createTestArgoCDServerService("argocd"),
