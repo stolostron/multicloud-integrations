@@ -1277,7 +1277,7 @@ func verifyAgentVersionDriftHeal(gitopsClusterName, ns string, timeout time.Dura
 	}, 3*time.Minute, 5*time.Second).Should(Succeed())
 	fmt.Fprintf(GinkgoWriter, "Principal image: %s\n", principalImage)
 
-	By("injecting a mismatched agent image into the Policy to create drift")
+	By("injecting a user-set agent image into the Policy")
 	fakeImage := "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9:drift-test-fake-e2e"
 
 	out, err := kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
@@ -1342,35 +1342,40 @@ func verifyAgentVersionDriftHeal(gitopsClusterName, ns string, timeout time.Dura
 		"--type=merge", "-p", `{"spec":{"gitopsAddon":{"overrideExistingConfigs":true}}}`)
 	Expect(err).NotTo(HaveOccurred(), "failed to patch gitopscluster overrideExistingConfigs=true for drift heal")
 
-	By("verifying controller healed: ArgoCD Policy agent image now matches principal")
-	Eventually(func(g Gomega) {
-		out, err := kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
-			policyName, "-n", ns, "-o", "json")
-		g.Expect(err).NotTo(HaveOccurred())
-		// Parse the Policy JSON and find the ArgoCD template's agent image
-		var policyObj map[string]interface{}
-		g.Expect(json.Unmarshal([]byte(out), &policyObj)).To(Succeed())
-		spec, _ := policyObj["spec"].(map[string]interface{})
-		templates, _ := spec["policy-templates"].([]interface{})
-		found := false
-		for _, pt := range templates {
-			ptMap, _ := pt.(map[string]interface{})
-			od, _ := ptMap["objectDefinition"].(map[string]interface{})
-			cpSpec, _ := od["spec"].(map[string]interface{})
-			ots, _ := cpSpec["object-templates"].([]interface{})
-			for _, ot := range ots {
-				otMap, _ := ot.(map[string]interface{})
-				objDef, _ := otMap["objectDefinition"].(map[string]interface{})
-				if objDef["kind"] == "ArgoCD" {
-					agentImg, _ := objDef["spec"].(map[string]interface{})["argoCDAgent"].(map[string]interface{})["agent"].(map[string]interface{})["image"].(string)
-					g.Expect(agentImg).To(Equal(principalImage),
-						fmt.Sprintf("expected agent image %s but got %s", principalImage, agentImg))
-					found = true
-				}
+	// The principal image is healed to the spoke via the AddOnDeploymentConfig's
+	// ARGOCD_AGENT_IMAGE customized variable, not the shared Policy, so it goes through the
+	// same per-cluster ManagedClusterImageRegistry mirroring pipeline as every other addon image.
+	verifyAddOnDeploymentConfigEnvVar(spokeName, "ARGOCD_AGENT_IMAGE", principalImage, timeout)
+
+	// Agent image selection lives on the per-cluster AddOnDeploymentConfig. A user-set Policy
+	// spec.argoCDAgent.agent.image must be left alone -- the controller must not clear it to
+	// force the ADC env-var default. Checked after ADC heal so we know a reconcile already ran.
+	By("verifying controller left the user-set Policy agent image untouched")
+	out, err = kubectlCtx(hubContext, "get", "policy.policy.open-cluster-management.io",
+		policyName, "-n", ns, "-o", "json")
+	Expect(err).NotTo(HaveOccurred())
+	var policyAfterHeal map[string]interface{}
+	Expect(json.Unmarshal([]byte(out), &policyAfterHeal)).To(Succeed())
+	spec, _ := policyAfterHeal["spec"].(map[string]interface{})
+	templates, _ := spec["policy-templates"].([]interface{})
+	found := false
+	for _, pt := range templates {
+		ptMap, _ := pt.(map[string]interface{})
+		od, _ := ptMap["objectDefinition"].(map[string]interface{})
+		cpSpec, _ := od["spec"].(map[string]interface{})
+		ots, _ := cpSpec["object-templates"].([]interface{})
+		for _, ot := range ots {
+			otMap, _ := ot.(map[string]interface{})
+			objDef, _ := otMap["objectDefinition"].(map[string]interface{})
+			if objDef["kind"] == "ArgoCD" {
+				agentImg, _ := objDef["spec"].(map[string]interface{})["argoCDAgent"].(map[string]interface{})["agent"].(map[string]interface{})["image"].(string)
+				Expect(agentImg).To(Equal(fakeImage),
+					fmt.Sprintf("expected user-set Policy agent image %q to be left alone after heal, got %q", fakeImage, agentImg))
+				found = true
 			}
 		}
-		g.Expect(found).To(BeTrue(), "ArgoCD object-template not found in Policy")
-	}, timeout, 5*time.Second).Should(Succeed())
+	}
+	Expect(found).To(BeTrue(), "ArgoCD object-template not found in Policy")
 
 	By("restoring overrideExistingConfigs after drift heal test")
 	_, err = kubectlCtx(hubContext, "patch", "gitopscluster", gitopsClusterName, "-n", ns,

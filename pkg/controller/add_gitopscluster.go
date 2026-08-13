@@ -18,5 +18,5 @@ import "open-cluster-management.io/multicloud-integrations/pkg/controller/gitops
 
 func init() {
 	// AddToManagerFuncs is a list of functions to create controllers and add them to a manager.
-	AddGitOpsClusterToManagerFuncs = append(AddGitOpsClusterToManagerFuncs, gitopscluster.Add)
+	AddGitOpsClusterToManagerFuncs = append(AddGitOpsClusterToManagerFuncs, gitopscluster.Add, gitopscluster.AddImageRegistryController)
 }
