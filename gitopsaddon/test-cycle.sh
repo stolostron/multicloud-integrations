@@ -9,7 +9,8 @@
 # OCP clusters use OLM for operator installation (latest channel from redhat-operators).
 # Non-OCP clusters (Kind, EKS) use the embedded Helm chart with hardcoded image SHAs
 # from pkg/utils/config.go. The agent image on all clusters is set by the hub
-# controller's drift heal mechanism (reads principal pod image, writes to Policy).
+# controller's drift heal mechanism (reads principal pod image, writes to each
+# managed cluster's AddOnDeploymentConfig ARGOCD_AGENT_IMAGE -- never the shared Policy).
 #
 # Usage:
 #   HUB_KUBECONFIG=/path/to/hub \

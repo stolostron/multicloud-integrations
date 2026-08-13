@@ -1007,7 +1007,7 @@ OCP and non-OCP managed clusters run **different operator versions**:
 
 - **Kind/EKS (non-OCP)**: gitopsaddon deploys the **embedded Helm chart** (`gitopsaddon/charts/openshift-gitops-operator/`). The version is in `Chart.yaml`. All component images are hardcoded SHA digests in `pkg/utils/config.go` `DefaultOperatorImages`. These never change until someone runs the Manifest Update Procedure.
 
-- **Agent image is the exception**: On both OCP and Kind, the argocd-agent image comes from the hub controller's drift heal — it reads the principal pod's image and writes it into the Policy. So the agent image is always consistent with the hub principal regardless of spoke operator version.
+- **Agent image is the exception**: On both OCP and Kind, the argocd-agent image comes from the hub controller's drift heal — it reads the principal pod's image and writes it into each managed cluster's `AddOnDeploymentConfig` `ARGOCD_AGENT_IMAGE` (not the shared ArgoCD Policy). So the agent image is always consistent with the hub principal regardless of spoke operator version, and still flows through per-cluster `ManagedClusterImageRegistry` mirroring. Annotate the GitOpsCluster with `skip-agent-version-heal: "true"` to opt out; a user-set Policy `spec.argoCDAgent.agent.image` is never overwritten either way.
 
 - **The version gap means**: the embedded operator on Kind/EKS may lack features, CRD fields, or RBAC rules added in newer OCP versions. When bumping, update: `Chart.yaml` version, CRDs (extract from hub), ClusterRole rules (from CSV), image SHAs in `config.go`. See Manifest Update Procedure.
 
@@ -1143,14 +1143,23 @@ longer exists in the same shape — treat this path as unverified.
 
 ### Key Annotations on GitOpsCluster
 
-- `skip-agent-version-heal: "true"` — Disables drift detection
-- `skip-argocd-policy: "true"` — Prevents Policy recreation
+- `skip-agent-version-heal: "true"` — Disables writing the hub principal image into each cluster's AddOnDeploymentConfig `ARGOCD_AGENT_IMAGE`, and omits that variable from the managed ADC set entirely, so a user-set Policy `spec.argoCDAgent.agent.image` or a manually-set ADC value is not overwritten. Does **not** touch the ArgoCD Policy (the controller never writes or clears Policy agent.image).
+- `skip-argocd-policy: "true"` — Prevents Policy recreation. Independent of agent-image heal (heal writes ADC, not Policy).
 - `skip-hub-ca-propagation: "true"` — Skips Hub CA via ManifestWork
+
+### Key Annotations on ManagedClusterImageRegistry
+
+- `apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"` — **Opt-in.** Without this, the gitops-addon image-registry controller ignores the CR (ACM's own cluster-image-registry-controller still uses it for klusterlet images). Existing disconnected-registry setups are unchanged until a user explicitly annotates the CR. Removing the annotation reverts any gitops-addon ADC mirroring this controller previously applied.
 
 ## Key Features (Deep Reference)
 
 ### Agent Version Drift Heal
-Controller watches the principal Deployment (`app.kubernetes.io/component=principal`) for image changes. When the image changes (operator upgrade), it patches the ArgoCD Policy's `argoCDAgent.agent.image` to match. Only the `acm-openshift-gitops` template is patched. `findContainerImage(containers, deploymentName)` checks: (1) container named `"principal"`, (2) container matching deployment name, (3) `containers[0]`.
+Controller watches the principal Deployment (`app.kubernetes.io/component=principal`) for image changes. When the image changes (operator upgrade), it writes the live principal image into each managed cluster's own `AddOnDeploymentConfig` `ARGOCD_AGENT_IMAGE` — never the shared ArgoCD Policy. That ADC value then flows through the same per-cluster `ManagedClusterImageRegistry` mirroring pipeline as every other addon image. `findContainerImage(containers, deploymentName)` checks: (1) container named `"principal"`, (2) container matching deployment name, (3) `containers[0]`.
+
+`skip-agent-version-heal: "true"` on the GitOpsCluster opts this out: HealAgentVersionDrift returns empty, and `ExtractVariablesFromGitOpsCluster` drops `ARGOCD_AGENT_IMAGE` from the managed set so CreateAddOnDeploymentConfig will not overwrite a user-set ADC value. `reconcileArgoCDPolicyAgentSpec` never writes or clears `spec.argoCDAgent.agent.image`, so users who want to pin the agent image via Policy can do so whether or not the skip annotation is set.
+
+### Disconnected Image Mirroring (ManagedClusterImageRegistry)
+A dedicated controller (`imageregistry_controller.go`) rewrites gitops-addon `AddOnDeploymentConfig` image variables to disconnected-registry mirrors. It is **opt-in**: only a `ManagedClusterImageRegistry` annotated `apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"` is watched or reconciled. CreateAddOnDeploymentConfig preserves already-mirrored values when the recorded original still matches the desired source, so the two controllers do not fight over the ADC on the steady-state path; a genuine source change (hub image upgrade / principal heal) is written through so this controller can re-mirror it.
 
 ### Cert Rotation & Autorefresh
 `argocd-agent-client-tls` has 24-hour validity. OCM `ClientCertController` rotates at ~80% lifetime. `SecretReconciler` propagates via: source watch (immediate), target deletion watch (instant re-copy), periodic requeue (5 min safety net). On actual cert data change, rolling-restarts all agent Deployments (`app.kubernetes.io/part-of=argocd-agent`).
@@ -1459,7 +1468,7 @@ one.
 
 ## Known Limitations
 
-1. **Policy is user-owned**: Controller recreates deleted Policies (unless `skip-argocd-policy`), may patch `argoCDAgent.agent.image` during drift heal, but doesn't overwrite other customizations.
+1. **Policy is user-owned**: Controller recreates deleted Policies (unless `skip-argocd-policy`), and reconciles agent connection fields (address, port, mode, DBM, TLS) on the ArgoCD template. It never writes or clears `argoCDAgent.agent.image` — users who want to pin the agent image via Policy can do so. Agent-image auto-heal is ADC-only (`ARGOCD_AGENT_IMAGE`); disable it with `skip-agent-version-heal`.
 2. **Cleanup order matters**: GitOpsCluster → Policy → MCAs (strict order or resources get recreated).
 3. **GitOpsCluster deletion is a no-op**: No finalizer, no cascade.
 4. **`local-cluster` must stay out of the GitOpsCluster's own `placementRef`**: it's never an

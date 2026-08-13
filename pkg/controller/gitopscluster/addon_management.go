@@ -33,7 +33,14 @@ import (
 // Behavior depends on the overrideExistingConfigs flag:
 // - When false (default): preserves all existing variables and only adds new ones from GitOpsCluster spec
 // - When true: preserves user variables but overrides managed variables with values from GitOpsCluster spec
-func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedCluster *spokeclusterv1.ManagedCluster) error {
+//
+// agentImageOverride, when non-empty, is the hub's live argocd-agent principal image as detected
+// by HealAgentVersionDrift. It takes precedence over the static ARGOCD_AGENT_IMAGE default so the
+// spoke's agent always matches the principal's actual running version, while still flowing through
+// this same per-cluster AddOnDeploymentConfig -- which ManagedClusterImageRegistry mirrors
+// correctly for clusters that can't reach the source registry directly. Pass "" when the caller has
+// no agent version drift info (e.g. agent mode disabled, or the principal isn't found yet).
+func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedCluster *spokeclusterv1.ManagedCluster, agentImageOverride string) error {
 	if managedCluster == nil {
 		return errors.New("no managed cluster provided")
 	}
@@ -56,7 +63,7 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 	managedVariables["ARGOCD_NAMESPACE"] = utils.GitOpsNamespace
 
 	// Extract variables from GitOpsAddon and ArgoCDAgent specs with proper precedence
-	r.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+	r.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, agentImageOverride)
 
 	// Check if AddOnDeploymentConfig already exists
 	existing := &addonv1alpha1.AddOnDeploymentConfig{}
@@ -162,6 +169,8 @@ func (r *ReconcileGitOpsCluster) CreateAddOnDeploymentConfig(gitOpsCluster *gito
 		// bumps resourceVersion on every hub reconcile; the OCM addon framework
 		// detects the change and triggers a rolling restart of the addon Deployment
 		// on the managed cluster, causing continuous SIGTERM/restart cycles.
+		updatedVariables = preserveMirroredImageValues(updatedVariables, existing.Spec.CustomizedVariables, existing.GetAnnotations())
+
 		if !customizedVariablesEqual(updatedVariables, existing.Spec.CustomizedVariables) ||
 			existing.Spec.AgentInstallNamespace != utils.AddonAgentNamespace {
 			klog.Infof("Updating AddOnDeploymentConfig gitops-addon-config in namespace %s", namespace)
@@ -447,7 +456,15 @@ func (r *ReconcileGitOpsCluster) GetGitOpsAddonStatus(instance *gitopsclusterV1b
 // 2. Proxy settings - from hub operator environment
 // 3. ArgoCD agent settings - from GitOpsCluster spec
 // 4. GitOpsCluster spec overrides - takes precedence over environment
-func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedVariables map[string]string) {
+//
+// agentImageOverride, when non-empty, replaces the ARGOCD_AGENT_IMAGE value computed from the
+// static default/hub-env-var above with the hub's live argocd-agent principal image (see
+// CreateAddOnDeploymentConfig's doc comment). This must win over both the static default and any
+// hub env var, since neither is guaranteed to match the principal's actual running version.
+// skip-agent-version-heal on the GitOpsCluster drops ARGOCD_AGENT_IMAGE from the managed set
+// entirely (even if agentImageOverride is set), so a user-set Policy agent.image or ADC value
+// is not overwritten.
+func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster *gitopsclusterV1beta1.GitOpsCluster, managedVariables map[string]string, agentImageOverride string) {
 	// First, populate with operator images from hub operator environment or defaults
 	// This ensures the spoke uses the same images as the hub operator
 	// Skip hub-only vars like ARGOCD_PRINCIPAL_IMAGE which are not needed on spoke
@@ -460,6 +477,22 @@ func (r *ReconcileGitOpsCluster) ExtractVariablesFromGitOpsCluster(gitOpsCluster
 		} else {
 			managedVariables[envKey] = defaultValue
 		}
+	}
+
+	// Agent version drift heal takes precedence: the hub's live principal image is a more
+	// accurate source of truth than the static default/hub-env-var above, particularly for OCP
+	// managed clusters whose OLM catalog can independently resolve ARGOCD_AGENT_IMAGE to a
+	// different version than the hub's principal at any given moment.
+	//
+	// skip-agent-version-heal opts the GitOpsCluster out of this entirely: drop ARGOCD_AGENT_IMAGE
+	// from the managed set so CreateAddOnDeploymentConfig will not overwrite a user-set ADC
+	// value, and will not compete with a user-set Policy spec.argoCDAgent.agent.image (the
+	// operator prefers the CR field over the env var when both are present). The Policy image
+	// field is never written or cleared by this controller regardless of the annotation.
+	if gitOpsCluster.GetAnnotations()[skipAgentVersionHealAnnotation] == "true" {
+		delete(managedVariables, utils.EnvArgoCDAgentImage)
+	} else if agentImageOverride != "" {
+		managedVariables[utils.EnvArgoCDAgentImage] = agentImageOverride
 	}
 
 	// Always propagate proxy settings (even as empty strings) so the AddOnTemplate
@@ -551,4 +584,45 @@ func customizedVariablesEqual(a, b []addonv1alpha1.CustomizedVariable) bool {
 		}
 	}
 	return true
+}
+
+// preserveMirroredImageValues keeps live (mirrored) values for any customizedVariable that a
+// ManagedClusterImageRegistry is already mirroring, as long as GitOpsCluster's desired
+// source-registry value still matches the recorded original. This stops
+// CreateAddOnDeploymentConfig from fighting the image-registry controller by resetting
+// mirrored values back to the source registry on every reconcile.
+//
+// When the desired source HAS changed (hub image upgrade, spec override, principal drift
+// heal), the new source is written through so the image-registry controller can re-mirror it.
+func preserveMirroredImageValues(
+	desired, existing []addonv1alpha1.CustomizedVariable,
+	annotations map[string]string,
+) []addonv1alpha1.CustomizedVariable {
+	if len(annotations) == 0 {
+		return desired
+	}
+
+	origMap := parseOriginalValues(annotations[adcOriginalValuesAnnotation])
+	if len(origMap) == 0 {
+		return desired
+	}
+
+	existingByName := make(map[string]addonv1alpha1.CustomizedVariable, len(existing))
+	for _, v := range existing {
+		existingByName[v.Name] = v
+	}
+
+	out := make([]addonv1alpha1.CustomizedVariable, 0, len(desired))
+	for _, v := range desired {
+		if orig, tracked := origMap[v.Name]; tracked && orig == v.Value {
+			if live, ok := existingByName[v.Name]; ok {
+				out = append(out, live)
+				continue
+			}
+		}
+
+		out = append(out, v)
+	}
+
+	return out
 }

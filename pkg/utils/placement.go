@@ -19,6 +19,7 @@ import (
 	"os"
 	"time"
 
+	imageregistryv1alpha1 "github.com/stolostron/cluster-lifecycle-api/imageregistry/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 	spokeClusterV1 "open-cluster-management.io/api/cluster/v1"
@@ -84,6 +85,38 @@ func DetectManagedServiceAccount(ctx context.Context, clReader client.Reader) {
 	if !IsReadyManagedServiceAccount(clReader) {
 		go wait.UntilWithContext(ctx, func(ctx context.Context) {
 			if IsReadyManagedServiceAccount(clReader) {
+				os.Exit(1)
+			}
+		}, time.Duration(300)*time.Second)
+	}
+}
+
+// IsReadyManagedClusterImageRegistry checks if the ManagedClusterImageRegistry API is ready.
+func IsReadyManagedClusterImageRegistry(clReader client.Reader) bool {
+	mcirList := &imageregistryv1alpha1.ManagedClusterImageRegistryList{}
+
+	listopts := &client.ListOptions{}
+
+	err := clReader.List(context.TODO(), mcirList, listopts)
+	if err != nil {
+		klog.Error("ManagedClusterImageRegistry API NOT ready: ", err)
+
+		return false
+	}
+
+	klog.Info("ManagedClusterImageRegistry API ready")
+
+	return true
+}
+
+// DetectManagedClusterImageRegistry - Detect the ManagedClusterImageRegistry API every 10 seconds.
+// The controller will be exited when it is ready and will automatically restart after.
+//
+//nolint:unparam
+func DetectManagedClusterImageRegistry(ctx context.Context, clReader client.Reader) {
+	if !IsReadyManagedClusterImageRegistry(clReader) {
+		go wait.UntilWithContext(ctx, func(ctx context.Context) {
+			if IsReadyManagedClusterImageRegistry(clReader) {
 				os.Exit(1)
 			}
 		}, time.Duration(300)*time.Second)
