@@ -54,55 +54,55 @@ const (
 )
 
 // Default image values - these should match the latest Red Hat OpenShift GitOps operator bundle
-// Image SHAs sourced from: openshift-gitops-operator.v1.21.1 ClusterServiceVersion
+// installed on the hub.
 var DefaultOperatorImages = map[string]string{
 	// GitOps Operator image
 	// CSV name: manager
-	EnvGitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-rhel9-operator@sha256:fa4a2e0f652beacc4a43b42e4bde926faf34249e1bd62d1405dd3276d1337d1a",
+	EnvGitOpsOperatorImage: "registry.redhat.io/openshift-gitops-1/gitops-rhel9-operator@sha256:ec145c44990edf0ee098ea6552a4c6c120c66e725efe6fdd4933d6051602dbf6",
 
 	// ArgoCD core images
 	// CSV name: argocd_image
-	EnvArgoCDImage:           "registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:de4f0f27573ddce0335ba69e11b0c5423c0c2c4baa04c0c98e948a033a6117ca",
-	EnvArgoCDRepoServerImage: "registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:de4f0f27573ddce0335ba69e11b0c5423c0c2c4baa04c0c98e948a033a6117ca",
+	EnvArgoCDImage:           "registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:deda478bd4d845e08dd25fb839e1c15d7d4507a397c7184c90b4f78d19410e05",
+	EnvArgoCDRepoServerImage: "registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:deda478bd4d845e08dd25fb839e1c15d7d4507a397c7184c90b4f78d19410e05",
 
 	// Redis images
 	// CSV name: argocd_redis_image
-	EnvArgoCDRedisImage:   "registry.redhat.io/rhel9/redis-7@sha256:3d31c0cfaf4219f5bd1c52882b603215d1cb4aaef5b8d1a128d0174e090f96f3",
-	EnvArgoCDRedisHAImage: "registry.redhat.io/rhel9/redis-7@sha256:3d31c0cfaf4219f5bd1c52882b603215d1cb4aaef5b8d1a128d0174e090f96f3",
+	EnvArgoCDRedisImage:   "registry.redhat.io/rhel9/redis-7@sha256:d4865f7560b555f366db86b6097568e02163fed131f765352d46d9478e59f5d6",
+	EnvArgoCDRedisHAImage: "registry.redhat.io/rhel9/redis-7@sha256:d4865f7560b555f366db86b6097568e02163fed131f765352d46d9478e59f5d6",
 	// CSV name: argocd_redis_ha_proxy_image
-	EnvArgoCDRedisHAProxyImage: "registry.redhat.io/openshift4/ose-haproxy-router-rhel9@sha256:f446cc5e14043c426638ddd1afdd9d5ace5d1512bb924a594a76f210f39f21b7",
+	EnvArgoCDRedisHAProxyImage: "registry.redhat.io/openshift4/ose-haproxy-router-rhel9@sha256:5a0aa5b4d20601b1632a315fd25aed7f94fe2b1e5ff097fcc42be245b3c72e9b",
 
 	// SSO / Dex image
 	// CSV name: argocd_dex_image
-	EnvArgoCDDexImage: "registry.redhat.io/openshift-gitops-1/dex-rhel9@sha256:3370318d8438198b7015162614eb12b88babdfd15a7e4ab241203bbaac9e675e",
+	EnvArgoCDDexImage: "registry.redhat.io/openshift-gitops-1/dex-rhel9@sha256:51454e5c706fd913503980d29a11ab233e3d0b82d319b23d46394612dd81d3ff",
 
 	// Backend / GitOps Service image
 	// CSV name: backend_image
-	EnvBackendImage: "registry.redhat.io/openshift-gitops-1/gitops-rhel9@sha256:3a025182818c00477808b7dfad0c5c574e646046dbe2a616ec3328b42dabc182",
+	EnvBackendImage: "registry.redhat.io/openshift-gitops-1/gitops-rhel9@sha256:36a54bd16da5c4ddd09edcce72942e92d4d18533453bd1e93aee3261ace6949c",
 
 	// Console plugin image
 	// CSV name: gitops_console_plugin_image
-	EnvGitOpsConsolePlugin: "registry.redhat.io/openshift-gitops-1/console-plugin-rhel9@sha256:8e6492eeb087ba4e95246dcb064928135ed8bb0cabf1111f81331e105afc3830",
+	EnvGitOpsConsolePlugin: "registry.redhat.io/openshift-gitops-1/console-plugin-rhel9@sha256:a87a5e273a4b47e0d4ac8a6fdad7e74abef7ce93e8250623927004d4d1fc09a0",
 
 	// Extension image
 	// CSV name: argocd_extension_image
-	EnvArgoCDExtensionImage: "registry.redhat.io/openshift-gitops-1/argocd-extensions-rhel9@sha256:789f584bba6db577ee1d5fd221e50efe4d245ed8fdf910b97250e39029ebb35d",
+	EnvArgoCDExtensionImage: "registry.redhat.io/openshift-gitops-1/argocd-extensions-rhel9@sha256:34c704f9fb45355b434146fc5097db0b612643e7f91856155ac5765b3da5045d",
 
 	// Argo Rollouts image
 	// CSV name: argo_rollouts_image
-	EnvArgoRolloutsImage: "registry.redhat.io/openshift-gitops-1/argo-rollouts-rhel9@sha256:efe0bc0cfccf9fb9989002bb4247107f0163de0f9db6c3ca0cf8a578424628c7",
+	EnvArgoRolloutsImage: "registry.redhat.io/openshift-gitops-1/argo-rollouts-rhel9@sha256:bd7a1f2743eee67efbea5cab042ff4a1656f4f6821b925159d516c8f581bc38c",
 
 	// ArgoCD Agent Principal image - used on hub for argocd-agent principal
 	// CSV name: argocd_principal_image
-	EnvArgoCDPrincipalImage: "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:5941ffaae09528c84cfeea02dd1679c6e94f35f80d0ec4196ea8d849e8551561",
+	EnvArgoCDPrincipalImage: "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:b7d3afe3a5f6cdc41377e3ed522ee7c7db74f126dfefee9d62ede8ddfbf6b1cc",
 
 	// ArgoCD Agent image - used on spoke for argocd-agent component
 	// CSV name: argocd_agent_image (same image for both principal and agent)
-	EnvArgoCDAgentImage: "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:5941ffaae09528c84cfeea02dd1679c6e94f35f80d0ec4196ea8d849e8551561",
+	EnvArgoCDAgentImage: "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:b7d3afe3a5f6cdc41377e3ed522ee7c7db74f126dfefee9d62ede8ddfbf6b1cc",
 
 	// ArgoCD Image Updater image
 	// CSV name: argocd_image_updater_image
-	EnvArgoCDImageUpdaterImage: "registry.redhat.io/openshift-gitops-1/argocd-image-updater-rhel9@sha256:4e0f3074acfc37745f5b41334206a3a1e3304d4f4ee95b9faa8ce21d729878fd",
+	EnvArgoCDImageUpdaterImage: "registry.redhat.io/openshift-gitops-1/argocd-image-updater-rhel9@sha256:bd8604a3da6f4350962fb6e17e4550b8d666271f830bcb799a474feda403395d",
 }
 
 // hubOnlyEnvVars are environment variables that are only used on the hub side
