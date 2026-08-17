@@ -25,6 +25,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	spokeclusterv1 "open-cluster-management.io/api/cluster/v1"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	authv1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -81,6 +83,12 @@ var errInvalidPlacementRef = errors.New("invalid placement reference")
 const (
 	clusterSecretSuffix = "-cluster-secret"
 	maxStatusMsgLen     = 128 * 1024
+
+	// msaTokenSecretLabelKey is the label placed on hub-side secrets that carry a managed
+	// service-account token. The managed-serviceaccount addon agent sets this label on every
+	// secret it creates or refreshes, making it the reliable selector for the MSA token
+	// secret watch (Fix 3).
+	msaTokenSecretLabelKey = "authentication.open-cluster-management.io/is-managed-serviceaccount"
 )
 
 // newReconciler returns a new reconcile.Reconciler
@@ -216,7 +224,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 			return err
 		}
 
-		// Watch changes to Managed service account's tokenSecretRef
+		// Watch changes to Managed service account's tokenSecretRef and ExpirationTimestamp.
 		if utils.IsReadyManagedServiceAccount(mgr.GetAPIReader()) {
 			err = c.Watch(
 				source.Kind(
@@ -224,6 +232,50 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 					&authv1beta1.ManagedServiceAccount{},
 					&handler.TypedEnqueueRequestForObject[*authv1beta1.ManagedServiceAccount]{},
 					utils.ManagedServiceAccountPredicateFunc,
+				),
+			)
+			if err != nil {
+				return err
+			}
+
+			// Watch MSA token secret content changes for in-place token refreshes (Fix 3).
+			//
+			// The MSA addon agent refreshes tokens in-place: the secret name in
+			// Status.TokenSecretRef stays the same but the token bytes (and
+			// LastRefreshTimestamp) are updated. The MSA object watch above catches
+			// LastRefreshTimestamp changes (Fix 2), but we add a direct secret watch here
+			// as an additional layer of defence.
+			//
+			// MSA token secrets carry the label
+			// "authentication.open-cluster-management.io/is-managed-serviceaccount=true".
+			// We create a secondary cache scoped to that label so we do not watch every
+			// secret in the cluster. The secondary cache is registered with the manager so
+			// it is started and synced alongside the primary cache.
+			msaTokenCache, cacheErr := cache.New(mgr.GetConfig(), cache.Options{
+				Scheme: mgr.GetScheme(),
+				Mapper: mgr.GetRESTMapper(),
+				ByObject: map[client.Object]cache.ByObject{
+					&v1.Secret{}: {
+						Label: labels.SelectorFromSet(labels.Set{
+							msaTokenSecretLabelKey: "true",
+						}),
+					},
+				},
+			})
+			if cacheErr != nil {
+				return fmt.Errorf("failed to create MSA token secret cache: %w", cacheErr)
+			}
+
+			if err = mgr.Add(msaTokenCache); err != nil {
+				return fmt.Errorf("failed to register MSA token secret cache with manager: %w", err)
+			}
+
+			err = c.Watch(
+				source.Kind(
+					msaTokenCache,
+					&v1.Secret{},
+					&handler.TypedEnqueueRequestForObject[*v1.Secret]{},
+					utils.MSATokenSecretPredicateFunc,
 				),
 			)
 			if err != nil {
@@ -306,7 +358,12 @@ func (r *ReconcileGitOpsCluster) Reconcile(ctx context.Context, request reconcil
 		return reconcile.Result{Requeue: true, RequeueAfter: time.Duration(returnRequeueInterval) * time.Minute}, returnErr
 	}
 
-	return reconcile.Result{}, nil
+	// Periodic requeue ensures credentials are refreshed even when watch events are missed
+	// (e.g. missed MSA token rotation events under hub cluster load). This acts as a safety
+	// net on top of the event-driven watches and is especially important during MSA token
+	// rotation, where a missed event would otherwise leave ArgoCD with a stale token for up
+	// to the rotation interval (default 7 days).
+	return reconcile.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
 func (r *ReconcileGitOpsCluster) cleanupOrphanSecrets(orphanGitOpsClusterSecretList map[types.NamespacedName]string) bool {
