@@ -1261,7 +1261,7 @@ CRDs, ClusterRole, images, and Deployment env vars are obvious. But also check: 
 
 **The upstream repo's checked-in `bundle/manifests/` can be STALE — do not trust it for CSV/RBAC/resource content.** When cloning [gitops-operator](https://github.com/redhat-developer/gitops-operator) for cross-referencing, checking out the release branch (e.g. `v1.21`) does NOT guarantee `bundle/manifests/gitops-operator.clusterserviceversion.yaml` reflects the current released z-stream — it can be a stale fixture left over from a much earlier version (observed: a `v1.21` branch checkout's bundle CSV showing `version: 1.8.0`). The **live hub cluster CSV** (`kubectl get csv <name> -n openshift-gitops-operator -o yaml`) is the only trustworthy source for RBAC rules, Deployment spec, images, ConfigMap/Service content — always extract from there, never from a cloned repo's `bundle/manifests/`. Only use the cloned repo for things that are genuinely version-controlled Go source (e.g. `controllers/util/util.go`'s API-discovery logic), where git blame/branch state is meaningful.
 
-**Complete file inventory of `gitopsaddon/charts/openshift-gitops-operator/templates/`** (verified individually for the 1.21.0→1.21.1 bump — use this as the checklist for the next bump too):
+**Complete file inventory of `gitopsaddon/charts/openshift-gitops-operator/templates/`** (verified individually against a live hub multiple times across different bumps — use this as the checklist for every bump, not just the first one):
 
 | File | Live hub equivalent | How it was verified |
 |---|---|---|
@@ -1274,7 +1274,7 @@ CRDs, ClusterRole, images, and Deployment env vars are obvious. But also check: 
 | `openshift-gitops-operator-leader-election-rolebinding.rolebinding.yaml` | RoleBinding named `<csv-name>` in the operator namespace | Confirms same roleRef target + same subject SA |
 | `openshift-gitops-operator-manager-config.configmap.yaml` | `kubectl get cm openshift-gitops-operator-manager-config -n openshift-gitops-operator -o yaml` | Byte-identical `data` content confirmed. Note: this file is scaffolding from `controller-runtime`'s default manager options and is NOT actually wired to the Deployment via a `--config` flag — the real config comes from the CLI args, which win. Harmless to keep in sync but functionally inert either way. |
 | `openshift-gitops-operator-webhook-service.service.yaml` | `kubectl get svc openshift-gitops-operator-webhook-service -n openshift-gitops-operator -o yaml` | Port/targetPort/selector match exactly |
-| `openshift-gitops-operator-metrics-service.service.yaml` | `kubectl get svc openshift-gitops-operator-metrics-service -n openshift-gitops-operator -o yaml` | **Pre-existing, long-standing mismatch, NOT version-bump-related — do not "fix" during a routine bump:** chart names it `openshift-gitops-operator-controller-manager-metrics-service` (source: `openshift-gitops-operator-metrics-service`), port name `https` vs source `metrics`, `targetPort: 8080` (numeric) vs source `targetPort: metrics` (named, resolves to the container's `containerPort: 8443, name: metrics`). None of this matters functionally: the manager process only binds `127.0.0.1:8080` (loopback), so no Service — regardless of exact shape — can actually reach it from outside the pod. This Service has been a functionally-inert stub since long before 1.21.1, consistent with the `--metrics-bind-address=127.0.0.1:8080` exception below. |
+| `openshift-gitops-operator-metrics-service.service.yaml` | `kubectl get svc openshift-gitops-operator-metrics-service -n openshift-gitops-operator -o yaml` | **Pre-existing, long-standing mismatch, NOT version-bump-related — do not "fix" during a routine bump:** chart names it `openshift-gitops-operator-controller-manager-metrics-service` (source: `openshift-gitops-operator-metrics-service`), port name `https` vs source `metrics`, `targetPort: 8080` (numeric) vs source `targetPort: metrics` (named, resolves to the container's `containerPort: 8443, name: metrics`). None of this matters functionally: the manager process only binds `127.0.0.1:8080` (loopback), so no Service — regardless of exact shape — can actually reach it from outside the pod. This Service has been a functionally-inert stub across multiple bumps already, consistent with the `--metrics-bind-address=127.0.0.1:8080` exception below. |
 | `openshift-gitops-operator-metrics-reader.clusterrole.yaml` | No live equivalent by content search | **Fully inert**: no `ClusterRoleBinding` anywhere in the chart references it, so it grants nothing to anyone. Its one rule (`nonResourceURLs: [/metrics], verbs: [get]`) is also already present verbatim inside the 44-rule manager ClusterRole. Vestigial kubebuilder scaffolding; harmless, pre-existing, not touched. |
 | `openshift-gitops-operator-proxy-role.clusterrole.yaml` + `...-proxy-rolebinding.clusterrolebinding.yaml` | No live equivalent by content search | **Active but fully redundant**: correctly binds the manager SA, but both of its rules (`tokenreviews: create`, `subjectaccessreviews: create`) are already present verbatim inside the 44-rule manager ClusterRole via the same binding. Leftover from the classic kubebuilder "kube-rbac-proxy sidecar" scaffold pattern; the real Deployment has no such sidecar container. Harmless duplicate permissions, pre-existing, not touched. |
 | `openshift-gitops-aggregate-admin.clusterrole.yaml` | No live equivalent by content search | **Deliberate, narrower hand-maintained analog of OLM's own mechanism.** OLM auto-generates admin/edit/view aggregated `ClusterRole`s per **owned CRD** (e.g. `experiments.argoproj.io-v1alpha1-admin`, labeled `rbac.authorization.k8s.io/aggregate-to-admin: "true"` + `olm.opgroup.permissions/aggregate-to-<hash>-admin: "true"`) — one triplet per CRD, ~42 ClusterRoles total for this operator's 14 CRDs. The chart instead hand-picks just 3 "core" end-user-facing types (`argocds`, `appprojects`, `applications`) with full `*` verbs under one ClusterRole. This is a pre-existing, intentional simplification (not every CRD type needs end-user self-service access) — expanding it to match OLM's full per-CRD generation would be a scope-creep feature change, not a version-bump fix. |
@@ -1294,14 +1294,56 @@ Also worth knowing when comparing RBAC: on the live hub, OLM auto-promotes the n
    - `seccompProfile.type: RuntimeDefault` (source doesn't have it) — extra security hardening on non-OCP, kept for defense-in-depth
    - `ARGOCD_CLUSTER_CONFIG_NAMESPACES="*"` (source=`openshift-gitops`) — chart uses wildcard so all namespaces get cluster-scoped RBAC
    - `--metrics-secure=true` + the `metrics-certs` volume/volumeMount (source has both, chart has neither) — this pairs with the source's `--metrics-bind-address=:8443` to serve metrics over TLS using a cert from the OLM-provisioned `openshift-gitops-operator-metrics-tls` secret (backed by the `service.beta.openshift.io/serving-cert-secret-name` annotation on the source's metrics Service, an OCP/OLM-only mechanism). Since the chart already deliberately keeps metrics on `127.0.0.1:8080` (plaintext, loopback-only) instead of matching the source, adding `--metrics-secure=true` without that cert-issuance mechanism would break the operator (missing cert files) — so both are intentionally omitted together.
+
+   Two env vars are easy to misjudge as "changed" when they haven't:
+   - `DISABLE_DEFAULT_ARGOCD_INSTANCE` genuinely does not appear at all in the source CSV's env
+     list on OCP — it's not "removed," it's simply never set there, which defaults to `false`
+     (create the default instance). Its *absence* from a freshly-extracted CSV env dump is the
+     expected, unchanged state, not evidence the flag was deprecated — confirmed still read by
+     the operator's own source (`common/common.go`) as of this writing. The chart must keep
+     explicitly forcing it to `true`.
+   - `CLUSTER_SCOPED_ARGO_ROLLOUTS_NAMESPACES` **is** a real source env var (unlike the two above,
+     it is NOT in the intentional-differences list — the chart must match its source value
+     verbatim, currently `openshift-gitops`). Check its value on every bump like any other
+     non-image env var; don't assume because it's rollout-related that it follows the same
+     wildcard treatment as `ARGOCD_CLUSTER_CONFIG_NAMESPACES`.
+
+   For CRDs and RBAC rule sets specifically, a scripted structural diff (parse both sides as YAML,
+   walk them recursively, ignore key/list order, treat rules as sets of
+   `(apiGroups,resources,verbs,resourceNames)` tuples) is far more reliable than eyeballing a
+   `diff` on files that can run past 1-2MB — a manual read easily misses a single differing field
+   buried in a huge schema. Un-escape the chart's `{{ "{{" }}`/`{{ "}}" }}` Go-template escaping
+   back to `{{`/`}}` before parsing its copy as YAML.
 7. **Bump Chart.yaml version**
 8. **Check new/removed resources**: Go file-by-file through the **complete file inventory table above** — every template file against its live hub equivalent, bidirectionally (something new on the hub with no chart file = possible addition needed; a chart file with no live equivalent and no clear rationale = possible removal candidate). Don't stop at "does the chart have a plausibly-named file" — confirm by content, using `kubectl get <kind> -n openshift-gitops-operator -o yaml` (or cluster-scoped, unnamespaced for ClusterRoles/ClusterRoleBindings) as the source, since OLM hashes/renames things. The OLM bundle also carries monitoring resources (ServiceMonitor, prometheus Role/RoleBinding, bearer-token Secret) that are genuinely NOT needed in the embedded chart (no Prometheus scraping non-OCP clusters via this path).
 9. **Cross-reference with `orb`**: Extract the bundle independently and verify CRD count, image SHAs, and ClusterRole rules match (see orb section below).
 10. **Cross-reference with source repos for Go-level behavior only**: Check [gitops-operator](https://github.com/redhat-developer/gitops-operator) and [argocd-operator](https://github.com/argoproj-labs/argocd-operator) source (e.g. `controllers/util/util.go`'s `InspectCluster`/`VerifyAPI`) for API-discovery behavior changes (e.g., how Route/Monitoring APIs are handled on non-OCP). Do NOT use these repos' checked-in `bundle/manifests/` for CSV/RBAC/resource content — see the staleness warning above; the live hub CSV is the only trustworthy source for that.
-11. **Build and test**: `make build && make test`, then run `test-cycle.sh` for at least 10 cycles with both OCP and Kind clusters.
+11. **Build and test**: `make build && make test`, then push a locally-built image to a registry
+    you control, redeploy it on the hub (see "Build / Push / Redeploy Workflow"), and run
+    `test-cycle.sh` for at least 10 cycles with both OCP and Kind clusters. Confirming a pure
+    image-digest bump this way still matters even when the CRD/RBAC/Deployment diffs all come back
+    clean — running `test-cycle.sh` against the OCP cluster *alone* is not sufficient coverage for
+    a manifest bump: the non-OCP path installs via the embedded chart, a materially different code
+    path (OLM install vs `templateAndApplyChart`) that can only be exercised with a Kind (or other
+    non-OCP) cluster in the `MANAGED_CLUSTERS` list. Confirmed live: an OCP-only run can pass every
+    cycle cleanly while the Kind path still needs its own dedicated pass to prove the new image
+    digests are actually pullable and the operator reaches `Available` there. Also confirmed live:
+    running OCP and Kind together in the same cycle exercises the principal harder (more concurrent
+    agents/events) and makes the pre-existing "Principal event-relay can get transiently stuck on
+    one stale event" timing race (see "Real-infra timing behaviors" below) noticeably more likely
+    to surface within a single `test-cycle.sh` run than an OCP-only run does — this is the same
+    already-documented, self-healing characteristic, not something a manifest bump introduces, but
+    don't be surprised if a combined run hits it where a single-cluster run didn't.
 
 ### orb Tool (Verification)
 `go install github.com/joelanford/orb/cmd/orb@latest`. Requires `pkg-config` and `libgpgme-dev` system packages. Requires `DOCKER_CONFIG` with `registry.redhat.io` auth. Extract bundle: `DOCKER_CONFIG=/tmp/orb-auth orb bundle convert plain docker://registry.redhat.io/openshift-gitops-1/gitops-operator-bundle:vX.Y.Z dir:/tmp/orb-output -n openshift-gitops-operator`. The output `manifests.yaml` contains all CRDs and non-CRD resources. Compare CRD names, image SHAs, and ClusterRole rules against the chart. The OLM bundle uses hashed ClusterRole names and combines RBAC differently — compare rule CONTENT, not names.
+
+This is optional, independent cross-verification on top of the live-hub-CSV comparison in step 1-10
+above (which remains the primary, sufficient source of truth per "Verification direction" above) —
+skip it if `orb` isn't installed or `registry.redhat.io` credentials aren't configured in the
+current environment, rather than blocking the rest of the procedure on it. A bump has been fully
+verified end-to-end (all CRDs/RBAC/Deployment diffed against a live hub, images updated, `make
+build && make test` green, `test-cycle.sh` green on both OCP and Kind) without ever running `orb`.
 
 ## CI Pipeline
 
