@@ -31,6 +31,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 )
 
@@ -99,6 +100,21 @@ var _ = Describe("Application Pull controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, &managedClusterNs)).Should(Succeed())
+
+			By("Creating a PlacementDecision binding the appNamespace to the ManagedCluster")
+			placementDecision := clusterv1beta1.PlacementDecision{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cluster1-placement-decision",
+					Namespace: appNamespace,
+				},
+			}
+			Expect(k8sClient.Create(ctx, &placementDecision)).Should(Succeed())
+			placementDecision.Status = clusterv1beta1.PlacementDecisionStatus{
+				Decisions: []clusterv1beta1.ClusterDecision{
+					{ClusterName: clusterName, Reason: "test"},
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, &placementDecision)).Should(Succeed())
 
 			By("Creating the Application with OCM pull label")
 			app2 := &unstructured.Unstructured{}
