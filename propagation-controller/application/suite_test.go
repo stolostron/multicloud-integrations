@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	appsetreportV1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
 )
@@ -75,6 +76,8 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient).NotTo(BeNil())
 
 	err = clusterv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = clusterv1beta1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = workv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
