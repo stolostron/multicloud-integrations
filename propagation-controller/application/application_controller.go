@@ -459,11 +459,15 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		err := r.Get(ctx, types.NamespacedName{Name: mwName, Namespace: managedClusterName}, &work)
 
 		if errors.IsNotFound(err) {
-			// already deleted ManifestWork, commit the Application finalizer removal
+			// already deleted (or never created, e.g. an Application that was rejected by
+			// isClusterBoundToNamespace) ManifestWork, commit the Application finalizer
+			// removal and stop - there is no ManifestWork object to pass to Delete below.
 			if err = r.Update(ctx, application); err != nil {
 				log.Error(err, "unable to update Application")
 				return ctrl.Result{}, err
 			}
+
+			return ctrl.Result{}, nil
 		} else if err != nil {
 			log.Error(err, "unable to fetch ManifestWork")
 			return ctrl.Result{}, err
