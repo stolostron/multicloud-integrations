@@ -38,6 +38,56 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+func TestVerifyArgoNamespaceAuthorized(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(scheme))
+
+	allowedNS := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "openshift-gitops",
+			Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
+		},
+	}
+	tenantNS := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-a"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allowedNS, tenantNS).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: scheme}
+
+	gc := func(crNS, argoNS string) *gitopsclusterV1beta1.GitOpsCluster {
+		return &gitopsclusterV1beta1.GitOpsCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "gc", Namespace: crNS},
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+				ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{ArgoNamespace: argoNS},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		crNS    string
+		argoNS  string
+		wantErr bool
+	}{
+		{name: "same namespace always allowed", crNS: "tenant-a", argoNS: "tenant-a", wantErr: false},
+		{name: "cross-namespace to admin-labelled ns allowed", crNS: "tenant-a", argoNS: "openshift-gitops", wantErr: false},
+		{name: "cross-namespace to unlabelled tenant ns rejected", crNS: "openshift-gitops", argoNS: "tenant-a", wantErr: true},
+		{name: "cross-namespace to non-existent ns rejected", crNS: "tenant-a", argoNS: "no-such-ns", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := r.verifyArgoNamespaceAuthorized(gc(tt.crNS, tt.argoNS), tt.argoNS)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidateArgoCDAgentSpec(t *testing.T) {
 	reconciler := &ReconcileGitOpsCluster{}
 
@@ -1305,6 +1355,12 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 						},
 					},
 				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "argocd",
+						Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
+					},
+				},
 				createTestArgoCDRedisSecret("argocd"),
 				createTestArgoCDJWTSecret("argocd"),
 				createTestArgoCDServerService("argocd"),
@@ -1393,6 +1449,12 @@ func TestReconcileGitOpsClusterAgentMode(t *testing.T) {
 					Data: map[string][]byte{
 						"server": []byte("https://cluster1-server"),
 						"name":   []byte("cluster1"),
+					},
+				},
+				&v1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "argocd",
+						Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
 					},
 				},
 				createTestArgoCDServerService("argocd"),
@@ -1557,6 +1619,16 @@ func TestAgentModeOverridesAllOptions(t *testing.T) {
 			Data: map[string][]byte{
 				"server": []byte("https://traditional-server"),
 				"name":   []byte("cluster1"),
+			},
+		},
+		// GitOpsCluster lives in "test-ns" while argoNamespace is "argocd" - a cross-namespace
+		// configuration. verifyArgoNamespaceAuthorized requires the target namespace to exist and
+		// carry LabelKeyAllowedArgoNamespace=true, or reconcile is rejected before ever reaching the
+		// local-cluster-in-Placement check this test targets.
+		&v1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "argocd",
+				Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
 			},
 		},
 		createTestArgoCDRedisSecret("argocd"),
