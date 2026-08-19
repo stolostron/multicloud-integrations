@@ -17,14 +17,18 @@ limitations under the License.
 package application
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func Test_containsValidPullLabel(t *testing.T) {
@@ -611,6 +615,60 @@ func Test_GenerateManifestWorkAppSetHashLabelValue(t *testing.T) {
 
 			if got != tt.want {
 				t.Errorf("GenerateManifestWorkAppSetHashLabelValue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_isClusterBoundToNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add clusterv1beta1 to scheme: %v", err)
+	}
+
+	decision := &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "placement-1-decision-1",
+			Namespace: "tenant-a",
+			Labels:    map[string]string{"cluster.open-cluster-management.io/placement": "placement-1"},
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{{ClusterName: "cluster1"}},
+		},
+	}
+
+	otherNSDecision := &clusterv1beta1.PlacementDecision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "placement-2-decision-1",
+			Namespace: "tenant-b",
+		},
+		Status: clusterv1beta1.PlacementDecisionStatus{
+			Decisions: []clusterv1beta1.ClusterDecision{{ClusterName: "prod-cluster-east"}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(decision, otherNSDecision).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	tests := []struct {
+		name      string
+		cluster   string
+		namespace string
+		want      bool
+	}{
+		{name: "bound: decision in same namespace selects cluster", cluster: "cluster1", namespace: "tenant-a", want: true},
+		{name: "unbound: target cluster only selected in another namespace", cluster: "prod-cluster-east", namespace: "tenant-a", want: false},
+		{name: "unbound: no decisions in namespace", cluster: "cluster1", namespace: "tenant-c", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := r.isClusterBoundToNamespace(context.TODO(), tt.cluster, tt.namespace)
+			if err != nil {
+				t.Fatalf("isClusterBoundToNamespace() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("isClusterBoundToNamespace(%q, %q) = %v, want %v", tt.cluster, tt.namespace, got, tt.want)
 			}
 		})
 	}
