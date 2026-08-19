@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
+	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	argov1alpha1 "open-cluster-management.io/multicloud-integrations/pkg/apis/argocd/v1alpha1"
 )
@@ -64,6 +65,7 @@ type ApplicationReconciler struct {
 
 //+kubebuilder:rbac:groups=argoproj.io,resources=applications,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=cluster.open-cluster-management.io,resources=managedclusters,verbs=get;list;watch
+//+kubebuilder:rbac:groups=cluster.open-cluster-management.io,resources=placementdecisions,verbs=get;list;watch
 //+kubebuilder:rbac:groups=work.open-cluster-management.io,resources=manifestworks,verbs=get;list;watch;create;update;patch;delete
 
 // ApplicationPredicateFunctions defines which Application this controller should wrap inside ManifestWork's payload
@@ -98,6 +100,28 @@ var ApplicationPredicateFunctions = predicate.Funcs{
 		app := e.Object.(*argov1alpha1.Application)
 		return containsValidPullLabel(*app) && containsValidPullAnnotation(*app)
 	},
+}
+
+// isClusterBoundToNamespace returns true iff at least one PlacementDecision in the
+// Application's namespace selects the given managed cluster. PlacementDecisions are
+// produced by the OCM placement controller and a Placement can only select clusters from
+// ManagedClusterSets that an admin has bound to the namespace via ManagedClusterSetBinding,
+// so a matching decision proves the namespace is authorized to target the cluster.
+func (r *ApplicationReconciler) isClusterBoundToNamespace(ctx context.Context, managedClusterName, namespace string) (bool, error) {
+	placementDecisions := &clusterv1beta1.PlacementDecisionList{}
+	if err := r.List(ctx, placementDecisions, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+
+	for i := range placementDecisions.Items {
+		for _, d := range placementDecisions.Items[i].Status.Decisions {
+			if d.ClusterName == managedClusterName {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -150,11 +174,15 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		err := r.Get(ctx, types.NamespacedName{Name: mwName, Namespace: managedClusterName}, &work)
 
 		if errors.IsNotFound(err) {
-			// already deleted ManifestWork, commit the Application finalizer removal
+			// already deleted (or never created, e.g. an Application that was rejected by
+			// isClusterBoundToNamespace) ManifestWork, commit the Application finalizer
+			// removal and stop - there is no ManifestWork object to pass to Delete below.
 			if err = r.Update(ctx, &application); err != nil {
 				log.Error(err, "unable to update Application")
 				return ctrl.Result{}, err
 			}
+
+			return ctrl.Result{}, nil
 		} else if err != nil {
 			log.Error(err, "unable to fetch ManifestWork")
 			return ctrl.Result{}, err
@@ -179,6 +207,21 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, types.NamespacedName{Name: managedClusterName}, &managedCluster); err != nil {
 		log.Error(err, "unable to fetch ManagedCluster")
 		return ctrl.Result{}, err
+	}
+
+	// verify the Application's namespace is authorized to target this ManagedCluster.
+	// The ocm-managed-cluster annotation is tenant-controlled; without this gate a tenant with only
+	// namespaced applications create could direct the controller (which holds cluster-wide
+	// manifestworks:create) to write a ManifestWork into any managed-cluster namespace.
+	bound, err := r.isClusterBoundToNamespace(ctx, managedClusterName, application.GetNamespace())
+	if err != nil {
+		log.Error(err, "unable to verify namespace binding for target ManagedCluster")
+		return ctrl.Result{}, err
+	}
+	if !bound {
+		log.Info("rejecting Application: source namespace has no PlacementDecision selecting the target ManagedCluster",
+			"namespace", application.GetNamespace(), "managedCluster", managedClusterName)
+		return ctrl.Result{}, nil
 	}
 
 	log.Info("generating ManifestWork for Application")

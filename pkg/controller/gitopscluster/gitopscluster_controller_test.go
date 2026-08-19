@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
@@ -173,7 +174,8 @@ var (
 
 	argocdServerNamespace1 = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "argocd1",
+			Name:   "argocd1",
+			Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
 		},
 	}
 
@@ -185,7 +187,8 @@ var (
 
 	gitopsServerNamespace1 = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "openshift-gitops1",
+			Name:   "openshift-gitops1",
+			Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
 		},
 	}
 
@@ -721,6 +724,58 @@ func expectedSecretCreated(c client.Client, expectedSecretKey types.NamespacedNa
 		time.Sleep(time.Second * 3)
 
 		timeout += 3
+	}
+}
+
+func TestVerifyArgoNamespaceAuthorized(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	testScheme := runtime.NewScheme()
+	g.Expect(corev1.AddToScheme(testScheme)).NotTo(gomega.HaveOccurred())
+
+	allowedNS := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "openshift-gitops",
+			Labels: map[string]string{LabelKeyAllowedArgoNamespace: "true"},
+		},
+	}
+	tenantNS := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-a"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(allowedNS, tenantNS).Build()
+	r := &ReconcileGitOpsCluster{Client: fakeClient, scheme: testScheme}
+
+	gc := func(crNS, argoNS string) *gitopsclusterV1beta1.GitOpsCluster {
+		return &gitopsclusterV1beta1.GitOpsCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "gc", Namespace: crNS},
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+				ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{ArgoNamespace: argoNS},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		crNS    string
+		argoNS  string
+		wantErr bool
+	}{
+		{name: "same namespace always allowed", crNS: "tenant-a", argoNS: "tenant-a", wantErr: false},
+		{name: "cross-namespace to admin-labelled ns allowed", crNS: "tenant-a", argoNS: "openshift-gitops", wantErr: false},
+		{name: "cross-namespace to unlabelled tenant ns rejected", crNS: "openshift-gitops", argoNS: "tenant-a", wantErr: true},
+		{name: "cross-namespace to non-existent ns rejected", crNS: "tenant-a", argoNS: "no-such-ns", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := r.verifyArgoNamespaceAuthorized(gc(tt.crNS, tt.argoNS), tt.argoNS)
+			if tt.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+		})
 	}
 }
 
