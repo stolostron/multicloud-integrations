@@ -618,6 +618,164 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 					"Wrong agentInstallNamespace should be corrected to the standard ACM addon namespace on update")
 			},
 		},
+		{
+			name: "preserves image-registry-mirrored values when the source has not changed",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "registry.redhat.io/gitops-operator:v1",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+						Annotations: map[string]string{
+							adcManagedByAnnotation:          "openshift-gitops/eks-imageregistry",
+							adcOriginalValuesAnnotation:     `{"GITOPS_OPERATOR_IMAGE":"registry.redhat.io/gitops-operator:v1"}`,
+							adcLastMirroredValuesAnnotation: `{"GITOPS_OPERATOR_IMAGE":"mirror.example.com/gitops-operator:v1"}`,
+						},
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "mirror.example.com/gitops-operator:v1"},
+							{Name: "USER_CUSTOM_VAR", Value: "user-value"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				assert.Equal(t, "mirror.example.com/gitops-operator:v1", varMap["GITOPS_OPERATOR_IMAGE"],
+					"GitOpsCluster must not reset a still-valid mirrored image back to the source registry")
+				assert.Equal(t, "user-value", varMap["USER_CUSTOM_VAR"])
+				assert.Equal(t, "openshift-gitops/eks-imageregistry", config.Annotations[adcManagedByAnnotation])
+				assert.Contains(t, config.Annotations[adcOriginalValuesAnnotation], "registry.redhat.io/gitops-operator:v1")
+			},
+		},
+		{
+			name: "writes new source image when image-registry original no longer matches",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "registry.redhat.io/gitops-operator:v2",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+						Annotations: map[string]string{
+							adcManagedByAnnotation:          "openshift-gitops/eks-imageregistry",
+							adcOriginalValuesAnnotation:     `{"GITOPS_OPERATOR_IMAGE":"registry.redhat.io/gitops-operator:v1"}`,
+							adcLastMirroredValuesAnnotation: `{"GITOPS_OPERATOR_IMAGE":"mirror.example.com/gitops-operator:v1"}`,
+						},
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "mirror.example.com/gitops-operator:v1"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				assert.Equal(t, "registry.redhat.io/gitops-operator:v2", varMap["GITOPS_OPERATOR_IMAGE"],
+					"a changed source must be written through so the image-registry controller can re-mirror it")
+			},
+		},
+		{
+			name: "skip-agent-version-heal preserves a user-set ARGOCD_AGENT_IMAGE on an existing ADC",
+			managedCluster: &spokeclusterv1.ManagedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			},
+			gitOpsCluster: &gitopsclusterV1beta1.GitOpsCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gitops",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						skipAgentVersionHealAnnotation: "true",
+					},
+				},
+				Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+					GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+						GitOpsOperatorImage: "registry.redhat.io/gitops-operator:v1",
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gitops-addon-config",
+						Namespace: "test-cluster",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						CustomizedVariables: []addonv1alpha1.CustomizedVariable{
+							{Name: "ARGOCD_AGENT_IMAGE", Value: "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9:user-pinned"},
+							{Name: "GITOPS_OPERATOR_IMAGE", Value: "old-operator:v0"},
+						},
+					},
+				},
+			},
+			validateFunc: func(t *testing.T, c client.Client, namespace string) {
+				config := &addonv1alpha1.AddOnDeploymentConfig{}
+				err := c.Get(context.Background(), types.NamespacedName{
+					Name:      "gitops-addon-config",
+					Namespace: namespace,
+				}, config)
+				require.NoError(t, err)
+
+				varMap := make(map[string]string)
+				for _, variable := range config.Spec.CustomizedVariables {
+					varMap[variable.Name] = variable.Value
+				}
+
+				assert.Equal(t, "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9:user-pinned", varMap["ARGOCD_AGENT_IMAGE"],
+					"skip-agent-version-heal must not overwrite a user-set ARGOCD_AGENT_IMAGE")
+				assert.Equal(t, "registry.redhat.io/gitops-operator:v1", varMap["GITOPS_OPERATOR_IMAGE"],
+					"other managed image variables are still updated")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -631,7 +789,7 @@ func TestCreateAddOnDeploymentConfig(t *testing.T) {
 				Client: fakeClient,
 			}
 
-			err := reconciler.CreateAddOnDeploymentConfig(tt.gitOpsCluster, tt.managedCluster)
+			err := reconciler.CreateAddOnDeploymentConfig(tt.gitOpsCluster, tt.managedCluster, "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1222,7 +1380,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 		}
 
 		managedVariables := make(map[string]string)
-		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
 
 		// Should have all default images EXCEPT hub-only vars (like ARGOCD_PRINCIPAL_IMAGE)
 		for envKey := range utils.DefaultOperatorImages {
@@ -1252,7 +1410,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 		}
 
 		managedVariables := make(map[string]string)
-		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
 
 		// Should have all default images EXCEPT hub-only vars
 		for envKey, defaultValue := range utils.DefaultOperatorImages {
@@ -1279,7 +1437,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 		}
 
 		managedVariables := make(map[string]string)
-		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
 
 		// Custom image should override the default
 		assert.Equal(t, customImage, managedVariables[utils.EnvGitOpsOperatorImage])
@@ -1305,7 +1463,7 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 		}
 
 		managedVariables := make(map[string]string)
-		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
 
 		// Proxy variables should be extracted from environment
 		assert.Equal(t, "http://proxy.example.com:8080", managedVariables[utils.EnvHTTPProxy])
@@ -1325,10 +1483,102 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 		}
 
 		managedVariables := make(map[string]string)
-		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
 
 		// Environment variable should override default
 		assert.Equal(t, customImage, managedVariables[utils.EnvGitOpsOperatorImage])
+	})
+
+	t.Run("agentImageOverride takes precedence over the static ARGOCD_AGENT_IMAGE default", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		liveImage := "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:live1234"
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, liveImage)
+
+		assert.Equal(t, liveImage, managedVariables[utils.EnvArgoCDAgentImage])
+		// Every other image should still fall back to the static default, unaffected.
+		assert.Equal(t, utils.DefaultOperatorImages[utils.EnvArgoCDImage], managedVariables[utils.EnvArgoCDImage])
+	})
+
+	t.Run("empty agentImageOverride leaves the static ARGOCD_AGENT_IMAGE default untouched", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables, "")
+
+		assert.Equal(t, utils.DefaultOperatorImages[utils.EnvArgoCDAgentImage], managedVariables[utils.EnvArgoCDAgentImage])
+	})
+
+	t.Run("skip-agent-version-heal omits ARGOCD_AGENT_IMAGE even when a principal override is passed", func(t *testing.T) {
+		reconciler := &ReconcileGitOpsCluster{}
+		gitOpsCluster := &gitopsclusterV1beta1.GitOpsCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{skipAgentVersionHealAnnotation: "true"},
+			},
+			Spec: gitopsclusterV1beta1.GitOpsClusterSpec{},
+		}
+
+		managedVariables := make(map[string]string)
+		reconciler.ExtractVariablesFromGitOpsCluster(gitOpsCluster, managedVariables,
+			"registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:live1234")
+
+		_, present := managedVariables[utils.EnvArgoCDAgentImage]
+		assert.False(t, present, "skip-agent-version-heal must drop ARGOCD_AGENT_IMAGE from the managed set so a user-set Policy or ADC value is not overwritten")
+		assert.Equal(t, utils.DefaultOperatorImages[utils.EnvArgoCDImage], managedVariables[utils.EnvArgoCDImage])
+	})
+}
+
+func TestPreserveMirroredImageValues(t *testing.T) {
+	t.Run("keeps live mirrored value when desired still matches the recorded original", func(t *testing.T) {
+		desired := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "registry.redhat.io/argocd:v1"},
+			{Name: "ARGOCD_AGENT_MODE", Value: "managed"},
+		}
+		existing := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "mirror.example.com/argocd:v1"},
+			{Name: "ARGOCD_AGENT_MODE", Value: "managed"},
+		}
+		annotations := map[string]string{
+			adcOriginalValuesAnnotation: `{"ARGOCD_IMAGE":"registry.redhat.io/argocd:v1"}`,
+		}
+
+		got := preserveMirroredImageValues(desired, existing, annotations)
+		assert.Equal(t, "mirror.example.com/argocd:v1", findVar(got, "ARGOCD_IMAGE"))
+		assert.Equal(t, "managed", findVar(got, "ARGOCD_AGENT_MODE"))
+	})
+
+	t.Run("writes through a new source when the recorded original no longer matches", func(t *testing.T) {
+		desired := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "registry.redhat.io/argocd:v2"},
+		}
+		existing := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "mirror.example.com/argocd:v1"},
+		}
+		annotations := map[string]string{
+			adcOriginalValuesAnnotation: `{"ARGOCD_IMAGE":"registry.redhat.io/argocd:v1"}`,
+		}
+
+		got := preserveMirroredImageValues(desired, existing, annotations)
+		assert.Equal(t, "registry.redhat.io/argocd:v2", findVar(got, "ARGOCD_IMAGE"))
+	})
+
+	t.Run("is a no-op without original-values annotation", func(t *testing.T) {
+		desired := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "registry.redhat.io/argocd:v1"},
+		}
+		existing := []addonv1alpha1.CustomizedVariable{
+			{Name: "ARGOCD_IMAGE", Value: "mirror.example.com/argocd:v1"},
+		}
+
+		got := preserveMirroredImageValues(desired, existing, nil)
+		assert.Equal(t, desired, got)
 	})
 }
 
@@ -1397,4 +1647,3 @@ func TestExtractArgoCDAgentVariables(t *testing.T) {
 		})
 	}
 }
-

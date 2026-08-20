@@ -10,17 +10,18 @@ require (
 	github.com/openshift-online/ocm-sdk-go v0.1.478
 	github.com/openshift/library-go v0.0.0-20251029104758-277736d6f195
 	github.com/spf13/pflag v1.0.10
+	github.com/stolostron/cluster-lifecycle-api v0.0.0-20260330032750-43755d6ceb09
 	github.com/stretchr/testify v1.11.1
 	helm.sh/helm/v3 v3.21.0
-	k8s.io/api v0.35.1
+	k8s.io/api v0.35.3
 	k8s.io/apiextensions-apiserver v0.35.1
-	k8s.io/apimachinery v0.35.1
-	k8s.io/client-go v0.35.1
+	k8s.io/apimachinery v0.35.3
+	k8s.io/client-go v0.35.3
 	k8s.io/klog v1.0.0
-	open-cluster-management.io/api v1.0.1-0.20250827024027-f3e5dab96ea1
+	open-cluster-management.io/api v1.2.0
 	open-cluster-management.io/managed-serviceaccount v0.7.0
 	open-cluster-management.io/sdk-go v1.0.1-0.20250924025914-9633a0b7fe1b
-	sigs.k8s.io/controller-runtime v0.21.0
+	sigs.k8s.io/controller-runtime v0.22.3
 )
 
 require (
@@ -31,7 +32,6 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/Microsoft/go-winio v0.6.1 // indirect
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/bwmarrin/snowflake v0.3.0 // indirect
 	github.com/cloudevents/sdk-go/protocol/kafka_confluent/v2 v2.0.0-20240413090539-7fef29478991 // indirect
 	github.com/cloudevents/sdk-go/protocol/mqtt_paho/v2 v2.0.0-20250922144431-372892d7c84d // indirect

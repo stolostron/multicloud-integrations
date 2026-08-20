@@ -90,7 +90,7 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 	})
 
 	Context("Agent Version Drift Auto-Heal", func() {
-		It("should patch ArgoCD Policy with principal image for agent drift heal", func() {
+		It("should reset stale ArgoCD Policy agent image and heal principal image via AddOnDeploymentConfig", func() {
 			verifyAgentVersionDriftHeal(gitopsClusterName, argoCDNamespace, 5*time.Minute)
 		})
 	})

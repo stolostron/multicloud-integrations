@@ -21,8 +21,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,15 +46,38 @@ const (
 )
 
 // HealAgentVersionDrift detects version drift between the hub's ArgoCD principal
-// and the spoke's agent, and patches the existing ArgoCD Policy to enforce the
-// correct agent image on managed clusters.
-func (r *ReconcileGitOpsCluster) HealAgentVersionDrift(instance *gitopsclusterV1beta1.GitOpsCluster) error {
+// and the spoke's agent by reading the principal Deployment's live container image.
+//
+// It deliberately does NOT patch the ArgoCD Policy (a single object shared/replicated
+// identically across every managed cluster selected by the Placement) with this image
+// anymore. Doing so bypassed the per-cluster image mirroring that ManagedClusterImageRegistry
+// already applies to the "gitops-addon-config" AddOnDeploymentConfig in each managed cluster's
+// own namespace (see imageregistry_controller.go) -- a single hardcoded value in the shared
+// Policy cannot be correctly mirrored for clusters that only reach a per-cluster mirror
+// registry (e.g. non-OCP clusters with no node-level ImageContentSourcePolicy). It also
+// denied users the ability to pin the agent image themselves via Policy.
+//
+// Instead, the caller feeds the returned image into ExtractVariablesFromGitOpsCluster (via
+// CreateAddOnDeploymentConfig's agentImageOverride parameter) so it becomes the value written
+// to each managed cluster's own AddOnDeploymentConfig's ARGOCD_AGENT_IMAGE variable -- which
+// then flows through the SAME, already-correct, per-cluster mirroring pipeline as every other
+// ArgoCD component image. The ArgoCD CR itself never sets spec.argoCDAgent.agent.image,
+// relying on the operator's own env-var default (see generateArgoCDSpec), unless the user
+// has set that field on the Policy themselves -- in which case the operator prefers the CR
+// value and this controller leaves it alone.
+//
+// skip-agent-version-heal on the GitOpsCluster skips this lookup AND causes
+// ExtractVariablesFromGitOpsCluster to omit ARGOCD_AGENT_IMAGE from the managed ADC set, so
+// neither a user-set Policy image nor a user-set ADC value is overwritten.
+//
+// Returns the principal's image (empty string if not found/not applicable) and an error.
+func (r *ReconcileGitOpsCluster) HealAgentVersionDrift(instance *gitopsclusterV1beta1.GitOpsCluster) (string, error) {
 	klog.Infof("HealAgentVersionDrift called for %s/%s", instance.Namespace, instance.Name)
 
 	annotations := instance.GetAnnotations()
 	if annotations[skipAgentVersionHealAnnotation] == "true" {
 		klog.Infof("skip-agent-version-heal annotation set, skipping drift heal for %s/%s", instance.Namespace, instance.Name)
-		return nil
+		return "", nil
 	}
 
 	if instance.Spec.GitOpsAddon == nil ||
@@ -62,7 +85,7 @@ func (r *ReconcileGitOpsCluster) HealAgentVersionDrift(instance *gitopsclusterV1
 		instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled == nil ||
 		!*instance.Spec.GitOpsAddon.ArgoCDAgent.Enabled {
 		klog.Infof("HealAgentVersionDrift: agent not enabled for %s/%s, skipping", instance.Namespace, instance.Name)
-		return nil
+		return "", nil
 	}
 
 	argoCDNamespace := instance.Spec.ArgoServer.ArgoNamespace
@@ -74,15 +97,15 @@ func (r *ReconcileGitOpsCluster) HealAgentVersionDrift(instance *gitopsclusterV1
 
 	principalImage, err := r.findPrincipalDeploymentImage(ctx, argoCDNamespace)
 	if err != nil {
-		return fmt.Errorf("failed to find principal deployment: %w", err)
+		return "", fmt.Errorf("failed to find principal deployment: %w", err)
 	}
 	if principalImage == "" {
 		klog.Infof("Principal deployment not found yet in %s, skipping drift heal", argoCDNamespace)
-		return nil
+		return "", nil
 	}
 
 	klog.Infof("Agent version drift heal: principal image is %s for %s/%s", principalImage, instance.Namespace, instance.Name)
-	return r.patchArgoCDPolicyAgentImage(instance, principalImage)
+	return principalImage, nil
 }
 
 // findPrincipalDeploymentImage finds the ArgoCD agent principal deployment and
@@ -114,124 +137,17 @@ func (r *ReconcileGitOpsCluster) findPrincipalDeploymentImage(ctx context.Contex
 	return "", nil
 }
 
-// patchArgoCDPolicyAgentImage reads the existing ArgoCD Policy, navigates the
-// nested structure to find the ArgoCD object-template, and sets/updates
-// spec.argoCDAgent.agent.image to match the principal's image.
-// Uses RetryOnConflict to handle concurrent modifications.
-func (r *ReconcileGitOpsCluster) patchArgoCDPolicyAgentImage(instance *gitopsclusterV1beta1.GitOpsCluster, principalImage string) error {
-	policyName := instance.Name + "-argocd-policy"
-	policyGVR := schema.GroupVersionResource{
-		Group:    "policy.open-cluster-management.io",
-		Version:  "v1",
-		Resource: "policies",
-	}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing, err := r.DynamicClient.Resource(policyGVR).Namespace(instance.Namespace).Get(
-			context.TODO(), policyName, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				klog.V(2).Infof("ArgoCD Policy %s/%s not found, skipping agent image patch",
-					instance.Namespace, policyName)
-				return nil
-			}
-			return fmt.Errorf("failed to get ArgoCD Policy %s/%s: %w", instance.Namespace, policyName, err)
-		}
-
-		// Navigate: spec.policy-templates[*].objectDefinition.spec.object-templates[*]
-		spec, ok := existing.Object["spec"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("policy %s has no spec", policyName)
-		}
-
-		policyTemplates, ok := spec["policy-templates"].([]interface{})
-		if !ok || len(policyTemplates) == 0 {
-			return fmt.Errorf("policy %s has no policy-templates", policyName)
-		}
-
-		needsUpdate := false
-		for ptIdx, pt := range policyTemplates {
-			ptMap, ok := pt.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			configPolicyDef, ok := ptMap["objectDefinition"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			configPolicySpec, ok := configPolicyDef["spec"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			objectTemplates, ok := configPolicySpec["object-templates"].([]interface{})
-			if !ok || len(objectTemplates) == 0 {
-				continue
-			}
-
-			for _, tmpl := range objectTemplates {
-				tmplMap, ok := tmpl.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				objDef, ok := tmplMap["objectDefinition"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if objDef["kind"] != "ArgoCD" {
-					continue
-				}
-
-				objMeta, _ := objDef["metadata"].(map[string]interface{})
-				objName, _ := objMeta["name"].(string)
-				if objName != addonManagedArgoCDName {
-					klog.V(2).Infof("Skipping ArgoCD template %q in Policy %s policy-templates[%d] (only patching %s)",
-						objName, policyName, ptIdx, addonManagedArgoCDName)
-					continue
-				}
-
-				objSpec := ensureNestedMap(objDef, "spec")
-				argoCDAgent := ensureNestedMap(objSpec, "argoCDAgent")
-				agent := ensureNestedMap(argoCDAgent, "agent")
-
-				currentImage, _ := agent["image"].(string)
-				if currentImage == principalImage {
-					klog.V(2).Infof("Agent image in Policy %s policy-templates[%d] already matches principal (%s), no patch needed",
-						policyName, ptIdx, principalImage)
-					continue
-				}
-
-				agent["image"] = principalImage
-				klog.Infof("Patching Policy %s/%s: setting argoCDAgent.agent.image in policy-templates[%d] to %s (was: %s)",
-					instance.Namespace, policyName, ptIdx, principalImage, currentImage)
-				needsUpdate = true
-			}
-		}
-
-		if !needsUpdate {
-			klog.V(2).Infof("No ArgoCD object-template needs agent image patch in Policy %s/%s",
-				instance.Namespace, policyName)
-			return nil
-		}
-
-		_, err = r.DynamicClient.Resource(policyGVR).Namespace(instance.Namespace).Update(
-			context.TODO(), existing, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update Policy %s/%s: %w", instance.Namespace, policyName, err)
-		}
-
-		klog.Infof("Successfully patched agent image in Policy %s/%s", instance.Namespace, policyName)
-		return nil
-	})
-}
-
 // reconcileArgoCDPolicyAgentSpec ensures all controller-managed agent config fields
 // are present and correct in the existing ArgoCD Policy's object template.
 // This handles policies created before certain fields were added (e.g., destinationBasedMapping,
 // client TLS config, allowedNamespaces) or when the GitOpsCluster spec changes.
-// Fields NOT touched: image (managed by HealAgentVersionDrift), user-added object-templates.
+//
+// spec.argoCDAgent.agent.image is NEVER written or cleared here. Agent image selection moved
+// to the per-cluster AddOnDeploymentConfig (ARGOCD_AGENT_IMAGE, optionally healed to the
+// hub principal via HealAgentVersionDrift). Users who want the Policy to pin the agent
+// image -- including after skip-agent-version-heal -- are free to set that field; this
+// reconciler must not deny that. Fields NOT touched: user-added object-templates, and
+// agent.image on the ArgoCD template.
 func (r *ReconcileGitOpsCluster) reconcileArgoCDPolicyAgentSpec(instance *gitopsclusterV1beta1.GitOpsCluster) error {
 	policyName := instance.Name + "-argocd-policy"
 	policyGVR := schema.GroupVersionResource{
@@ -340,8 +256,7 @@ func (r *ReconcileGitOpsCluster) reconcileArgoCDPolicyAgentSpec(instance *gitops
 					needsUpdate = true
 				}
 
-				currentNS, _ := agent["allowedNamespaces"].([]interface{})
-				if len(currentNS) == 0 || currentNS[0] != "*" {
+				if currentNS, _ := agent["allowedNamespaces"].([]interface{}); len(currentNS) == 0 || currentNS[0] != "*" {
 					agent["allowedNamespaces"] = []interface{}{"*"}
 					klog.Infof("Patching Policy %s/%s policy-templates[%d]: setting argoCDAgent.agent.allowedNamespaces=[\"*\"]",
 						instance.Namespace, policyName, ptIdx)
