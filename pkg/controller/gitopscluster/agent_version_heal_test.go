@@ -113,6 +113,34 @@ func TestFindPrincipalDeploymentImage(t *testing.T) {
 	})
 }
 
+func TestHealAgentVersionDrift_ReturnsPrincipalImage(t *testing.T) {
+	agentEnabled := true
+	scheme := runtime.NewScheme()
+	_ = appsv1.AddToScheme(scheme)
+
+	deploy := newPrincipalDeployment("openshift-gitops", "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:live1234")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deploy).Build()
+	r := &ReconcileGitOpsCluster{Client: cl, apiReader: cl}
+	instance := &gitopsclusterV1beta1.GitOpsCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "openshift-gitops"},
+		Spec: gitopsclusterV1beta1.GitOpsClusterSpec{
+			ArgoServer: gitopsclusterV1beta1.ArgoServerSpec{ArgoNamespace: "openshift-gitops"},
+			GitOpsAddon: &gitopsclusterV1beta1.GitOpsAddonSpec{
+				ArgoCDAgent: &gitopsclusterV1beta1.ArgoCDAgentSpec{Enabled: &agentEnabled},
+			},
+		},
+	}
+
+	// HealAgentVersionDrift must only ever report the principal's live image back to the
+	// caller -- it must NOT touch the ArgoCD Policy (a single object shared across every
+	// managed cluster) with it. The caller is responsible for feeding this into each managed
+	// cluster's own AddOnDeploymentConfig instead (see gitopscluster_controller.go), so it
+	// flows through the per-cluster ManagedClusterImageRegistry mirroring pipeline.
+	img, err := r.HealAgentVersionDrift(instance)
+	require.NoError(t, err)
+	assert.Equal(t, "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:live1234", img)
+}
+
 func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 	agentEnabled := true
 	agentDisabled := false
@@ -136,8 +164,9 @@ func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 			},
 		}
 
-		err := r.HealAgentVersionDrift(instance)
+		img, err := r.HealAgentVersionDrift(instance)
 		require.NoError(t, err)
+		assert.Empty(t, img)
 	})
 
 	t.Run("skip when agent not enabled", func(t *testing.T) {
@@ -153,8 +182,9 @@ func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 			},
 		}
 
-		err := r.HealAgentVersionDrift(instance)
+		img, err := r.HealAgentVersionDrift(instance)
 		require.NoError(t, err)
+		assert.Empty(t, img)
 	})
 
 	t.Run("skip when no gitopsAddon", func(t *testing.T) {
@@ -165,8 +195,9 @@ func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 			Spec:       gitopsclusterV1beta1.GitOpsClusterSpec{},
 		}
 
-		err := r.HealAgentVersionDrift(instance)
+		img, err := r.HealAgentVersionDrift(instance)
 		require.NoError(t, err)
+		assert.Empty(t, img)
 	})
 
 	t.Run("skip when principal not found", func(t *testing.T) {
@@ -182,8 +213,9 @@ func TestHealAgentVersionDrift_SkipCases(t *testing.T) {
 			},
 		}
 
-		err := r.HealAgentVersionDrift(instance)
+		img, err := r.HealAgentVersionDrift(instance)
 		require.NoError(t, err)
+		assert.Empty(t, img)
 	})
 }
 
@@ -231,7 +263,9 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 	})
 
 	t.Run("client fields absent on legacy policy template", func(t *testing.T) {
-		// Simulate a legacy policy's argoCDAgent.agent map (only has image, nothing else)
+		// Simulate a legacy (or user-pinned) policy's argoCDAgent.agent map that already has
+		// an image. Reconciling other agent fields must never clear or overwrite it --
+		// skip-agent-version-heal and a user-set Policy agent.image both depend on this.
 		agent := map[string]interface{}{
 			"image": "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:abc",
 		}
@@ -243,8 +277,8 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 		client["mode"] = "managed"
 
 		assert.Equal(t, "principal.example.com", agent["client"].(map[string]interface{})["principalServerAddress"])
-		// image must be preserved
-		assert.Equal(t, "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:abc", agent["image"])
+		assert.Equal(t, "registry.redhat.io/openshift-gitops-1/argocd-agent-rhel9@sha256:abc", agent["image"],
+			"Policy agent.image must be left alone; image selection is ADC-based unless the user set this field")
 	})
 
 	t.Run("tls fields absent on legacy policy template", func(t *testing.T) {
@@ -336,18 +370,18 @@ func TestReconcileArgoCDPolicyAgentSpec_FieldLogic(t *testing.T) {
 
 	t.Run("no update needed when all fields already correct", func(t *testing.T) {
 		agent := map[string]interface{}{
-			"enabled":          true,
+			"enabled":           true,
 			"allowedNamespaces": []interface{}{"*"},
 			"client": map[string]interface{}{
 				"principalServerAddress": "principal.example.com",
 				"principalServerPort":    "443",
-				"mode":                  "managed",
+				"mode":                   "managed",
 			},
 			"destinationBasedMapping": map[string]interface{}{
 				"enabled": true,
 			},
 			"tls": map[string]interface{}{
-				"secretName":      "argocd-agent-client-tls",
+				"secretName":       "argocd-agent-client-tls",
 				"rootCASecretName": "argocd-agent-ca",
 			},
 		}

@@ -330,8 +330,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		}
 
 		// Watch principal Deployment image changes for agent version drift detection.
-		// When the OpenShift GitOps Operator upgrades the principal, this watch
-		// triggers reconciliation so HealAgentVersionDrift can patch the Policy.
+		// When the OpenShift GitOps Operator upgrades the principal, this watch triggers
+		// reconciliation so HealAgentVersionDrift can refresh each managed cluster's
+		// AddOnDeploymentConfig ARGOCD_AGENT_IMAGE (never the shared ArgoCD Policy).
 		deployMapper := &principalDeploymentMapper{mgr.GetClient()}
 		err = c.Watch(
 			source.Kind(
@@ -1156,11 +1157,9 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 		}
 
 		// Create ArgoCD Policy to manage ArgoCD CR on managed clusters via Policy framework
-		policySkipped := false
 		err = r.CreateArgoCDPolicy(instance)
 		if err != nil {
 			if errors.Is(err, ErrArgoCDPolicySkipped) {
-				policySkipped = true
 				klog.Infof("ArgoCD Policy creation skipped for GitOpsCluster %s/%s (skip-argocd-policy annotation)", instance.Namespace, instance.Name)
 				r.updateGitOpsClusterConditions(instance, "", "",
 					map[string]ConditionUpdate{
@@ -1211,11 +1210,20 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 			}
 		}
 
-		if argoCDAgentEnabled && !policySkipped {
-			if healErr := r.HealAgentVersionDrift(instance); healErr != nil {
+		// agentImageOverride carries the hub's live argocd-agent principal image (when found)
+		// into every managed cluster's own AddOnDeploymentConfig below. Independent of whether
+		// the ArgoCD Policy was skipped: image heal writes ADC, not Policy. skip-agent-version-heal
+		// (checked inside HealAgentVersionDrift / ExtractVariablesFromGitOpsCluster) is what
+		// opts a GitOpsCluster out of this, so a user pinning the agent image via Policy is
+		// not overwritten.
+		agentImageOverride := ""
+		if argoCDAgentEnabled {
+			img, healErr := r.HealAgentVersionDrift(instance)
+			if healErr != nil {
 				klog.Warningf("agent version drift heal failed for %s/%s: %v",
 					instance.Namespace, instance.Name, healErr)
 			}
+			agentImageOverride = img
 		}
 
 		// Track addon creation results
@@ -1232,7 +1240,7 @@ func (r *ReconcileGitOpsCluster) reconcileGitOpsCluster(
 
 			clusterFailed := false
 
-			err = r.CreateAddOnDeploymentConfig(instance, managedCluster)
+			err = r.CreateAddOnDeploymentConfig(instance, managedCluster, agentImageOverride)
 			if err != nil {
 				klog.Errorf("failed to create AddOnDeploymentConfig for managed cluster %s: %v", managedCluster.Name, err)
 				configFailures = append(configFailures, managedCluster.Name)

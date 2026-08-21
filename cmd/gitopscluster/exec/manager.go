@@ -19,6 +19,7 @@ import (
 	"os"
 
 	routev1 "github.com/openshift/api/route/v1"
+	imageregistryv1alpha1 "github.com/stolostron/cluster-lifecycle-api/imageregistry/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -152,6 +153,12 @@ func RunManager() {
 		os.Exit(1)
 	}
 
+	// Setup ManagedClusterImageRegistry Scheme for manager
+	if err := imageregistryv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		klog.Error(err, "")
+		os.Exit(1)
+	}
+
 	// Setup all Controllers
 	// Note: Pre-setup tasks (namespace, RBAC, secrets) are now handled by the controller itself during reconciliation
 	if err := controller.AddGitOpsClusterToManager(mgr); err != nil {
@@ -166,6 +173,9 @@ func RunManager() {
 
 	klog.Info("Detecting ACM managedServiceAccount API...")
 	utils.DetectManagedServiceAccount(sig, mgr.GetAPIReader())
+
+	klog.Info("Detecting ACM managedClusterImageRegistry API...")
+	utils.DetectManagedClusterImageRegistry(sig, mgr.GetAPIReader())
 
 	klog.Info("Starting the Cmd.")
 

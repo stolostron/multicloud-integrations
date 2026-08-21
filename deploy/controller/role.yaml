@@ -183,3 +183,14 @@ rules:
       - route.openshift.io
     resources:
       - routes
+  - verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+    apiGroups:
+      - imageregistry.open-cluster-management.io
+    resources:
+      - managedclusterimageregistries
+      - managedclusterimageregistries/finalizers
