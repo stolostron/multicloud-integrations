@@ -141,7 +141,8 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 		Version: "v1alpha1",
 		Kind:    "Application",
 	})
-	newApp.SetNamespace(application.GetNamespace())
+	targetNamespace := generateAppNamespace(application.GetNamespace(), application.GetAnnotations())
+	newApp.SetNamespace(targetNamespace)
 	newApp.SetName(application.GetName())
 	newApp.SetFinalizers(application.GetFinalizers())
 
@@ -158,7 +159,7 @@ func prepareApplicationForWorkPayload(application *unstructured.Unstructured) un
 			// the user defined destination namespace is respected.
 			// set the resources destination namespace to the app namespace only if the destination namespace is not set
 			if namespace, ok := destination["namespace"].(string); ok && len(namespace) == 0 {
-				destination["namespace"] = application.GetNamespace()
+				destination["namespace"] = targetNamespace
 			}
 			// always set for in-cluster destination
 			destination["server"] = KubernetesInternalAPIServerAddr
