@@ -524,8 +524,8 @@ open-cluster-management.io/managed-serviceaccount v0.7.0 h1:OShodBB3i+rMXjR9xEF6
 open-cluster-management.io/managed-serviceaccount v0.7.0/go.mod h1:NNKqC+cePQ9HH0r7mb9CYSk/hXGsNYu9+K4YfcZTwAk=
 open-cluster-management.io/sdk-go v1.0.1-0.20250924025914-9633a0b7fe1b h1:57KCJ0dym5/7XL9v/bQ5pJGbpupDNUnFqa0EzOdGCik=
 open-cluster-management.io/sdk-go v1.0.1-0.20250924025914-9633a0b7fe1b/go.mod h1:DH4EMNDMiousmaj+noHYQxm48T+dbogiAfALhDnrjMg=
-oras.land/oras-go/v2 v2.6.0 h1:X4ELRsiGkrbeox69+9tzTu492FMUu7zJQW6eJU+I2oc=
-oras.land/oras-go/v2 v2.6.0/go.mod h1:magiQDfG6H1O9APp+rOsvCPcW1GD2MM7vgnKY0Y+u1o=
+oras.land/oras-go/v2 v2.6.2 h1:N04RXngAp1LJKTG6ifz3xHPipasEkWr+hFmInja5YKo=
+oras.land/oras-go/v2 v2.6.2/go.mod h1:PlTtg4JTDJkDe8yVHpM2wz7/YDc00GVas+i4jAW2TZ4=
 sigs.k8s.io/controller-runtime v0.21.0 h1:CYfjpEuicjUecRk+KAeyYh+ouUBn4llGyDYytIGcJS8=
 sigs.k8s.io/controller-runtime v0.21.0/go.mod h1:OSg14+F65eWqIu4DceX7k/+QRAbTTvxeQSNSOQpukWM=
 sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 h1:gBQPwqORJ8d8/YNZWEjoZs7npUVDpVXUUOFfW6CgAqE=
