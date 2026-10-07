@@ -1,0 +1,115 @@
+<mxfile host="Electron" agent="cursor-agent">
+  <diagram id="gitops-addon-disconnected-mcir" name="Architecture and Workflow">
+    <mxGraphModel dx="1414" dy="786" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=18;fontStyle=1;align=center;verticalAlign=middle;" value="GitOps Addon in a Disconnected Environment — Image Mirroring: High-Level Workflow" vertex="1">
+          <mxGeometry height="34" width="1180" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="swimHub" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;fontSize=14;fontStyle=1;spacingLeft=12;spacingTop=8;" value="Hub Cluster" vertex="1">
+          <mxGeometry height="520" width="620" x="20" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="swimSpoke" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;fontSize=14;fontStyle=1;spacingLeft=12;spacingTop=8;" value="Managed Cluster (disconnected)" vertex="1">
+          <mxGeometry height="430" width="520" x="680" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="H1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="GitOpsCluster CR" vertex="1">
+          <mxGeometry height="50" width="250" x="50" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="H2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="ManagedClusterImageRegistry CR&#xa;(opted in to mirroring)" vertex="1">
+          <mxGeometry height="50" width="270" x="340" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="H6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#fff2cc;strokeColor=#d6b656;" value="Hub ArgoCD Agent Principal Pod&lt;br&gt;(hub&#39;s own live image)" vertex="1">
+          <mxGeometry height="50" width="250" x="50" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="H3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#fff2cc;strokeColor=#d6b656;" value="Placement" vertex="1">
+          <mxGeometry height="50" width="270" x="340" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="H4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;fillColor=#ffe6cc;strokeColor=#d79b00;" value="GitOpsCluster Controller" vertex="1">
+          <mxGeometry height="50" width="250" x="50" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="H5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;fillColor=#ffe6cc;strokeColor=#d79b00;" value="Image Mirroring Controller" vertex="1">
+          <mxGeometry height="50" width="270" x="340" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="H7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#fff2cc;strokeColor=#d6b656;" value="Addon Configuration (gitops-addon)" vertex="1">
+          <mxGeometry height="50" width="560" x="50" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="H8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#f8cecc;strokeColor=#b85450;" value="ACM Addon Framework" vertex="1">
+          <mxGeometry height="50" width="560" x="50" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="H9" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#fff2cc;strokeColor=#d6b656;" value="Hub ArgoCD Agent Principal Service&lt;div&gt;(connection endpoint)&lt;/div&gt;" vertex="1">
+          <mxGeometry height="50" width="560" x="50" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="M1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontStyle=1;align=center;verticalAlign=middle;arcSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" value="GitOps Addon Agent" vertex="1">
+          <mxGeometry height="50" width="460" x="710" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="M2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" value="Installs GitOps Operator" vertex="1">
+          <mxGeometry height="50" width="460" x="710" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="M4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" value="ArgoCD Instance" vertex="1">
+          <mxGeometry height="50" width="460" x="710" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="M8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;align=center;verticalAlign=middle;arcSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" value="ArgoCD Agent" vertex="1">
+          <mxGeometry height="50" width="460" x="710" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="H1" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H4" value="reconcile">
+          <mxGeometry relative="1" x="-0.6364" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="H6" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H4" value="reads live agent image">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="H4" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" target="H7" value="writes default + agent image values">
+          <mxGeometry relative="1" x="-0.2263" y="-5" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="H2" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H5" value="opt-in reconcile">
+          <mxGeometry relative="1" x="-0.6364" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="H3" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H5" value="selects clusters">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="H5" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H7" value="rewrites image values to mirror">
+          <mxGeometry relative="1" x="-0.6161" y="15" as="geometry">
+            <mxPoint y="-1" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="H7" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="H8" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="H8" style="html=1;endArrow=block;strokeColor=#1a73e8;strokeWidth=2;fontSize=10;fontColor=#1a73e8;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="M1" value="delivers configuration">
+          <mxGeometry relative="1" x="-0.1095" y="-28" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="M1" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="M2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="M2" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="M4" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="1" source="M4" style="html=1;endArrow=block;elbow=vertical;strokeColor=#000000;fontSize=10;" target="M8" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" edge="1" parent="1" source="M8" style="html=1;endArrow=block;dashed=1;strokeColor=#cc0000;strokeWidth=2;fontSize=10;fontColor=#cc0000;exitX=0.289;exitY=1.08;exitDx=0;exitDy=0;exitPerimeter=0;" target="H9" value="connects back to hub">
+          <mxGeometry relative="1" x="-0.5347" y="20" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" edge="1" parent="1" source="M4" style="html=1;endArrow=block;strokeColor=#2e7d32;strokeWidth=2;fontSize=10;fontColor=#2e7d32;" value="pulls images">
+          <mxGeometry relative="1" x="0.2381" as="geometry">
+            <mxPoint as="offset" />
+            <mxPoint x="940" y="530" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="zj7Qa0SYrO8tANHLTire-1" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" value="&lt;span style=&quot;font-weight: 700;&quot;&gt;local image Registry on bastion host&lt;/span&gt;" vertex="1">
+          <mxGeometry height="80" width="260" x="810" y="530" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
