@@ -22,7 +22,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -44,7 +44,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/stolostron/search-v2-api/graph/model"
-	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	gitopsclusterV1beta1 "open-cluster-management.io/multicloud-integrations/pkg/apis/apps/v1beta1"
 	appsetreport "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
 	"open-cluster-management.io/multicloud-integrations/pkg/pullmodelconfig"
@@ -82,7 +81,7 @@ func (c *HTTPDataSender) Send(httpClient *http.Client, req *http.Request) (map[s
 		}
 	}()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
 		return respData, err
@@ -202,31 +201,21 @@ func (r *GitOpsSyncResource) syncResources() error {
 	appReportsMap := make(map[string]*appsetreport.MulticlusterApplicationSetReport)
 
 	// Query search for argo apps
-	// get all managed clusters not containing the local-cluster: true label
-	managedclusters, err := getAllManagedClusterNames(r.Client)
-	if err != nil {
-		return err
+	// Request and process up to r.SearchBatchSize apps at a time
+	offset := 0
+	limit := r.SearchBatchSize
+	if limit == 0 {
+		limit = 1
+		klog.Info("SearchBatchSize is 0, setting limit to 1")
 	}
 
-	mangedClusterTotal := len(managedclusters)
-	iManagedCluster := 0
+	for {
+		klog.Info("Requesting apps, offset: %v, limit: %v", offset, limit)
 
-	for iManagedCluster < mangedClusterTotal {
-		queryManagedClusters := []clusterv1.ManagedCluster{}
-		queryManagedClustersStr := []string{}
-
-		for len(queryManagedClusters) < r.SearchBatchSize && iManagedCluster < mangedClusterTotal {
-			// Ignore local-cluster. managedclusters only include all managed clusters not containing the local-cluster: true label
-			queryManagedClusters = append(queryManagedClusters, managedclusters[iManagedCluster])
-			queryManagedClustersStr = append(queryManagedClustersStr, managedclusters[iManagedCluster].Name)
-
-			iManagedCluster++
-		}
-
-		apps, related, err := r.getArgoAppsFromSearch(queryManagedClustersStr, "", "")
+		apps, related, err := r.getArgoAppsFromSearch("", "", offset, limit)
 		if err != nil {
 			klog.Info(err.Error())
-			continue
+			break
 		}
 
 		for _, app := range apps {
@@ -282,34 +271,30 @@ func (r *GitOpsSyncResource) syncResources() error {
 				klog.Infof("resources for app (%v/%v): %v", itemmap["namespace"], itemmap["name"], report.Statuses.Resources)
 			}
 		}
+
+		if len(apps) < limit {
+			break
+		}
+
+		// Slow down the request rate to reduce the load on the search-api.
+		time.Sleep(10 * time.Second)
+		offset += limit
 	}
 
 	// Write reports
 	for _, v := range appReportsMap {
-		if err = r.writeAppSetResourceFile(v); err != nil {
+		if err := r.writeAppSetResourceFile(v); err != nil {
 			return err
 		}
 	}
 
+	// If we didn't find any appsets, sleep an additional 5 minutes to reduce the load on the search-api.
+	if len(appReportsMap) == 0 {
+		klog.Info(" No appset reports found. Sleeping for 5 minutes to reduce the search-api load.")
+		time.Sleep(5 * time.Minute)
+	}
+
 	return nil
-}
-
-func getAllManagedClusterNames(c client.Client) ([]clusterv1.ManagedCluster, error) {
-	managedclusters := &clusterv1.ManagedClusterList{}
-	if err := c.List(context.TODO(), managedclusters, &client.ListOptions{}); err != nil {
-		return nil, err
-	}
-
-	filteredClusters := []clusterv1.ManagedCluster{}
-
-	for _, cluster := range managedclusters.Items {
-		if value, exists := cluster.Labels["local-cluster"]; exists && value == "true" {
-			continue
-		}
-		filteredClusters = append(filteredClusters, cluster)
-	}
-
-	return filteredClusters, nil
 }
 
 func (r *GitOpsSyncResource) getSearchURL() (string, error) {
@@ -333,9 +318,9 @@ func (r *GitOpsSyncResource) getSearchURL() (string, error) {
 		getEnv(ClusterRootDomainEnv, ClusterRootDomainDefault), targetPort), nil
 }
 
-func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, appsetName string) ([]interface{}, []interface{}, error) {
-	klog.Info(fmt.Sprintf("Start getting argo application for cluster: %v, app: %v/%v", clusters, appsetNs, appsetName))
-	defer klog.Info(fmt.Sprintf("Finished getting argo application for cluster: %v, app: %v/%v", clusters, appsetNs, appsetName))
+func (r *GitOpsSyncResource) getArgoAppsFromSearch(appsetNs, appsetName string, offset int, limit int) ([]interface{}, []interface{}, error) {
+	klog.Info(fmt.Sprintf("Start getting argo application for app: %v/%v, offset: %v, limit: %v", appsetNs, appsetName, offset, limit))
+	defer klog.Info(fmt.Sprintf("Finished getting argo application for app: %v/%v, offset: %v, limit: %v", appsetNs, appsetName, offset, limit))
 
 	httpClient := http.DefaultClient
 
@@ -363,19 +348,12 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 	if err != nil {
 		return nil, nil, err
 	}
-
-	klog.Info(fmt.Sprintf("search url: %v", routeURL))
-
-	clusterFilter := []*string{}
-	for i := range clusters {
-		clusterFilter = append(clusterFilter, &clusters[i])
-	}
+	klog.V(1).Info(fmt.Sprintf("search url: %v", routeURL))
 
 	// Build search body
 	kind := "Application"
 	apigroup := "argoproj.io"
 	label := "apps.open-cluster-management.io/application-set=true"
-	limit := int(-1)
 	searchInput := &model.SearchInput{
 		Filters: []*model.SearchFilter{
 			{
@@ -390,12 +368,9 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(clusters []string, appsetNs, 
 				Property: "label",
 				Values:   []*string{&label},
 			},
-			{
-				Property: "cluster",
-				Values:   clusterFilter,
-			},
 		},
-		Limit: &limit,
+		Limit:  &limit,
+		Offset: &offset,
 	}
 
 	if appsetNs != "" && appsetName != "" {
@@ -532,7 +507,7 @@ func (r *GitOpsSyncResource) writeAppSetResourceFile(report *appsetreport.Multic
 	reportName := filepath.Join(r.ResourceDir, report.Name+".yaml")
 	klog.Info(fmt.Sprintf("writing appset report: %v", reportName))
 
-	if err := ioutil.WriteFile(reportName, reportJSON, 0600); err != nil {
+	if err := os.WriteFile(reportName, reportJSON, 0600); err != nil {
 		klog.Error(fmt.Sprintf("failed to write appset report yaml file: %v", reportName), err)
 		return err
 	}
