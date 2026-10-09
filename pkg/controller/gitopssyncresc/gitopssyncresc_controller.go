@@ -205,7 +205,7 @@ func (r *GitOpsSyncResource) syncResources() error {
 	offset := 0
 	limit := r.SearchBatchSize
 	for {
-		klog.Info(fmt.Sprintf("requesting apps, offset: %v, limit: %v", offset, limit))
+		klog.Info("Requesting apps, offset: %v, limit: %v", offset, limit)
 
 		apps, related, err := r.getArgoAppsFromSearch("", "", offset, limit)
 		if err != nil {
