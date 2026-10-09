@@ -345,16 +345,10 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(appsetNs, appsetName string, 
 	}
 	klog.V(1).Info(fmt.Sprintf("search url: %v", routeURL))
 
-	clusterFilter := []*string{}
-	for i := range clusters {
-		clusterFilter = append(clusterFilter, &clusters[i])
-	}
-
 	// Build search body
 	kind := "Application"
 	apigroup := "argoproj.io"
 	label := "apps.open-cluster-management.io/application-set=true"
-	limit := int(-1)
 	searchInput := &model.SearchInput{
 		Filters: []*model.SearchFilter{
 			{
@@ -369,12 +363,9 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(appsetNs, appsetName string, 
 				Property: "label",
 				Values:   []*string{&label},
 			},
-			{
-				Property: "cluster",
-				Values:   clusterFilter,
-			},
 		},
-		Limit: &limit,
+		Limit:  &limit,
+		Offset: &offset,
 	}
 
 	if appsetNs != "" && appsetName != "" {
