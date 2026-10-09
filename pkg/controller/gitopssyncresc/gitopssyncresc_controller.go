@@ -204,6 +204,11 @@ func (r *GitOpsSyncResource) syncResources() error {
 	// Request and process up to r.SearchBatchSize apps at a time
 	offset := 0
 	limit := r.SearchBatchSize
+	if limit == 0 {
+		limit = 1
+		klog.Info("SearchBatchSize is 0, setting limit to 1")
+	}
+
 	for {
 		klog.Info("Requesting apps, offset: %v, limit: %v", offset, limit)
 
