@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"strings"
 
@@ -33,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsetreport "open-cluster-management.io/multicloud-integrations/pkg/apis/appsetreport/v1alpha1"
@@ -162,10 +162,19 @@ const responseData1 = `
 `
 
 type TestDataSender struct {
-	data string
+	data     string
+	requests [][]byte
 }
 
 func (c *TestDataSender) Send(httpClient *http.Client, req *http.Request) (map[string]interface{}, error) {
+	if req != nil && req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		c.requests = append(c.requests, body)
+	}
+
 	respData := make(map[string]interface{})
 
 	if err := json.Unmarshal([]byte(c.data), &respData); err != nil {
@@ -367,48 +376,30 @@ func TestGitOpsSyncResource_syncResources(t *testing.T) {
 		return
 	}
 
-	m1 := &clusterv1.ManagedCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster1"},
-	}
-
 	tests := []struct {
 		name           string
-		managedcluster *clusterv1.ManagedCluster
 		data           string
 		wantReportfile string
 		wantReport     *appsetreport.MulticlusterApplicationSetReport
 		wantErr        bool
 	}{
 		{
-			name:           "No managed cluster",
-			data:           responseData1,
-			wantReportfile: "openshift-gitops_nginx-app-set.yaml",
-		},
-		{
-			name:           "One managed cluster",
-			managedcluster: m1,
+			name:           "writes appset report from search",
 			data:           responseData1,
 			wantReportfile: "openshift-gitops_nginx-app-set.yaml",
 			wantReport:     report1,
-			wantErr:        false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			sender := &TestDataSender{data: tt.data}
 			r := &GitOpsSyncResource{
 				Client:             c,
 				Interval:           60,
 				SearchSyncInterval: 60,
 				SearchBatchSize:    5,
 				ResourceDir:        "/tmp",
-				DataSender:         &TestDataSender{tt.data},
-			}
-
-			if tt.managedcluster != nil {
-				if err := c.Create(context.TODO(), tt.managedcluster, &client.CreateOptions{}); err != nil {
-					t.Errorf("GitOpsSyncResource.syncResources() error creating managed cluster = %v", err)
-					return
-				}
+				DataSender:         sender,
 			}
 
 			reportfilePath := "/tmp/" + tt.wantReportfile
@@ -422,6 +413,12 @@ func TestGitOpsSyncResource_syncResources(t *testing.T) {
 				t.Errorf("GitOpsSyncResource.syncResources() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
+
+			if len(sender.requests) != 1 {
+				t.Errorf("GitOpsSyncResource.syncResources() search requests = %d, want 1", len(sender.requests))
+				return
+			}
+			assertSearchPage(t, sender.requests[0], 0, r.SearchBatchSize)
 
 			if tt.wantReport != nil {
 				if _, err := os.Stat(reportfilePath); err != nil {
@@ -522,9 +519,46 @@ func getReport() *appsetreport.MulticlusterApplicationSetReport {
 	}
 }
 
+func assertSearchPage(t *testing.T, body []byte, offset, limit int) {
+	t.Helper()
+
+	var query map[string]interface{}
+	if err := json.Unmarshal(body, &query); err != nil {
+		t.Fatalf("search request is not json: %v", err)
+	}
+
+	variables, _ := query["variables"].(map[string]interface{})
+	input, _ := variables["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected one search input, got %#v", variables["input"])
+	}
+
+	in, _ := input[0].(map[string]interface{})
+	if got := int(in["offset"].(float64)); got != offset {
+		t.Errorf("offset = %d, want %d", got, offset)
+	}
+	if got := int(in["limit"].(float64)); got != limit {
+		t.Errorf("limit = %d, want %d", got, limit)
+	}
+
+	filters, _ := in["filters"].([]interface{})
+	props := map[string]bool{}
+	for _, f := range filters {
+		fm := f.(map[string]interface{})
+		props[fm["property"].(string)] = true
+	}
+	for _, want := range []string{"kind", "apigroup", "label"} {
+		if !props[want] {
+			t.Errorf("missing filter %q in %#v", want, filters)
+		}
+	}
+	if props["cluster"] {
+		t.Errorf("search request filters by cluster: %#v", filters)
+	}
+}
+
 func initClient() client.Client {
 	scheme := runtime.NewScheme()
-	_ = clusterv1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = appsetreport.AddToScheme(scheme)
 
