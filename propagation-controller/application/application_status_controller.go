@@ -131,6 +131,15 @@ func (r *ApplicationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				return ctrl.Result{}, err
 			}
 
+			// forceUpdate is set when this reconcile has already mutated and persisted
+			// application.Object's status directly (outside of the oldJSON/newJSON diff
+			// below), so the final update must not be skipped just because newStatus
+			// happens to equal the pre-mutation oldStatus snapshot. Without this, the
+			// live object can be left stuck on the intermediate value: see the
+			// "simulate Progressing" write just below, whose own forced write isn't
+			// reflected in oldJSON (captured before it ran).
+			forceUpdate := false
+
 			if cc.HealthStatus != "" {
 				if cc.HealthStatus == "Healthy" {
 					// If the health status is Healthy then simulate Progressing first then set to Healthy for ApplicationSet controller
@@ -147,6 +156,15 @@ func (r *ApplicationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 						log.Error(err, "unable to update Application")
 						return ctrl.Result{}, err
 					}
+
+					// The write above already persisted "Progressing" to the live object,
+					// but oldJSON was captured before it ran, so the diff below can't see
+					// it. Force the final write through below so the object is actually
+					// restored to "Healthy" instead of being silently left on
+					// "Progressing" whenever newStatus happens to equal the pre-mutation
+					// oldStatus (e.g. a later reconcile of the same already-Healthy app,
+					// triggered by an unrelated sibling app/cluster in the same report).
+					forceUpdate = true
 				}
 
 				if err := unstructured.SetNestedField(newStatus, cc.HealthStatus, "health", "status"); err != nil {
@@ -226,7 +244,7 @@ func (r *ApplicationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				return ctrl.Result{}, err
 			}
 
-			if !bytes.Equal(oldJSON, newJSON) {
+			if forceUpdate || !bytes.Equal(oldJSON, newJSON) {
 				err := unstructured.SetNestedField(application.Object, newStatus, "status")
 				if err != nil {
 					log.Error(err, "unable to set application status")
