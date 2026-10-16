@@ -11,6 +11,7 @@ require (
 	github.com/openshift/library-go v0.0.0-20251029104758-277736d6f195
 	github.com/spf13/pflag v1.0.10
 	github.com/stolostron/cluster-lifecycle-api v0.0.0-20260330032750-43755d6ceb09
+	github.com/stolostron/search-v2-api v0.0.0-20260928164835-4432ff203013
 	github.com/stretchr/testify v1.11.1
 	helm.sh/helm/v3 v3.21.0
 	k8s.io/api v0.35.3
@@ -98,7 +99,6 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
-	github.com/stolostron/search-v2-api v0.0.0-20221004171925-9c1d91614943
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
