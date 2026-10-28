@@ -212,7 +212,7 @@ func (r *GitOpsSyncResource) syncResources() error {
 	for {
 		klog.Infof("Requesting apps, offset: %v, limit: %v", offset, limit)
 
-		apps, related, err := r.getArgoAppsFromSearch("", "", offset, limit)
+		apps, err := r.getArgoAppsFromSearch(offset, limit)
 		if err != nil {
 			klog.Info(err.Error())
 			break
@@ -259,13 +259,29 @@ func (r *GitOpsSyncResource) syncResources() error {
 				r.createOrUpdateAppSetReportConditions(report, itemmap)
 
 				if len(report.Statuses.Resources) == 0 {
-					// Related resources that has this app as parent
-					relatedResources := getResourceMapList(related, uid)
+					// The batched app-listing query above intentionally shares a single
+					// "limit" with the search-api's *related* resource query (see
+					// getAppRelatedResources for why) -- that limit is sized for paging
+					// through Applications, not for how many related rows a single app's
+					// full resource tree may have, so the batched response's own "related"
+					// data cannot be trusted here. Issue one more, narrowly-filtered,
+					// unlimited query scoped to just this app to get its real related set.
+					namespace, _ := itemmap["namespace"].(string)
+					name, _ := itemmap["name"].(string)
 
-					// Unhealthy resources for this app
-					unhealthyResources := getMissingResourceMapList(itemmap)
+					related, relErr := r.getAppRelatedResources(namespace, name, managedClusterName)
+					if relErr != nil {
+						klog.Errorf("failed to get related resources for app %v/%v on cluster %v: %v",
+							namespace, name, managedClusterName, relErr)
+					} else {
+						// Related resources that has this app as parent
+						relatedResources := getResourceMapList(related, uid)
 
-					report.Statuses.Resources = append(relatedResources, unhealthyResources...)
+						// Unhealthy resources for this app
+						unhealthyResources := getMissingResourceMapList(itemmap)
+
+						report.Statuses.Resources = append(relatedResources, unhealthyResources...)
+					}
 				}
 
 				klog.Infof("resources for app (%v/%v): %v", itemmap["namespace"], itemmap["name"], report.Statuses.Resources)
@@ -318,10 +334,81 @@ func (r *GitOpsSyncResource) getSearchURL() (string, error) {
 		getEnv(ClusterRootDomainEnv, ClusterRootDomainDefault), targetPort), nil
 }
 
-func (r *GitOpsSyncResource) getArgoAppsFromSearch(appsetNs, appsetName string, offset int, limit int) ([]interface{}, []interface{}, error) {
-	klog.Info(fmt.Sprintf("Start getting argo application for app: %v/%v, offset: %v, limit: %v", appsetNs, appsetName, offset, limit))
-	defer klog.Info(fmt.Sprintf("Finished getting argo application for app: %v/%v, offset: %v, limit: %v", appsetNs, appsetName, offset, limit))
+// baseAppSearchFilters returns the filters shared by every search-api query this controller
+// issues: ApplicationSet-owned Argo Applications only.
+func baseAppSearchFilters() []*model.SearchFilter {
+	kind := "Application"
+	apigroup := "argoproj.io"
+	label := "apps.open-cluster-management.io/application-set=true"
 
+	return []*model.SearchFilter{
+		{
+			Property: "kind",
+			Values:   []*string{&kind},
+		},
+		{
+			Property: "apigroup",
+			Values:   []*string{&apigroup},
+		},
+		{
+			Property: "label",
+			Values:   []*string{&label},
+		},
+	}
+}
+
+// getArgoAppsFromSearch pages through ApplicationSet-owned Argo Applications across the fleet,
+// up to `limit` apps starting at `offset`. It intentionally does NOT request/use the "related"
+// field: search-v2-api's related-resource query reuses this same `limit` as a hard cap on the
+// *total* number of related rows returned across every app matched by this request combined (see
+// buildQueryToGetItemsFromUIDs/setLimit in search-v2-api's pkg/resolver), with no deterministic
+// ordering. A `limit` sized for paging through Applications (e.g. SearchBatchSize, default 5) is
+// far too small to hold even one app's full related-resource set, so any "related" data returned
+// alongside a batched, multi-app query like this one cannot be trusted. Use
+// getAppRelatedResources for an individual app's real related resources instead.
+func (r *GitOpsSyncResource) getArgoAppsFromSearch(offset, limit int) ([]interface{}, error) {
+	klog.Info(fmt.Sprintf("Start getting argo applications, offset: %v, limit: %v", offset, limit))
+	defer klog.Info(fmt.Sprintf("Finished getting argo applications, offset: %v, limit: %v", offset, limit))
+
+	searchInput := &model.SearchInput{
+		Filters: baseAppSearchFilters(),
+		Limit:   &limit,
+		Offset:  &offset,
+	}
+
+	items, _, err := r.doSearch(searchInput)
+
+	return items, err
+}
+
+// getAppRelatedResources fetches the real, untruncated related-resource set for exactly one
+// Application, identified by namespace+name+cluster (the same scoping a direct, single-app search
+// query would use). Limit is set to -1 (unlimited) -- safe here specifically because the query is
+// already narrowed to one app, so its related-resource set is inherently bounded, unlike the
+// fleet-wide listing query in getArgoAppsFromSearch.
+func (r *GitOpsSyncResource) getAppRelatedResources(namespace, name, cluster string) ([]interface{}, error) {
+	klog.Info(fmt.Sprintf("Start getting related resources for app: %v/%v on cluster %v", namespace, name, cluster))
+	defer klog.Info(fmt.Sprintf("Finished getting related resources for app: %v/%v on cluster %v", namespace, name, cluster))
+
+	noLimit := -1
+	filters := append(baseAppSearchFilters(),
+		&model.SearchFilter{Property: "namespace", Values: []*string{&namespace}},
+		&model.SearchFilter{Property: "name", Values: []*string{&name}},
+		&model.SearchFilter{Property: "cluster", Values: []*string{&cluster}},
+	)
+	searchInput := &model.SearchInput{
+		Filters: filters,
+		Limit:   &noLimit,
+	}
+
+	_, related, err := r.doSearch(searchInput)
+
+	return related, err
+}
+
+// doSearch POSTs the given search-api GraphQL query and returns the raw "items" and "related"
+// arrays from the first (and only) search result.
+func (r *GitOpsSyncResource) doSearch(searchInput *model.SearchInput) ([]interface{}, []interface{}, error) {
 	httpClient := http.DefaultClient
 
 	transport := &http.Transport{
@@ -349,34 +436,6 @@ func (r *GitOpsSyncResource) getArgoAppsFromSearch(appsetNs, appsetName string, 
 		return nil, nil, err
 	}
 	klog.V(1).Info(fmt.Sprintf("search url: %v", routeURL))
-
-	// Build search body
-	kind := "Application"
-	apigroup := "argoproj.io"
-	label := "apps.open-cluster-management.io/application-set=true"
-	searchInput := &model.SearchInput{
-		Filters: []*model.SearchFilter{
-			{
-				Property: "kind",
-				Values:   []*string{&kind},
-			},
-			{
-				Property: "apigroup",
-				Values:   []*string{&apigroup},
-			},
-			{
-				Property: "label",
-				Values:   []*string{&label},
-			},
-		},
-		Limit:  &limit,
-		Offset: &offset,
-	}
-
-	if appsetNs != "" && appsetName != "" {
-		searchInput.Filters = append(searchInput.Filters, &model.SearchFilter{Property: "namespace", Values: []*string{&appsetNs}})
-		searchInput.Filters = append(searchInput.Filters, &model.SearchFilter{Property: "name", Values: []*string{&appsetName}})
-	}
 
 	searchVars := make(map[string]interface{})
 	searchVars["input"] = []*model.SearchInput{searchInput}
