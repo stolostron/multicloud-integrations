@@ -414,11 +414,15 @@ func TestGitOpsSyncResource_syncResources(t *testing.T) {
 				return
 			}
 
-			if len(sender.requests) != 1 {
-				t.Errorf("GitOpsSyncResource.syncResources() search requests = %d, want 1", len(sender.requests))
+			// One request to page through the ApplicationSet-owned Applications, plus one more,
+			// narrowly-filtered (namespace+name+cluster), unlimited request to fetch the real
+			// related-resource set for the single app found above -- see getAppRelatedResources.
+			if len(sender.requests) != 2 {
+				t.Errorf("GitOpsSyncResource.syncResources() search requests = %d, want 2", len(sender.requests))
 				return
 			}
 			assertSearchPage(t, sender.requests[0], 0, r.SearchBatchSize)
+			assertAppRelatedQuery(t, sender.requests[1], "openshift-gitops", "cluster1-nginx-app", "cluster1")
 
 			if tt.wantReport != nil {
 				if _, err := os.Stat(reportfilePath); err != nil {
@@ -554,6 +558,62 @@ func assertSearchPage(t *testing.T, body []byte, offset, limit int) {
 	}
 	if props["cluster"] {
 		t.Errorf("search request filters by cluster: %#v", filters)
+	}
+}
+
+// assertAppRelatedQuery verifies a getAppRelatedResources request: scoped to exactly one app
+// (namespace+name+cluster filters) and unlimited (limit: -1), so the search-api's shared
+// item/related limit (see getArgoAppsFromSearch's doc comment) can't truncate its related set.
+func assertAppRelatedQuery(t *testing.T, body []byte, namespace, name, cluster string) {
+	t.Helper()
+
+	var query map[string]interface{}
+	if err := json.Unmarshal(body, &query); err != nil {
+		t.Fatalf("search request is not json: %v", err)
+	}
+
+	variables, _ := query["variables"].(map[string]interface{})
+	input, _ := variables["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected one search input, got %#v", variables["input"])
+	}
+
+	in, _ := input[0].(map[string]interface{})
+
+	if got := int(in["limit"].(float64)); got != -1 {
+		t.Errorf("limit = %d, want -1 (unlimited)", got)
+	}
+
+	if _, hasOffset := in["offset"]; hasOffset {
+		t.Errorf("app-related request should not set offset, got %#v", in["offset"])
+	}
+
+	filters, _ := in["filters"].([]interface{})
+	values := map[string][]string{}
+
+	for _, f := range filters {
+		fm := f.(map[string]interface{})
+		property := fm["property"].(string)
+
+		var vals []string
+		for _, v := range fm["values"].([]interface{}) {
+			vals = append(vals, v.(string))
+		}
+
+		values[property] = vals
+	}
+
+	for _, want := range []string{"kind", "apigroup", "label", "namespace", "name", "cluster"} {
+		if _, ok := values[want]; !ok {
+			t.Errorf("missing filter %q in %#v", want, filters)
+		}
+	}
+
+	wantValue := map[string]string{"namespace": namespace, "name": name, "cluster": cluster}
+	for property, want := range wantValue {
+		if got := values[property]; len(got) != 1 || got[0] != want {
+			t.Errorf("filter %q = %v, want [%v]", property, got, want)
+		}
 	}
 }
 
