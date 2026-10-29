@@ -363,11 +363,15 @@ oc get subscription,installplan,csv -n openshift-operators | grep -i gitops
 
 ## 5. Troubleshooting
 
-> **The two issues below are the most common ones encountered when running the ArgoCD Agent
+> **The three issues below are the most common ones encountered when running the ArgoCD Agent
 > Pull Model on managed clusters after setting up `GitopsAddon` in a disconnected environment.**
-> Both come from assumptions in the agent's connectivity and certificate handling that don't hold
-> once the managed cluster has no direct route to the hub's public-facing endpoints. If the agent
-> on a disconnected managed cluster isn't connecting, start here.
+> Issues 1 and 2 come from assumptions in the agent's connectivity and certificate handling that
+> don't hold once the managed cluster has no direct route to the hub's public-facing endpoints.
+> Issue 3 is a hub-side TLS misconfiguration that isn't actually specific to disconnected
+> environments, but is included here because it surfaces through the exact same symptom (the
+> agent failing to authenticate to the principal) and is commonly hit while working through this
+> same troubleshooting flow. If the agent on a disconnected managed cluster isn't connecting,
+> start here.
 
 ### Common issue 1: ArgoCD agent can't reach the principal because its Route hostname isn't resolvable from the managed cluster
 
@@ -531,6 +535,119 @@ oc rollout status deployment -n openshift-gitops -l app.kubernetes.io/component=
 
 The agent's next reconnect attempt succeeds once the new principal pod is serving the renewed
 certificate.
+
+---
+
+### Common issue 3: ArgoCD agent fails TLS handshake against a self-signed `argocd-agent-principal--generated` certificate
+
+**Symptom** — on the managed cluster, two different errors in sequence:
+
+```text
+# oc logs acm-openshift-gitops-agent-agent-56d4645f7d-w2f7d -n openshift-gitops
+
+time="2026-10-27T18:22:35Z" level=info msg="Outgoing unary call to /authapi.Authentication/Authenticate" module=Connector
+time="2026-10-27T18:22:35Z" level=warning msg="Auth failure: rpc error: code = Unavailable desc = connection error: desc = \"transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate has expired or is not yet valid: current time 2026-10-27T18:22:35Z is after 2026-10-27T15:25:44Z\" (retrying in 6.191736422s)"
+```
+
+After restarting the principal pod on the hub (which appears to "refresh" the certificate), the
+error changes to a hostname mismatch instead of an expiry:
+
+```text
+time="2026-10-27T18:29:11Z" level=info msg="Outgoing unary call to /authapi.Authentication/Authenticate" module=Connector
+time="2026-10-27T18:29:11Z" level=warning msg="Auth failure: rpc error: code = Unavailable desc = connection error: desc = \"transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate is valid for argocd-agent-principal--generated, not openshift-gitops-agent-principal-argocd-principal.apps.sbox.ocphub.digital.mod.uk\" (retrying in 26.623333274s)"
+```
+
+The principal's own log confirms it, right at startup:
+
+```text
+# oc logs <principal-pod> -n openshift-gitops
+time="..." level=info msg="Using one-time generated TLS certificate for gRPC"
+```
+
+**Root cause**
+
+The principal is **not** using the real, hub-controller-managed `argocd-agent-principal-tls`
+secret at all — it's falling back to an insecure, volatile, self-signed certificate that upstream
+argocd-agent generates in-process for testing/dev use only.
+
+`argocd-agent-principal--generated` (note the literal double dash — that's a hardcoded string in
+upstream argocd-agent's source, not a typo introduced anywhere in this feature's code) is the
+fixed server name passed to `principal.WithGeneratedTLS(...)` in `cmd/argocd-agent/principal.go`.
+That function builds a fully self-signed certificate (issuer == subject, not chained to the real
+`argocd-agent-ca`) that is only valid from `now-1h` to `now+1h` — a 2-hour window from the moment
+the principal pod starts. That explains both log lines above:
+
+- The first error ("expired") fires once the principal pod has been running longer than ~2 hours
+  since that self-signed cert was generated at startup.
+- Restarting the principal just generates a *new* 2-hour self-signed cert with the exact same
+  hardcoded wrong name — so the second error (hostname mismatch) appears immediately afterward,
+  and will keep appearing after every future restart too, never resolving on its own.
+
+This insecure fallback is only used when the env var `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE`
+is `true` on the **GitOps operator's own controller-manager Deployment** (there is no `ArgoCD` CR
+spec field for this — it is purely an operator-level setting, propagated into the
+`<argocd-cr-name>-agent-principal-params` ConfigMap and from there into the principal container's
+own environment). By default this is `false`, so if a hub hits this, something external set it to
+`true` — most commonly a manual `oc set env` on the operator Deployment, or an OLM
+`Subscription.spec.config.env` override, sometimes added as a well-intentioned but incorrect
+attempt to work around an earlier, unrelated TLS problem.
+
+> **Why a hostname mismatch and not "unknown certificate authority":** the agent is correctly
+> configured to trust the real `argocd-agent-ca` and to expect the Route hostname as the TLS
+> `ServerName` — so you might expect a certificate-authority error first, since the self-signed
+> cert was never signed by that CA. But Go's `crypto/x509.Certificate.Verify()` checks the
+> hostname *before* it builds the trust chain. The hostname check fails and aborts the handshake
+> immediately, so the (also-failing) CA-trust check never gets a chance to run. A clean hostname
+> error here is consistent with this root cause, not evidence against it.
+
+**Solution**
+
+**Step 1 — Confirm the principal is really on the insecure generated-cert path**
+
+```bash
+oc logs -n openshift-gitops -l app.kubernetes.io/component=principal | grep -i "generated TLS certificate"
+# "Using one-time generated TLS certificate for gRPC"   <- confirms this issue
+```
+
+**Step 2 — Find where `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE` is overridden**
+
+```bash
+oc get subscription -n openshift-gitops-operator -o yaml | grep -A3 ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE
+oc get deployment -n openshift-gitops-operator -o yaml | grep -A3 ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE
+```
+
+**Step 3 — Remove the override (or set it explicitly to `"false"`)**
+
+- If it's on the `Subscription`, remove the `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE` entry
+  from `spec.config.env` — OLM will automatically roll the operator Deployment.
+- If it's set directly on the operator Deployment, remove it there (expect OLM/the operator to
+  reconcile this back if it's not also removed from the Subscription).
+
+**Step 4 — Wait for 1 min, restart the principal Deployment**
+
+```bash
+oc rollout restart deployment -n openshift-gitops -l app.kubernetes.io/component=principal
+oc rollout status deployment -n openshift-gitops -l app.kubernetes.io/component=principal
+```
+
+**Step 5 — Confirm the principal switched to the real secret**
+
+```bash
+oc logs -n openshift-gitops -l app.kubernetes.io/component=principal 
+# expect: "Loading gRPC TLS certificate from secret openshift-gitops/argocd-agent-principal-tls"
+# NOT: "Using one-time generated TLS certificate for gRPC"
+```
+
+**Step 6 — If the handshake still fails after Step 5, force reissue of the real secret**
+
+The hub controller already discovers the Route hostname and bakes it into
+`argocd-agent-principal-tls`'s SANs, and self-heals if that secret looks stale — but if it was
+never created correctly while the insecure path was active, force a fresh issue:
+
+```bash
+oc delete secret argocd-agent-principal-tls -n openshift-gitops
+# wait for the hub's GitOpsCluster controller to recreate it on its next reconcile, then repeat Step 5
+```
 
 ---
 
