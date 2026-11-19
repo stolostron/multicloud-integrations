@@ -511,6 +511,7 @@ func getReport() *appsetreport.MulticlusterApplicationSetReport {
 			ClusterConditions: []appsetreport.ClusterCondition{
 				{
 					Cluster: "cluster1",
+					App:     "openshift-gitops/cluster1-nginx-app",
 					Conditions: []appsetreport.Condition{
 						{
 							Type:    "OperationError",
@@ -624,4 +625,28 @@ func initClient() client.Client {
 
 	ncb := fake.NewClientBuilder().WithScheme(scheme)
 	return ncb.Build()
+}
+
+// TestMergeResourceRefs reproduces the scenario where one ApplicationSet (e.g. via a git-directory
+// generator) generates multiple Applications that deploy different resources -- the report's
+// Resources list must be the union across every app, not just whichever app was processed first.
+func TestMergeResourceRefs(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	team1Resources := []appsetreport.ResourceRef{
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "team1", Namespace: "platform-projects-test"},
+	}
+	team2Resources := []appsetreport.ResourceRef{
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "team2", Namespace: "platform-projects-test"},
+	}
+
+	merged := mergeResourceRefs(nil, team1Resources)
+	merged = mergeResourceRefs(merged, team2Resources)
+
+	g.Expect(merged).To(gomega.ConsistOf(team1Resources[0], team2Resources[0]))
+
+	// Re-adding an already-seen resource (e.g. the same app re-processed on a later page) must
+	// not duplicate it.
+	merged = mergeResourceRefs(merged, team1Resources)
+	g.Expect(merged).To(gomega.ConsistOf(team1Resources[0], team2Resources[0]))
 }

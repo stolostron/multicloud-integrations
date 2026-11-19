@@ -584,13 +584,26 @@ the principal pod starts. That explains both log lines above:
   and will keep appearing after every future restart too, never resolving on its own.
 
 This insecure fallback is only used when the env var `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE`
-is `true` on the **GitOps operator's own controller-manager Deployment** (there is no `ArgoCD` CR
-spec field for this — it is purely an operator-level setting, propagated into the
-`<argocd-cr-name>-agent-principal-params` ConfigMap and from there into the principal container's
-own environment). By default this is `false`, so if a hub hits this, something external set it to
-`true` — most commonly a manual `oc set env` on the operator Deployment, or an OLM
-`Subscription.spec.config.env` override, sometimes added as a well-intentioned but incorrect
-attempt to work around an earlier, unrelated TLS problem.
+is `true` on the **principal container itself**. That env var is not an operator-wide/Subscription
+setting — it is written per-`ArgoCD`-instance by the argocd-operator's own principal Deployment
+reconciler (`controllers/argocdagent/deployment.go`, `getPrincipalTLSServerAllowGenerate`), sourced
+directly and *only* from the `ArgoCD` CR's own
+**`spec.argoCDAgent.principal.tls.insecureGenerate`** field (`PrincipalTLSSpec.InsecureGenerate` in
+`argocd-operator`'s API types) — confirmed against the vendored `argocd-operator` source. A `nil`
+field defaults to `"false"`, so this requires an explicit `true` somewhere in the `ArgoCD` spec to
+trigger. There is a sibling field, `spec.argoCDAgent.principal.jwt.insecureGenerate`, that controls
+the *same kind* of insecure one-time-generate fallback but for the JWT signing key instead of the
+gRPC TLS cert — don't confuse the two when searching for an override, they're independent flags.
+
+In an ACM/GitOpsCluster-managed hub, this repo's own Policy template (`argocd_policy.go`) never
+sets either `insecureGenerate` field, so if one is `true` on a live `ArgoCD` CR, someone added it
+directly — either by hand-editing the Policy's `object-templates` (the `ArgoCD` CR is user-owned
+per [Known Limitation #1](../CLAUDE.md), so the Policy won't revert a field it doesn't itself
+manage) or by patching the live `ArgoCD` CR on a hub where the Policy isn't enforcing that section —
+most often a well-intentioned but incorrect attempt to work around an earlier, unrelated TLS
+problem. On a hub where ArgoCD/argocd-agent was installed and wired up manually (not through this
+repo's `GitOpsCluster`/Policy automation — e.g. by following the upstream product install guide
+directly), it's whatever was set in the `ArgoCD` manifest applied by hand.
 
 > **Why a hostname mismatch and not "unknown certificate authority":** the agent is correctly
 > configured to trust the real `argocd-agent-ca` and to expect the Route hostname as the TLS
@@ -609,19 +622,34 @@ oc logs -n openshift-gitops -l app.kubernetes.io/component=principal | grep -i "
 # "Using one-time generated TLS certificate for gRPC"   <- confirms this issue
 ```
 
-**Step 2 — Find where `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE` is overridden**
+**Step 2 — Find where `insecureGenerate` is set to `true`**
+
+Don't look at the operator's own Subscription/Deployment — that env var is not sourced from there.
+Check the `ArgoCD` CR directly (in an ACM/GitOpsCluster-managed hub this is rendered by the
+`<gitopscluster-name>-argocd-policy` `Policy`, so check the Policy's `object-templates` if the live
+CR doesn't show it as a standalone edit):
 
 ```bash
-oc get subscription -n openshift-gitops-operator -o yaml | grep -A3 ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE
-oc get deployment -n openshift-gitops-operator -o yaml | grep -A3 ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE
+oc get argocd <argocd-cr-name> -n <argo-namespace> -o jsonpath='{.spec.argoCDAgent.principal.tls.insecureGenerate}{"\n"}'
+# "true"   <- confirms this is the source
+
+# If using the ACM-managed Policy, also check there, since a manual CR edit alone won't stick
+# if the Policy's object-templates still assert something different on its next reconcile:
+oc get policy <gitopscluster-name>-argocd-policy -n <argo-namespace> -o yaml | grep -B2 -A2 insecureGenerate
 ```
 
-**Step 3 — Remove the override (or set it explicitly to `"false"`)**
+A manual `oc set env deployment ... ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE=false` (or removing
+it from the Subscription) does **not** fix this and will not stick — the argocd-operator's own
+principal-Deployment reconciler rebuilds that env var from `spec.argoCDAgent.principal.tls.insecureGenerate` on every reconcile, so a plain env-var edit is reverted on the very
+next pass as long as the CR field is still `true`.
 
-- If it's on the `Subscription`, remove the `ARGOCD_PRINCIPAL_TLS_SERVER_ALLOW_GENERATE` entry
-  from `spec.config.env` — OLM will automatically roll the operator Deployment.
-- If it's set directly on the operator Deployment, remove it there (expect OLM/the operator to
-  reconcile this back if it's not also removed from the Subscription).
+**Step 3 — Set `insecureGenerate` to `false` at the source**
+
+- If it's on the live `ArgoCD` CR directly, patch it: `spec.argoCDAgent.principal.tls.insecureGenerate: false` (or remove the field entirely — `nil` already
+  defaults to `false`).
+- If it's on the governing `Policy`'s `object-templates` (ACM/GitOpsCluster-managed hub), edit the
+  `Policy` itself — editing only the live `ArgoCD` CR will be reverted back to `true` on the
+  Policy's next enforce pass.
 
 **Step 4 — Wait for 1 min, restart the principal Deployment**
 
@@ -648,6 +676,40 @@ never created correctly while the insecure path was active, force a fresh issue:
 oc delete secret argocd-agent-principal-tls -n openshift-gitops
 # wait for the hub's GitOpsCluster controller to recreate it on its next reconcile, then repeat Step 5
 ```
+
+> **This self-heal only exists on a hub where this repo's `GitOpsCluster` controller is actually
+> managing the principal.** If `argocd-agent-principal-tls` is deleted and nothing recreates it,
+> confirmed FATAL on principal startup —
+> `[FATAL]: Could not create new server instance: could not read TLS secret <ns>/argocd-agent-principal-tls: secrets "argocd-agent-principal-tls" not found` —
+> there is no `GitOpsCluster` reconciling this `ArgoCD` instance at all. This happens on a hub where
+> ArgoCD/argocd-agent was installed and configured by hand (e.g. following the upstream
+> [Argo CD Agent installation guide](https://docs.redhat.com/en/documentation/red_hat_openshift_gitops/1.22/html/argo_cd_agent_installation/argocd-agent-installation)
+> directly, independent of ACM) instead of through a `GitOpsCluster` CR with `argoCDAgent.enabled:
+> true` — there is no code in this repo watching that `ArgoCD` instance, so deleting the secret is
+> a one-way door, not a reissue trigger. **Confirm which situation you're in before deleting the
+> secret**: `oc get gitopscluster -A` returning nothing (or none referencing this cluster/namespace)
+> means you're on your own for this secret, same as every other secret below.
+>
+> In that case, generate the certificate manually per the same installation guide's "setting up a
+> spoke cluster environment" procedure, and expect to repeat this manually on every rotation/expiry
+> (Common issue 2's restart-to-reload fix still applies, but there's no automated reissue to fall
+> back on if the cert itself needs regenerating).
+>
+> **This is not the end of it — the matching agent-side secret is just as manual.** Once the
+> principal starts cleanly on the real certificate, the *next* failure in this same family shows up
+> when the principal tries to dispatch the agent to a managed cluster:
+> ```text
+> time="..." level=info msg="Loading client TLS certificate from secret openshift-gitops/argocd-agent-client-tls"
+> [FATAL]: Error creating remote: unable to read TLS client from secret: could not read TLS secret openshift-gitops/argocd-agent-client-tls: secrets "argocd-agent-client-tls" not found
+> ```
+> In an ACM/GitOpsCluster-managed setup, `argocd-agent-client-tls` is normally propagated to each
+> spoke automatically by the addon's own `SecretReconciler` (see "Cert Rotation & Autorefresh" in
+> `CLAUDE.md`) — but that propagation only runs as part of the `gitopsaddon` agent, which a
+> standalone install never deploys. Same fix as the principal side: create
+> `argocd-agent-client-tls` manually on the managed cluster, per the installation guide's client
+> certificate step. Once both the principal's and the agent's certificates exist, the TLS handshake
+> fully succeeds and the connection is stable — confirmed live: this was the actual, complete
+> resolution path for a hub running argocd-agent outside of `GitOpsCluster` management.
 
 ---
 

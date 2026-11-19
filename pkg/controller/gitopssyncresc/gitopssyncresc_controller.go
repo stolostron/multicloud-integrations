@@ -258,30 +258,34 @@ func (r *GitOpsSyncResource) syncResources() error {
 
 				r.createOrUpdateAppSetReportConditions(report, itemmap)
 
-				if len(report.Statuses.Resources) == 0 {
-					// The batched app-listing query above intentionally shares a single
-					// "limit" with the search-api's *related* resource query (see
-					// getAppRelatedResources for why) -- that limit is sized for paging
-					// through Applications, not for how many related rows a single app's
-					// full resource tree may have, so the batched response's own "related"
-					// data cannot be trusted here. Issue one more, narrowly-filtered,
-					// unlimited query scoped to just this app to get its real related set.
-					namespace, _ := itemmap["namespace"].(string)
-					name, _ := itemmap["name"].(string)
+				// Fetch and merge this app's own resources every time, not just once per
+				// report (i.e. once per ApplicationSet) -- an ApplicationSet can generate
+				// several Applications that each deploy different content (e.g. a
+				// git-directory generator with one Application per team folder), so the
+				// resource list can genuinely differ between apps sharing the same report,
+				// not just between clusters. The batched app-listing query above
+				// intentionally shares a single "limit" with the search-api's *related*
+				// resource query (see getAppRelatedResources for why) -- that limit is sized
+				// for paging through Applications, not for how many related rows a single
+				// app's full resource tree may have, so the batched response's own "related"
+				// data cannot be trusted here. Issue one more, narrowly-filtered, unlimited
+				// query scoped to just this app to get its real related set.
+				namespace, _ := itemmap["namespace"].(string)
+				name, _ := itemmap["name"].(string)
 
-					related, relErr := r.getAppRelatedResources(namespace, name, managedClusterName)
-					if relErr != nil {
-						klog.Errorf("failed to get related resources for app %v/%v on cluster %v: %v",
-							namespace, name, managedClusterName, relErr)
-					} else {
-						// Related resources that has this app as parent
-						relatedResources := getResourceMapList(related, uid)
+				related, relErr := r.getAppRelatedResources(namespace, name, managedClusterName)
+				if relErr != nil {
+					klog.Errorf("failed to get related resources for app %v/%v on cluster %v: %v",
+						namespace, name, managedClusterName, relErr)
+				} else {
+					// Related resources that has this app as parent
+					relatedResources := getResourceMapList(related, uid)
 
-						// Unhealthy resources for this app
-						unhealthyResources := getMissingResourceMapList(itemmap)
+					// Unhealthy resources for this app
+					unhealthyResources := getMissingResourceMapList(itemmap)
 
-						report.Statuses.Resources = append(relatedResources, unhealthyResources...)
-					}
+					report.Statuses.Resources = mergeResourceRefs(report.Statuses.Resources,
+						append(relatedResources, unhealthyResources...))
 				}
 
 				klog.Infof("resources for app (%v/%v): %v", itemmap["namespace"], itemmap["name"], report.Statuses.Resources)
@@ -495,6 +499,8 @@ func (r *GitOpsSyncResource) doSearch(searchInput *model.SearchInput) ([]interfa
 func (r *GitOpsSyncResource) createOrUpdateAppSetReportConditions(report *appsetreport.MulticlusterApplicationSetReport,
 	appsetResource map[string]interface{}) {
 	managedClusterName := appsetResource["cluster"].(string)
+	appNamespace, _ := appsetResource["namespace"].(string)
+	appName, _ := appsetResource["name"].(string)
 
 	var operationStateError *appsetreport.Condition
 
@@ -549,11 +555,39 @@ func (r *GitOpsSyncResource) createOrUpdateAppSetReportConditions(report *appset
 	}
 
 	clusterCondition := appsetreport.ClusterCondition{
-		Cluster:    managedClusterName,
+		Cluster: managedClusterName,
+		// App identifies which Application (an ApplicationSet can generate several onto the
+		// same managed cluster, e.g. a git-directory generator with one Application per team
+		// folder) this condition set belongs to -- consumed by multiclusterstatusaggregation
+		// to correlate this YAML-sourced condition list back to the right ManifestWork-sourced
+		// ClusterCondition instead of merging all of a cluster's apps into one.
+		App:        fmt.Sprintf("%s/%s", appNamespace, appName),
 		Conditions: reportConditions,
 	}
 	clusterConditions = append(clusterConditions, clusterCondition)
 	report.Statuses.ClusterConditions = clusterConditions
+}
+
+// mergeResourceRefs appends newRefs to existing, skipping any that are already present (by
+// APIVersion/Kind/Namespace/Name). Different Applications under the same ApplicationSet can
+// deploy some of the same resources (e.g. a shared Namespace) as well as entirely different ones,
+// so this keeps the report's Resources list a deduplicated union across every app rather than
+// either dropping an app's resources outright or listing duplicates.
+func mergeResourceRefs(existing, newRefs []appsetreport.ResourceRef) []appsetreport.ResourceRef {
+	seen := make(map[appsetreport.ResourceRef]bool, len(existing))
+	for _, ref := range existing {
+		seen[ref] = true
+	}
+
+	for _, ref := range newRefs {
+		if !seen[ref] {
+			seen[ref] = true
+
+			existing = append(existing, ref)
+		}
+	}
+
+	return existing
 }
 
 func (r *GitOpsSyncResource) writeAppSetResourceFile(report *appsetreport.MulticlusterApplicationSetReport) error {

@@ -57,8 +57,13 @@ type AppSet struct {
 	appset types.NamespacedName
 }
 
+// Cluster identifies one (managed cluster, Application) pair within an ApplicationSet. An
+// ApplicationSet can generate more than one Application onto the same managed cluster (e.g. a
+// git-directory generator producing one Application per team folder) -- appName disambiguates
+// those so each one gets its own entry instead of silently overwriting the others.
 type Cluster struct {
 	clusterName string
+	appName     string
 }
 
 // Value for the appSetClusterStatusMap
@@ -227,7 +232,16 @@ func (r *ReconcilePullModelAggregation) generateAggregation() error {
 			}
 
 			appSetKey := AppSet{types.NamespacedName{Namespace: appsetNs, Name: appsetName}}
-			clusterKey := Cluster{manifestWork.Namespace}
+
+			hubAppName := manifestWork.Annotations[propagation.AnnotationKeyHubApplicationName]
+			if hubAppName == "" {
+				// Should not normally happen (the propagation controller always sets this
+				// annotation), but fall back to the ManifestWork's own name rather than risk
+				// colliding with another app that also has no hub-application-name annotation.
+				hubAppName = manifestWork.Name
+			}
+
+			clusterKey := Cluster{clusterName: manifestWork.Namespace, appName: hubAppName}
 
 			for _, manifest := range manifestWork.Status.ResourceStatus.Manifests {
 				for _, statuses := range manifest.StatusFeedbacks.Values {
@@ -373,8 +387,32 @@ func (r *ReconcilePullModelAggregation) generateAppSetReport(appSetClusterStatus
 	}
 }
 
+// clusterAppKey builds the appSetClusterConditionsMap key for one (cluster, app) pair. Keying by
+// cluster name alone would collapse multiple Applications an ApplicationSet generates onto the
+// same managed cluster into a single entry, silently dropping all but one of them.
+func clusterAppKey(clusterName, appName string) string {
+	return clusterName + "/" + appName
+}
+
+// appNameFromClusterConditionApp extracts the Application name from a ClusterCondition.App value.
+// Both producers of this field put the app name in the second "/"-separated segment: the
+// ManifestWork-sourced value is "<appsetNs>/<appName>/<cluster>/<manifestWorkName>" (see
+// generateAggregation) and the search-api/YAML-sourced value is "<appNamespace>/<appName>" (see
+// gitopssyncresc's createOrUpdateAppSetReportConditions) -- so this works for either.
+func appNameFromClusterConditionApp(app string) string {
+	parts := strings.Split(app, "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+
+	return app
+}
+
 func (r *ReconcilePullModelAggregation) generateSummary(appSetClusterStatusMap map[AppSet]map[Cluster]OverallStatus,
 	appset AppSet, appSetCRDConditions []appsetreportV1alpha1.ClusterCondition) (appsetreportV1alpha1.ReportSummary, []appsetreportV1alpha1.ClusterCondition) {
+	// "clusters" below counts (cluster, app) entries, i.e. Applications, not distinct physical
+	// clusters -- they're the same number for the common case of one Application per cluster,
+	// but diverge when an ApplicationSet generates several Applications onto the same cluster.
 	var (
 		synced, notSynced, healthy, notHealthy, inProgress, clusters int
 	)
@@ -386,7 +424,7 @@ func (r *ReconcilePullModelAggregation) generateSummary(appSetClusterStatusMap m
 	for cluster := range appSetClusterStatusMap[appset] {
 		klog.V(1).Info("Cluster: ", cluster)
 		// generate the cluster condition list per this appset
-		appSetClusterConditionsMap[cluster.clusterName] = appsetreportV1alpha1.ClusterCondition{
+		appSetClusterConditionsMap[clusterAppKey(cluster.clusterName, cluster.appName)] = appsetreportV1alpha1.ClusterCondition{
 			Cluster:                 cluster.clusterName,
 			SyncStatus:              appSetClusterStatusMap[appset][cluster].SyncStatus,
 			HealthStatus:            appSetClusterStatusMap[appset][cluster].HealthStatus,
@@ -429,15 +467,19 @@ func (r *ReconcilePullModelAggregation) generateSummary(appSetClusterStatusMap m
 		klog.Warningf("Total number of clusters does not add up, %v", summary)
 	}
 
-	// Combine cluster conditions from manifestwork and yaml
+	// Combine cluster conditions from manifestwork and yaml. Correlate by (cluster, app), not
+	// just cluster -- an ApplicationSet can generate more than one Application onto the same
+	// managed cluster, and each one needs its own entry, not a last-write-wins merge.
 	for _, yamlConditions := range appSetCRDConditions {
 		klog.V(1).Info("AppSetCRD conditions item: ", yamlConditions)
 
-		if cCond, ok := appSetClusterConditionsMap[yamlConditions.Cluster]; ok {
+		key := clusterAppKey(yamlConditions.Cluster, appNameFromClusterConditionApp(yamlConditions.App))
+
+		if cCond, ok := appSetClusterConditionsMap[key]; ok {
 			cCond.Conditions = yamlConditions.Conditions
-			appSetClusterConditionsMap[yamlConditions.Cluster] = cCond
+			appSetClusterConditionsMap[key] = cCond
 		} else {
-			appSetClusterConditionsMap[yamlConditions.Cluster] = yamlConditions
+			appSetClusterConditionsMap[key] = yamlConditions
 		}
 	}
 
@@ -540,7 +582,13 @@ func (r *ReconcilePullModelAggregation) cleanupReports() error {
 	var missingAppset []types.NamespacedName
 
 	for _, file := range files {
-		appsetName := strings.TrimRight(file.Name(), ".yaml")
+		// TrimSuffix, not TrimRight -- TrimRight treats its second argument as a cutset of
+		// characters to strip, not a literal suffix, and over-trims any name ending in a run of
+		// '.'/'y'/'a'/'m'/'l' right before the real ".yaml" (e.g. "..._platform-projects-all.yaml"
+		// was mangled into "..._platform-projects-", which this loop then failed to find an
+		// ApplicationSet for and failed to remove, because the mangled name didn't match any
+		// real file or ApplicationSet).
+		appsetName := strings.TrimSuffix(file.Name(), ".yaml")
 		names := strings.Split(appsetName, "_")
 		klog.V(1).Info("Checking file ", appsetName)
 
