@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -160,24 +161,19 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 
 	argoNamespace := GetEffectiveArgoNamespace(gitOpsCluster)
 
-	// Check if AddOnTemplate already exists. Every input that feeds the template below
-	// (namespace/name-derived identity, the manifest RBAC/ServiceAccount/Deployment shape) is
-	// fixed for the lifetime of this object - the only two values that can ever legitimately
-	// differ across reconciles are the controller's own image (changes on a controller upgrade)
-	// and the CA namespace (changes only if the GitOpsCluster CR's own argoNamespace is edited).
-	// Compare only those two directly instead of deep-comparing the full (large,
-	// template-heavy) Spec: a whole-object comparison would (a) depend on the manifests' raw
-	// JSON bytes being byte-identical across an etcd round-trip, which isn't guaranteed, and
-	// (b) spuriously report "changed" on every single call regardless, because
-	// buildAddonEnvVars iterates a Go map whose iteration order is randomized per-process - see
-	// its own comment. An unconditional Update() here bumps the AddOnTemplate's generation every
-	// reconcile, which makes the OCM addon framework re-render and roll every managed cluster's
-	// gitops-addon ManifestWork/Deployment (same class of bug already fixed for
-	// AddOnDeploymentConfig via customizedVariablesEqual in addon_management.go).
+	// Check if AddOnTemplate already exists. Compare the two genuinely mutable inputs (the
+	// controller image and the CA namespace) plus the rendered manifests themselves, decoded and
+	// compared semantically. An unconditional Update() here bumps the AddOnTemplate's generation
+	// every reconcile, which makes the OCM addon framework re-render and roll every managed
+	// cluster's gitops-addon ManifestWork/Deployment (same class of bug already fixed for
+	// AddOnDeploymentConfig via customizedVariablesEqual in addon_management.go) - so only a real
+	// content difference may trigger the update.
+	desiredManifests := buildAddonManifests(gitOpsCluster.Namespace, addonImage)
+
 	existingTemplate := &addonv1alpha1.AddOnTemplate{}
 	err = r.Get(context.Background(), types.NamespacedName{Name: templateName}, existingTemplate)
 	if err == nil {
-		if !addOnTemplateNeedsUpdate(existingTemplate, addonImage, argoNamespace) {
+		if !addOnTemplateNeedsUpdate(existingTemplate, addonImage, argoNamespace, desiredManifests) {
 			klog.V(2).Infof("AddOnTemplate %s is up to date, skipping update", templateName)
 			return nil
 		}
@@ -200,7 +196,7 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 			AddonName: "gitops-addon",
 			AgentSpec: workv1.ManifestWorkSpec{
 				Workload: workv1.ManifestsTemplate{
-					Manifests: buildAddonManifests(gitOpsCluster.Namespace, addonImage),
+					Manifests: desiredManifests,
 				},
 			},
 			Registration: []addonv1alpha1.RegistrationSpec{
@@ -224,7 +220,7 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 
 	if err == nil {
 		// existingTemplate was found above and addOnTemplateNeedsUpdate returned true.
-		klog.Infof("Updating AddOnTemplate %s (image or argoNamespace changed)", templateName)
+		klog.Infof("Updating AddOnTemplate %s (content changed)", templateName)
 		existingTemplate.Spec = addonTemplate.Spec
 		existingTemplate.Labels = addonTemplate.Labels
 		return r.Update(context.Background(), existingTemplate)
@@ -235,10 +231,17 @@ func (r *ReconcileGitOpsCluster) EnsureAddOnTemplate(gitOpsCluster *gitopscluste
 	return r.Create(context.Background(), addonTemplate)
 }
 
-// addOnTemplateNeedsUpdate reports whether the existing AddOnTemplate's meaningful inputs
-// differ from the desired image/argoNamespace. Any decode failure on the existing object is
-// treated as "needs update" (fail open) so a parse error can never silently freeze the template.
-func addOnTemplateNeedsUpdate(existing *addonv1alpha1.AddOnTemplate, wantImage, wantArgoNamespace string) bool {
+// addOnTemplateNeedsUpdate reports whether the existing AddOnTemplate differs from the desired
+// image/argoNamespace/manifests. The manifests are compared semantically (decoded JSON, not raw
+// bytes), so etcd round-trips and map ordering cannot cause false positives - while a controller
+// upgrade that only changes the rendered manifests (for example a new env var, with the same
+// image tag) is still detected. Any decode failure is treated as "needs update" (fail open) so a
+// parse error can never silently freeze the template.
+func addOnTemplateNeedsUpdate(
+	existing *addonv1alpha1.AddOnTemplate,
+	wantImage, wantArgoNamespace string,
+	wantManifests []workv1.Manifest,
+) bool {
 	if len(existing.Spec.Registration) == 0 ||
 		existing.Spec.Registration[0].CustomSigner == nil ||
 		existing.Spec.Registration[0].CustomSigner.SigningCA.Namespace != wantArgoNamespace {
@@ -250,7 +253,29 @@ func addOnTemplateNeedsUpdate(existing *addonv1alpha1.AddOnTemplate, wantImage, 
 		return true
 	}
 
-	return false
+	return !manifestsEqual(existing.Spec.AgentSpec.Workload.Manifests, wantManifests)
+}
+
+// manifestsEqual compares two manifest lists by their decoded JSON content.
+func manifestsEqual(current, desired []workv1.Manifest) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+
+	for i := range current {
+		var currentDoc, desiredDoc interface{}
+		if err := json.Unmarshal(current[i].Raw, &currentDoc); err != nil {
+			return false
+		}
+		if err := json.Unmarshal(desired[i].Raw, &desiredDoc); err != nil {
+			return false
+		}
+		if !reflect.DeepEqual(currentDoc, desiredDoc) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // extractDeploymentImage finds the gitops-addon Deployment manifest among the AddOnTemplate's
@@ -337,6 +362,7 @@ func cleanupClusterRoleRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"get", "list", "watch", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "list", "watch", "create", "update", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "watch", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get", "list", "watch", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
 		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get", "list", "watch", "delete"}},

@@ -27,6 +27,8 @@ FINDFILES=find . \( -path ./.git -o -path ./.github \) -prune -o -type f
 XARGS = xargs -0 ${XARGS_FLAGS}
 CLEANXARGS = xargs ${XARGS_FLAGS}
 
+.DEFAULT_GOAL := build
+
 REGISTRY = quay.io/stolostron
 VERSION = latest
 IMAGE_NAME_AND_VERSION ?= $(REGISTRY)/multicloud-integrations:$(VERSION)
@@ -38,9 +40,18 @@ export GOPACKAGES   = $(shell go list ./... | grep -v /manager | grep -v /bindat
 K8S_VERSION ?=1.28.3
 SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest
 
+.PHONY: generate-operator-images verify-operator-images
+
+# Keep the hub-side image list in sync with the operator chart values.
+generate-operator-images:
+	@go run ./hack/gen-operator-images
+
+verify-operator-images:
+	@go run ./hack/gen-operator-images -check
+
 .PHONY: build
 
-build:
+build: generate-operator-images
 	@common/scripts/gobuild.sh build/_output/bin/gitopscluster ./cmd/gitopscluster
 	@common/scripts/gobuild.sh build/_output/bin/gitopssyncresc ./cmd/gitopssyncresc
 	@common/scripts/gobuild.sh build/_output/bin/multiclusterstatusaggregation ./cmd/multiclusterstatusaggregation
@@ -119,6 +130,7 @@ test-unit: setup-envtest
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./gitopsaddon/...
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./maestroapplication/...
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./cmd/...
+	go test -timeout 300s -v ./hack/...
 
 test-integration: setup-envtest
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./pkg/...
@@ -154,12 +166,14 @@ deploy-ocm:
 # E2E Test Configuration
 HUB_CLUSTER ?= hub
 SPOKE_CLUSTER ?= cluster1
-E2E_IMG ?= quay.io/stolostron/multicloud-integrations:latest
-ARGOCD_OPERATOR_VERSION ?= v0.18.0
-ARGOCD_OPERATOR_IMAGE ?= quay.io/argoprojlabs/argocd-operator:$(ARGOCD_OPERATOR_VERSION)
-export ARGOCD_OPERATOR_IMAGE
+E2E_IMG ?= quay.io/stolostron/multicloud-integrations:e2e
 KIND ?= kind
 KUBECTL ?= kubectl
+
+# The gitopsaddon e2e pulls the chart's registry.redhat.io images. It skips itself
+# when no docker config JSON with registry.redhat.io credentials is available.
+RH_PULL_SECRET_FILE ?= $(shell if [ -f "$$HOME/.docker/config.json" ] && grep -q 'registry.redhat.io' "$$HOME/.docker/config.json" 2>/dev/null; then echo "$$HOME/.docker/config.json"; fi)
+export RH_PULL_SECRET_FILE
 
 ##@ Cluster-Import E2E Tests (legacy script-based)
 
@@ -206,15 +220,23 @@ define SETUP_KIND_CLUSTERS
 	$(MAKE) build-images IMAGE_NAME_AND_VERSION=$(E2E_IMG)
 	$(KIND) load docker-image $(E2E_IMG) --name $(HUB_CLUSTER)
 	$(KIND) load docker-image $(E2E_IMG) --name $(SPOKE_CLUSTER)
-	docker pull $(ARGOCD_OPERATOR_IMAGE) || true
-	$(KIND) load docker-image $(ARGOCD_OPERATOR_IMAGE) --name $(HUB_CLUSTER)
-	$(KIND) load docker-image $(ARGOCD_OPERATOR_IMAGE) --name $(SPOKE_CLUSTER)
 endef
 
+# setup_env.sh leaves a gitopsaddon process running against the hub; the trap
+# guarantees it never outlives the test run and holds the metrics port.
 define RUN_GITOPSADDON_E2E
-	E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) ARGOCD_OPERATOR_IMAGE=$(ARGOCD_OPERATOR_IMAGE) ./test/e2e/gitopsaddon/scripts/setup_env.sh
-	$(KUBECTL) config use-context kind-$(HUB_CLUSTER)
-	go test -tags=e2e -timeout 30m ./test/e2e/gitopsaddon/ -v -ginkgo.v --ginkgo.label-filter="$(1)"
+	@set -e; \
+	trap 'if [ -f /tmp/gitopsaddon-e2e.pid ]; then kill $$(cat /tmp/gitopsaddon-e2e.pid) 2>/dev/null || true; rm -f /tmp/gitopsaddon-e2e.pid; fi' EXIT; \
+	if [ -z "$(RH_PULL_SECRET_FILE)" ]; then \
+		echo "SKIP: RH_PULL_SECRET_FILE is not set and ~/.docker/config.json has no registry.redhat.io entry."; \
+		echo "SKIP: the GitOps addon e2e installs the Red Hat operator and ArgoCD images from registry.redhat.io,"; \
+		echo "SKIP: which cannot be pulled anonymously. Set RH_PULL_SECRET_FILE=/path/to/dockerconfig.json to run it."; \
+		RH_PULL_SECRET_FILE= go test -tags=e2e -timeout 30m ./test/e2e/gitopsaddon/ -v -ginkgo.v --ginkgo.label-filter="$(1)"; \
+	else \
+		E2E_IMG=$(E2E_IMG) CLUSTERADM_VERSION=$(CLUSTERADM_VERSION) RH_PULL_SECRET_FILE="$(RH_PULL_SECRET_FILE)" ADDON_PID_FILE=/tmp/gitopsaddon-e2e.pid ADDON_LOG=/tmp/gitopsaddon-e2e.log ./test/e2e/gitopsaddon/scripts/setup_env.sh; \
+		$(KUBECTL) config use-context kind-$(HUB_CLUSTER); \
+		RH_PULL_SECRET_FILE="$(RH_PULL_SECRET_FILE)" go test -tags=e2e -timeout 30m ./test/e2e/gitopsaddon/ -v -ginkgo.v --ginkgo.label-filter="$(1)"; \
+	fi
 endef
 
 # --- Scenarios (CI) ---

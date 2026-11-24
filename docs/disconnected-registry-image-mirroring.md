@@ -6,7 +6,7 @@ mirroring the addon's component images. It also covers the two related controls 
 ArgoCD agent's image specifically: the Policy `spec.argoCDAgent.agent.image` field, and the
 `skip-agent-version-heal` annotation.
 
-For architectural background, see `CLAUDE.md` → "Disconnected Image Mirroring
+For architectural background, see `AGENT.md` → "Disconnected Image Mirroring
 (ManagedClusterImageRegistry)", "Agent Version Drift Heal", and "Key Annotations on ManagedClusterImageRegistry".
 
 ## How it fits together
@@ -161,7 +161,7 @@ the spoke itself.
 > them straight into the operator Deployment's container `image` and env vars. On **OCP** managed
 > clusters the addon agent instead creates an OLM `Subscription`
 > (`installViaOLMSubscription`) and never reads these image variables at all — OLM's catalog
-> resolves every component image from the CSV, with zero hub-side control (see `CLAUDE.md` →
+> resolves every component image from the CSV, with zero hub-side control (see `AGENT.md` →
 > "OCP vs Non-OCP Operator Version Gap"). Mirroring the ADC on an OCP cluster has no effect on
 > what actually gets installed there; skip straight to
 > [Use case 3](#use-case-3-control-the-argocd-agents-image) territory (Policy/ADC) if you need to
@@ -200,7 +200,7 @@ acm-openshift-gitops-redis-7f4bd5d6dc-ll6fp         1/1     Running   0         
 acm-openshift-gitops-repo-server-6bcb9c5d8b-72prs   1/1     Running   0          5d16h
 ```
 
-> `server` is disabled by default for both agent-mode and pull-model spokes (see `CLAUDE.md` →
+> `server` is disabled by default for both agent-mode and pull-model spokes (see `AGENT.md` →
 > "Basic Pull Model Setup — Full YAML"), so it's normal not to see an
 > `acm-openshift-gitops-server` pod here.
 
@@ -223,7 +223,7 @@ With both namespaces identified, check the actual images each pod is running:
    kubectl get deployment openshift-gitops-operator-controller-manager \
      -n openshift-gitops-operator \
      -o jsonpath='{range .spec.template.spec.containers[?(@.name=="manager")].env[*]}{.name}={.value}{"\n"}{end}' \
-     | grep -E '^(ARGOCD|BACKEND|GITOPS)_.*IMAGE='
+     | grep -E '^(RELATED_IMAGE_)?(ARGOCD|ARGO|BACKEND|GITOPS|MUST|PROMOTER)_.*IMAGE='
    ```
 
 3. **The running ArgoCD instance's own component pods should be pulling from the mirror.** The
@@ -540,7 +540,7 @@ After the `GitOpsCluster` and MCIR both reconcile:
   been removed — the current controller never writes or clears `agent.image`, so a user-set value
   is left alone indefinitely. If you're hitting this, check the controller pod's logs for that
   exact message; if it's present, the running image predates the fix and needs to be rebuilt/
-  redeployed (see `CLAUDE.md` → "Build / Push / Redeploy Workflow") before Policy-pinning the
+  redeployed (see `AGENT.md` → "Build / Push / Redeploy Workflow") before Policy-pinning the
   agent image will actually stick.
 - **Edited the Policy but the change didn't take, or reverted on its own for an unrelated
   reason**: make sure you're editing the **root** Policy (`<gitopscluster-name>-argocd-policy`, in

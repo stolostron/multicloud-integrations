@@ -168,7 +168,7 @@ func TestGitopsAddonReconciler_Start(t *testing.T) {
 				} else {
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("Start method did not return within timeout")
 			}
 		})

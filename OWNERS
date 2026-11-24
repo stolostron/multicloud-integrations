@@ -1,12 +1,13 @@
 approvers:
 - falconizmi
+- fmt47
 - fxiang1
 - jnpacker
 - mikeshng
-- philipwu08
-- rokej
 - xiangjingli
 
 emeritus_approvers:
 - lennysgarage
 - chenz4027
+- philipwu08
+- rokej

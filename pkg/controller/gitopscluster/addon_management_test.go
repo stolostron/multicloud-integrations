@@ -1393,6 +1393,18 @@ func TestExtractVariablesFromGitOpsCluster(t *testing.T) {
 			assert.True(t, exists, "Expected %s to be present", envKey)
 		}
 
+		// Newer chart component images must be propagated too, otherwise they can never be
+		// mirrored for disconnected clusters.
+		for _, envKey := range []string{
+			utils.EnvGitOpsConsolePluginPF5,
+			utils.EnvMustGatherImage,
+			utils.EnvPromoterExtensionImage,
+			utils.EnvGitOpsPromoterImage,
+		} {
+			assert.Equal(t, utils.DefaultOperatorImages[envKey], managedVariables[envKey],
+				"expected %s to be propagated with its chart default", envKey)
+		}
+
 		// GitOpsOperatorImage should be overridden by spec
 		assert.Equal(t, "custom-operator:v1.0", managedVariables[utils.EnvGitOpsOperatorImage])
 

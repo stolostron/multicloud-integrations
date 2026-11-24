@@ -16,6 +16,7 @@ package gitopscluster
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	imageregistryv1alpha1 "github.com/stolostron/cluster-lifecycle-api/imageregistry/v1alpha1"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	clusterv1beta1 "open-cluster-management.io/api/cluster/v1beta1"
+	utils "open-cluster-management.io/multicloud-integrations/pkg/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -403,6 +405,43 @@ func reconcileNTimes(t *testing.T, r *ReconcileImageRegistry, req reconcile.Requ
 		_, err := r.Reconcile(context.TODO(), req)
 		require.NoError(t, err)
 	}
+}
+
+func TestComputeUpdatedVariablesMirrorsEveryChartImage(t *testing.T) {
+	// Every image the chart knows about must be mirrorable: the mirroring controller only
+	// rewrites variables already present in the AddOnDeploymentConfig, so each generated image
+	// key has to survive this step with its registry host replaced and its source recorded.
+	current := make([]addonv1alpha1.CustomizedVariable, 0, len(utils.DefaultOperatorImages))
+	for key, value := range utils.DefaultOperatorImages {
+		current = append(current, addonv1alpha1.CustomizedVariable{Name: key, Value: value})
+	}
+	current = append(current, addonv1alpha1.CustomizedVariable{Name: utils.EnvArgoCDAgentMode, Value: "managed"})
+	current = append(current, addonv1alpha1.CustomizedVariable{Name: "NOT_AN_IMAGE", Value: "plain-value"})
+
+	updated, originalValues, lastMirrored, changed := computeUpdatedVariables(
+		current,
+		map[string]string{},
+		map[string]string{},
+		[]imageregistryv1alpha1.Registries{{Source: "registry.redhat.io", Mirror: "mirror.example.com"}},
+		"",
+	)
+	require.True(t, changed)
+
+	byName := map[string]string{}
+	for _, v := range updated {
+		byName[v.Name] = v.Value
+	}
+
+	for key, sourceValue := range utils.DefaultOperatorImages {
+		require.Contains(t, sourceValue, "registry.redhat.io/", "test assumes a registry-host prefix: %s", key)
+		assert.True(t, strings.HasPrefix(byName[key], "mirror.example.com/"),
+			"%s must be mirrored, got %q", key, byName[key])
+		assert.Equal(t, sourceValue, originalValues[key], "%s source value must be recorded", key)
+		assert.Equal(t, byName[key], lastMirrored[key], "%s mirrored value must be recorded", key)
+	}
+
+	assert.Equal(t, "managed", byName[utils.EnvArgoCDAgentMode], "non-image variables must be untouched")
+	assert.Equal(t, "plain-value", byName["NOT_AN_IMAGE"])
 }
 
 func TestReconcile_AppliesImageMirroring(t *testing.T) {

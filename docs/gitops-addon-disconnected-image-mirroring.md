@@ -328,9 +328,10 @@ This is the single most common point of confusion when setting this up in a disc
 **Step 1 — Identify the install path for the target managed cluster**
 
 - **Non-OCP (Kind, EKS, etc.):** the GitOps addon installs the operator from a bundled chart.
-  Every image value comes directly from the addon configuration. Mirroring from
-  [Use case 1](#use-case-1-enable-image-mirroring-for-the-gitops-addon) fully applies to the
-  operator, ArgoCD, redis, dex, and the agent image.
+  Every image the addon configures on the spoke comes directly from the addon configuration: the operator,
+  ArgoCD, redis, dex, the agent image, and the optional promoter, promoter extension, must-gather
+  and PF5 console plugin images added in chart 1.22. Mirroring from
+  [Use case 1](#use-case-1-enable-image-mirroring-for-the-gitops-addon) applies to all of them.
 - **OCP:** the GitOps addon instead installs the operator through OLM, which resolves every
   component image from its own catalog — the hub has **zero** control over the
   operator/ArgoCD/redis/dex images through this feature on OCP. **The ArgoCD agent image is the
@@ -598,7 +599,7 @@ gRPC TLS cert — don't confuse the two when searching for an override, they're 
 In an ACM/GitOpsCluster-managed hub, this repo's own Policy template (`argocd_policy.go`) never
 sets either `insecureGenerate` field, so if one is `true` on a live `ArgoCD` CR, someone added it
 directly — either by hand-editing the Policy's `object-templates` (the `ArgoCD` CR is user-owned
-per [Known Limitation #1](../CLAUDE.md), so the Policy won't revert a field it doesn't itself
+per [Known Limitation #1](../AGENT.md), so the Policy won't revert a field it doesn't itself
 manage) or by patching the live `ArgoCD` CR on a hub where the Policy isn't enforcing that section —
 most often a well-intentioned but incorrect attempt to work around an earlier, unrelated TLS
 problem. On a hub where ArgoCD/argocd-agent was installed and wired up manually (not through this
@@ -704,7 +705,7 @@ oc delete secret argocd-agent-principal-tls -n openshift-gitops
 > ```
 > In an ACM/GitOpsCluster-managed setup, `argocd-agent-client-tls` is normally propagated to each
 > spoke automatically by the addon's own `SecretReconciler` (see "Cert Rotation & Autorefresh" in
-> `CLAUDE.md`) — but that propagation only runs as part of the `gitopsaddon` agent, which a
+> `AGENT.md`) — but that propagation only runs as part of the `gitopsaddon` agent, which a
 > standalone install never deploys. Same fix as the principal side: create
 > `argocd-agent-client-tls` manually on the managed cluster, per the installation guide's client
 > certificate step. Once both the principal's and the agent's certificates exist, the TLS handshake

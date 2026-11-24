@@ -14,6 +14,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	utils "open-cluster-management.io/multicloud-integrations/pkg/utils"
 )
 
 const kubectlTimeout = 2 * time.Minute
@@ -348,8 +349,10 @@ func waitForResourceGone(ctx, resource, name, ns string, timeout time.Duration) 
 }
 
 func deleteMCAWithFallback(ctx, addonName, ns string) {
+	// The pre-delete Job has a 600s activeDeadlineSeconds; only strip finalizers once it
+	// cannot still be running.
 	_, err := kubectlCtx(ctx, "delete", "managedclusteraddon", addonName, "-n", ns,
-		"--ignore-not-found", "--timeout=180s")
+		"--ignore-not-found", "--timeout=660s")
 	if err != nil {
 		By(fmt.Sprintf("MCA delete timed out for %s in %s — stripping finalizers", addonName, ns))
 		kubectlCtx(ctx, "patch", "managedclusteraddon", addonName, "-n", ns,
@@ -462,6 +465,9 @@ func verifyArgoCDOnSpoke(timeout time.Duration) {
 	By("verifying ArgoCD application-controller pod is running on spoke")
 	waitForPodPhase(spokeContext, argoCDNamespace,
 		"app.kubernetes.io/name=acm-openshift-gitops-application-controller", "Running", timeout)
+
+	By("verifying the ArgoCD workloads use the chart's Red Hat images")
+	verifyRedHatImages(spokeContext, argoCDNamespace)
 }
 
 func verifyGitOpsClusterConditions(conditions []string, timeout time.Duration) {
@@ -522,31 +528,10 @@ func verifyEmbeddedOperator(timeout time.Duration) {
 		g.Expect(replicas).To(BeNumerically(">", 0), "expected at least 1 available replica")
 	}, timeout, 5*time.Second).Should(Succeed())
 
-	patchOperatorClusterRoleForUpstream(spokeContext)
-	ensureOperatorInspectedCluster()
-}
+	// Assert the operator runs the chart's Red Hat images.
+	verifyRedHatImages(spokeContext, operatorNamespace)
 
-// patchOperatorClusterRoleForUpstream adds argocdexports RBAC to the operator ClusterRole.
-// The embedded chart's ClusterRole is extracted from the Red Hat CSV which removed argocdexports.
-// The upstream argocd-operator (used in e2e) still watches ArgoCDExport resources and needs
-// this permission. Without it, the operator's informer cache fails to sync and it never
-// reconciles ArgoCD CRs. This is e2e-only — the Red Hat operator does not need this.
-func patchOperatorClusterRoleForUpstream(ctx string) {
-	By("patching operator ClusterRole with argocdexports for upstream argocd-operator")
-	_, _ = kubectlCtx(ctx, "patch", "clusterrole", "openshift-gitops-operator-manager-role",
-		"--type=json",
-		`-p=[{"op":"add","path":"/rules/-","value":{"apiGroups":["argoproj.io"],"resources":["argocdexports","argocdexports/finalizers"],"verbs":["create","delete","get","list","patch","update","watch"]}}]`)
-	By("restarting operator pod to pick up patched ClusterRole")
-	kubectlCtx(ctx, "delete", "pod", "-n", operatorNamespace,
-		"-l", "control-plane=gitops-operator", "--grace-period=0", "--force")
-	Eventually(func(g Gomega) {
-		out, err := kubectlCtx(ctx, "get", "deployment",
-			"openshift-gitops-operator-controller-manager",
-			"-n", operatorNamespace,
-			"-o", "jsonpath={.status.availableReplicas}")
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(out).To(Equal("1"))
-	}, 2*time.Minute, 5*time.Second).Should(Succeed())
+	ensureOperatorInspectedCluster()
 }
 
 // ensureOperatorInspectedCluster restarts the spoke operator pod if InspectCluster
@@ -568,7 +553,7 @@ func ensureOperatorInspectedCluster() {
 	By("restarting spoke operator to re-run InspectCluster after RBAC propagation")
 	kubectlCtx(spokeContext, "delete", "pod",
 		"-n", operatorNamespace,
-		"-l", "control-plane=controller-manager",
+		"-l", "control-plane=gitops-operator",
 		"--grace-period=0", "--force")
 
 	Eventually(func(g Gomega) string {
@@ -610,6 +595,53 @@ func ensureHubPrincipalRunning() {
 		return out
 	}, 5*time.Minute, 10*time.Second).Should(Equal("True"),
 		"hub principal pod should be Ready — if it keeps crashing, check for missing argocd-agent-resource-proxy-tls secret")
+}
+
+// verifyChartComponentImagePropagation checks that every component image the 1.22.3 chart renders
+// reaches the spoke at all three layers: the AddOnDeploymentConfig (hub propagation), the addon
+// Deployment env (AddOnTemplate placeholders) and the operator Deployment env (chart pass-through).
+// A missing layer means a disconnected cluster cannot mirror that image.
+func verifyChartComponentImagePropagation(timeout time.Duration) {
+	keys := []string{
+		utils.EnvGitOpsConsolePluginPF5,
+		utils.EnvMustGatherImage,
+		utils.EnvPromoterExtensionImage,
+		utils.EnvGitOpsPromoterImage,
+	}
+
+	for _, key := range keys {
+		want := utils.DefaultOperatorImages[key]
+		Expect(want).NotTo(BeEmpty(), "chart image %s is missing from DefaultOperatorImages", key)
+
+		By(fmt.Sprintf("verifying chart image %s reaches the AddOnDeploymentConfig", key))
+		Eventually(func(g Gomega) {
+			out, err := kubectlCtx(hubContext, "get", "addondeploymentconfig", "gitops-addon-config", "-n", spokeName,
+				"-o", fmt.Sprintf(`jsonpath={.spec.customizedVariables[?(@.name=="%s")].value}`, key))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal(want))
+		}, timeout, 5*time.Second).Should(Succeed())
+
+		By(fmt.Sprintf("verifying chart image %s reaches the addon Deployment env", key))
+		Eventually(func(g Gomega) {
+			out, err := kubectlCtx(spokeContext, "get", "deployment", addonName, "-n", addonAgentNamespace,
+				"-o", fmt.Sprintf(`jsonpath={.spec.template.spec.containers[0].env[?(@.name=="%s")].value}`, key))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal(want))
+		}, timeout, 5*time.Second).Should(Succeed())
+
+		// The chart renders every component image as a RELATED_IMAGE_ env var on the operator
+		// Deployment (must-gather has no bare-name variant). This layer proves the chart renders
+		// the value; pass-through with a non-default (mirrored) value is covered by the
+		// TestChartValuesMirroredImagesLeaveNoExternalRegistryReferences unit test.
+		By(fmt.Sprintf("verifying chart image %s reaches the operator Deployment env", key))
+		Eventually(func(g Gomega) {
+			out, err := kubectlCtx(spokeContext, "get", "deployment", "openshift-gitops-operator-controller-manager",
+				"-n", operatorNamespace,
+				"-o", fmt.Sprintf(`jsonpath={.spec.template.spec.containers[0].env[?(@.name=="RELATED_IMAGE_%s")].value}`, key))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal(want))
+		}, timeout, 5*time.Second).Should(Succeed())
+	}
 }
 
 func verifyAddOnDeploymentConfigEnvVar(clusterName, envKey, expectedValue string, timeout time.Duration) {
@@ -1162,20 +1194,25 @@ func scenarioCleanup(opts gitOpsClusterOpts) {
 		// on every reconcile, not a per-scenario agent artifact.
 	}
 
-	By("3. Deleting Policy and PlacementBinding (stops enforcement on managed cluster)")
+	By("3. Deleting GitOpsCluster (stops the controller from recreating the Policy/MCA)")
+	// Must precede the Policy deletion: otherwise the controller can recreate the
+	// Policy and re-enforce the ArgoCD CR after the operator is gone.
+	out, err := kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
+	Expect(err).NotTo(HaveOccurred(), "failed to delete GitOpsCluster %s: %s", opts.name, out)
+
+	By("4. Deleting Policy and PlacementBinding (stops enforcement on managed cluster)")
 	policyName := opts.name + "-argocd-policy"
 	bindingName := opts.name + "-argocd-policy-binding"
 	kubectlCtx(hubContext, "delete", "policy.policy.open-cluster-management.io", policyName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "placementbinding.policy.open-cluster-management.io", bindingName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 
-	By("3a. Waiting for replicated policy to be removed from spoke namespace")
+	By("4a. Waiting for replicated policy to be removed from spoke namespace")
 	waitForResourceGone(hubContext, "policy.policy.open-cluster-management.io", policyName, spokeName, 2*time.Minute)
 
-	By("4. Deleting ManagedClusterAddOn for spoke (triggers pre-delete cleanup Job)")
+	By("5. Deleting ManagedClusterAddOn for spoke (triggers pre-delete cleanup Job)")
+	// The cleanup Job deletes the ArgoCD CR and waits for its finalizer; deleting
+	// the Policy does not (pruneObjectBehavior: None).
 	deleteMCAWithFallback(hubContext, addonName, spokeName)
-
-	By("5. Deleting GitOpsCluster")
-	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
 
 	By("6. Deleting ManagedClusterSetBinding")
 	deleteLiteral(hubContext, managedClusterSetBindingYAML(argoCDNamespace))
@@ -1506,62 +1543,6 @@ func cleanupGuestbookDirectSpoke() {
 		"acm-openshift-gitops-cluster-admin", "--ignore-not-found")
 }
 
-// disableHubAppController / enableHubAppController: e2e-Kind-environment-only toggle (no product
-// code involved) around the hub's own ArgoCD app-controller, needed ONLY here and NOT by
-// gitopsaddon/test-cycle.sh (which runs the exact same autonomous-mode + hybrid-mode combination
-// against a real hub and passes without this toggle).
-//
-// Both halves of hybrid mode's isolation mechanism ARE correctly wired for autonomous mode: the
-// argocd-agent principal rewrites a mirrored autonomous Application's spec.destination to
-// {name: <agent>} (principal/event.go in argoproj-labs/argocd-agent), and this repo's
-// CreateArgoCDAgentClusters unconditionally stamps that agent's cluster secret with
-// argocd.argoproj.io/skip-reconcile: "true" regardless of mode - confirmed by direct inspection
-// (kubectl get application -o jsonpath spec.destination, kubectl get secret cluster-<agent>
-// -o jsonpath annotations) against a live run of this exact suite.
-//
-// The remaining gap is an ArgoCD version limitation, not a bug in this repo: prior to
-// https://github.com/argoproj/argo-cd/pull/26442 (merged into argo-cd upstream master
-// 2026-02-19), skip-reconcile on a cluster secret only gated the sync/reconcile-action trigger,
-// not the periodic status-refresh/comparison path - so the app-controller still attempts to
-// resolve the mirrored Application's spec.project (rewritten by the principal to
-// "<agent>-<project>", which by design only ever exists on the spoke for autonomous mode), fails
-// with "AppProject not found", and flips status.sync.status to Unknown on every refresh cycle
-// (see https://github.com/argoproj/argo-cd/issues/26425, filed specifically about this
-// argocd-agent/app-controller conflict). PR #26442 centralizes the check into IsManagedCluster so
-// skip-reconcile now also gates canProcessApp/canHandleCluster/the cluster-info updater, closing
-// this exact gap - but it's a v3.4+ feature. The e2e Kind environment's upstream community
-// argocd-operator image resolves to ArgoCD v3.3.10 (confirmed via the application-controller
-// pod's own startup log), which predates the fix. The real-hub environment gitopsaddon/test-cycle.sh
-// runs against does not hit this, so its autonomous-mode phase intentionally leaves the hub
-// app-controller enabled throughout and asserts on it directly - do not add this toggle there.
-func disableHubAppController() {
-	By("disabling hub ArgoCD app-controller (e2e-only: this Kind environment's ArgoCD v3.3.10 predates argo-cd#26442, so skip-reconcile alone doesn't stop the app-controller's status-refresh path from racing the principal over the autonomous mirror's status)")
-	// A merge patch (not applyLiteral/kubectl apply) - the hub ArgoCD CR carries a full spec
-	// (applicationSet, argoCDAgent, sourceNamespaces) applied by setup_env.sh; a 3-way apply of a
-	// manifest containing only spec.controller would delete every other field via apply's
-	// last-applied-configuration diff. A merge patch touches only the field named.
-	_, err := kubectlCtx(hubContext, "patch", "argocd", "openshift-gitops", "-n", argoCDNamespace,
-		"--type=merge", "-p", `{"spec":{"controller":{"enabled":false}}}`)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(func(g Gomega) string {
-		// "-o name" (not --no-headers) avoids kubectl's "No resources found in ... namespace."
-		// notice, which --no-headers still prints to stdout on a zero-match list and is not "".
-		out, _ := kubectlCtx(hubContext, "get", "pods", "-n", argoCDNamespace,
-			"-l", "app.kubernetes.io/name=openshift-gitops-application-controller",
-			"-o", "name")
-		return out
-	}, 2*time.Minute, 5*time.Second).Should(BeEmpty())
-}
-
-func enableHubAppController() {
-	By("re-enabling hub ArgoCD app-controller")
-	_, err := kubectlCtx(hubContext, "patch", "argocd", "openshift-gitops", "-n", argoCDNamespace,
-		"--type=merge", "-p", `{"spec":{"controller":{"enabled":true}}}`)
-	Expect(err).NotTo(HaveOccurred())
-	waitForPodPhase(hubContext, argoCDNamespace,
-		"app.kubernetes.io/name=openshift-gitops-application-controller", "Running", 3*time.Minute)
-}
-
 // ---- OLM Override helpers ----
 
 func verifyOLMOverrideEnvVars(clusterName string, timeout time.Duration) {
@@ -1574,8 +1555,8 @@ func safeCleanupOLMOverride(opts gitOpsClusterOpts) {
 	kubectlCtx(hubContext, "delete", "placement", opts.placementName, "-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(hubContext, "delete", "policy.policy.open-cluster-management.io", policyName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
 	kubectlCtx(hubContext, "delete", "placementbinding.policy.open-cluster-management.io", bindingName, "-n", argoCDNamespace, "--ignore-not-found", "--wait=false")
-	deleteMCAWithFallback(hubContext, addonName, spokeName)
 	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
+	deleteMCAWithFallback(hubContext, addonName, spokeName)
 }
 
 // safeCleanup is a best-effort AfterAll safety net (in addition to the explicit Cleanup context
@@ -1607,8 +1588,8 @@ func safeCleanup(opts gitOpsClusterOpts) {
 	kubectlCtx(spokeContext, "delete", "appproject", "default", "-n", argoCDNamespace, "--ignore-not-found")
 	kubectlCtx(spokeContext, "delete", "namespace", "guestbook", "--ignore-not-found", "--wait=false")
 	kubectlCtx(spokeContext, "delete", "clusterrolebinding", "acm-openshift-gitops-cluster-admin", "--ignore-not-found")
-	deleteMCAWithFallback(hubContext, addonName, spokeName)
 	kubectlCtx(hubContext, "delete", "gitopscluster", opts.name, "-n", argoCDNamespace, "--ignore-not-found")
+	deleteMCAWithFallback(hubContext, addonName, spokeName)
 	deleteLiteral(hubContext, managedClusterSetBindingYAML(argoCDNamespace))
 }
 

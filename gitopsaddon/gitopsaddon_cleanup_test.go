@@ -701,6 +701,114 @@ func TestClearStalePauseMarker(t *testing.T) {
 // with an explicit reader parameter, simulating the real startup scenario where
 // the controller-runtime cache (client.Client) may not have synced yet but
 // the uncached APIReader can see the marker.
+func TestClearStalePauseMarkerKeepsRecentMarker(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).ToNot(gomega.HaveOccurred())
+
+	marker := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      PauseMarkerName,
+			Namespace: AddonNamespace,
+			Labels:    map[string]string{"app": "gitops-addon"},
+		},
+		Data: map[string]string{
+			"paused":    "true",
+			"reason":    "cleanup",
+			"timestamp": time.Now().Format(time.RFC3339),
+		},
+	}
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(marker).Build()
+
+	ClearStalePauseMarker(context.TODO(), testClient)
+
+	// A fresh marker belongs to an in-progress cleanup: it must survive, and the
+	// addon must still consider itself paused.
+	cm := &corev1.ConfigMap{}
+	err := testClient.Get(context.TODO(), types.NamespacedName{
+		Name: PauseMarkerName, Namespace: AddonNamespace,
+	}, cm)
+	g.Expect(err).ToNot(gomega.HaveOccurred(), "recent pause marker must not be deleted")
+	g.Expect(IsPaused(context.TODO(), testClient)).To(gomega.BeTrue())
+
+	// Once the marker is older than the maximum age it is ignored, so an interrupted
+	// cleanup cannot pause the addon forever.
+	cm.Data["timestamp"] = time.Now().Add(-2 * pauseMarkerMaxAge).Format(time.RFC3339)
+	g.Expect(testClient.Update(context.TODO(), cm)).ToNot(gomega.HaveOccurred())
+	g.Expect(IsPaused(context.TODO(), testClient)).To(gomega.BeFalse())
+}
+
+func TestCreatePauseMarkerRefreshesExistingMarker(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).ToNot(gomega.HaveOccurred())
+
+	oldTimestamp := time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
+	marker := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      PauseMarkerName,
+			Namespace: AddonNamespace,
+		},
+		Data: map[string]string{
+			"paused":    "true",
+			"reason":    "cleanup",
+			"timestamp": oldTimestamp,
+		},
+	}
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(marker).Build()
+
+	g.Expect(createPauseMarker(context.TODO(), testClient)).ToNot(gomega.HaveOccurred())
+
+	cm := &corev1.ConfigMap{}
+	g.Expect(testClient.Get(context.TODO(), types.NamespacedName{
+		Name: PauseMarkerName, Namespace: AddonNamespace,
+	}, cm)).ToNot(gomega.HaveOccurred())
+	g.Expect(cm.Data["timestamp"]).ToNot(gomega.Equal(oldTimestamp),
+		"an existing marker must be refreshed so the staleness window restarts")
+	g.Expect(IsPaused(context.TODO(), testClient)).To(gomega.BeTrue())
+}
+
+func TestClearStalePauseMarkerKeepsMarkerWhileCleanupDeploymentExists(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).ToNot(gomega.HaveOccurred())
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AddonDeploymentName,
+			Namespace: AddonNamespace,
+			UID:       "live-uid",
+		},
+	}
+	marker := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      PauseMarkerName,
+			Namespace: AddonNamespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: "apps/v1", Kind: "Deployment", Name: AddonDeploymentName, UID: "live-uid"},
+			},
+		},
+		Data: map[string]string{
+			"paused":    "true",
+			"reason":    "cleanup",
+			"timestamp": time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment, marker).Build()
+
+	ClearStalePauseMarker(context.TODO(), testClient)
+
+	cm := &corev1.ConfigMap{}
+	err := testClient.Get(context.TODO(), types.NamespacedName{
+		Name: PauseMarkerName, Namespace: AddonNamespace,
+	}, cm)
+	g.Expect(err).ToNot(gomega.HaveOccurred(),
+		"a marker owned by a live cleanup Deployment must be kept even when old")
+}
+
 func TestClearStalePauseMarkerWithExplicitReader(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -709,11 +817,11 @@ func TestClearStalePauseMarkerWithExplicitReader(t *testing.T) {
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	tests := []struct {
-		name                string
-		readerObjects       []client.Object // objects visible to the reader
-		clientObjects       []client.Object // objects visible to the client
-		expectDeleted       bool
-		description         string
+		name          string
+		readerObjects []client.Object // objects visible to the reader
+		clientObjects []client.Object // objects visible to the client
+		expectDeleted bool
+		description   string
 	}{
 		{
 			name: "reader_sees_marker_client_does_not",
@@ -772,7 +880,7 @@ func TestClearStalePauseMarkerWithExplicitReader(t *testing.T) {
 			description:   "No marker exists, no-op",
 		},
 		{
-			name: "nil_reader_falls_back_to_client",
+			name:          "nil_reader_falls_back_to_client",
 			readerObjects: nil, // nil reader - should fall back to client
 			clientObjects: []client.Object{
 				&corev1.Namespace{
@@ -1075,13 +1183,13 @@ func TestCollectRemainingResources(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	tests := []struct {
-		name             string
-		namespace        string
-		namespacedTypes  []resourceType
-		clusterTypes     []resourceType
-		requireLabel     bool
-		existingObjects  []client.Object
-		expectedCount    int
+		name            string
+		namespace       string
+		namespacedTypes []resourceType
+		clusterTypes    []resourceType
+		requireLabel    bool
+		existingObjects []client.Object
+		expectedCount   int
 	}{
 		{
 			name:      "no_remaining_resources",
@@ -1136,7 +1244,6 @@ func TestCollectRemainingResources(t *testing.T) {
 		})
 	}
 }
-
 
 func TestDeleteResourcesByTypeSkipsUnlabeledSystemResources(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -1546,4 +1653,60 @@ func (c *clusterRoleDeleteBlocker) Delete(ctx context.Context, obj client.Object
 		}
 	}
 	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func TestPauseMarkerAge(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	fresh := &corev1.ConfigMap{Data: map[string]string{"timestamp": time.Now().Format(time.RFC3339)}}
+	age, known := pauseMarkerAge(fresh)
+	g.Expect(known).To(gomega.BeTrue())
+	g.Expect(age).To(gomega.BeNumerically("<", time.Minute))
+
+	old := &corev1.ConfigMap{Data: map[string]string{
+		"timestamp": time.Now().Add(-2 * pauseMarkerMaxAge).Format(time.RFC3339),
+	}}
+	age, known = pauseMarkerAge(old)
+	g.Expect(known).To(gomega.BeTrue())
+	g.Expect(age).To(gomega.BeNumerically(">", pauseMarkerMaxAge))
+
+	_, known = pauseMarkerAge(&corev1.ConfigMap{})
+	g.Expect(known).To(gomega.BeFalse())
+
+	_, known = pauseMarkerAge(&corev1.ConfigMap{Data: map[string]string{"timestamp": "not-a-time"}})
+	g.Expect(known).To(gomega.BeFalse())
+}
+
+func TestWaitForTerminatingArgoCDCRsTimesOut(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).ToNot(gomega.HaveOccurred())
+
+	now := metav1.Now()
+	argoCD := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "argoproj.io/v1beta1",
+		"kind":       "ArgoCD",
+		"metadata": map[string]interface{}{
+			"name":              "acm-openshift-gitops",
+			"namespace":         "openshift-gitops",
+			"deletionTimestamp": now.Format(time.RFC3339),
+			"finalizers":        []interface{}{"argoproj.io/finalizer"},
+		},
+	}}
+	testClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(argoCD).Build()
+
+	err := waitForTerminatingArgoCDCRs(context.TODO(), testClient, 100*time.Millisecond)
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("still terminating"))
+}
+
+func TestWaitForTerminatingArgoCDCRsReturnsWhenNoneTerminate(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(scheme)).ToNot(gomega.HaveOccurred())
+	testClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	g.Expect(waitForTerminatingArgoCDCRs(context.TODO(), testClient, time.Second)).ToNot(gomega.HaveOccurred())
 }

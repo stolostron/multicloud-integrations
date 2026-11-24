@@ -7,14 +7,20 @@ set -o nounset
 set -o pipefail
 
 echo "SETUP install OCM"
-deploy/ocm/install.sh
+if ! deploy/ocm/install.sh; then
+    echo "ERROR: OCM installation failed" >&2
+    exit 1
+fi
 
 echo "SETUP install multicloud-integrations"
+E2E_IMG=${E2E_IMG:-quay.io/stolostron/multicloud-integrations:latest}
 kubectl config use-context kind-hub
 kubectl create namespace open-cluster-management || true
 kubectl apply -f deploy/crds/
 kubectl apply -f hack/test/crds/0000_00_authentication.open-cluster-management.io_managedserviceaccounts.yaml
-kubectl apply -f deploy/controller/
+for f in deploy/controller/*.yaml; do
+    sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" "$f" | kubectl apply -f -
+done
 
 kubectl -n open-cluster-management rollout status deployment multicloud-integrations-gitops --timeout=120s
 kubectl -n open-cluster-management rollout status deployment multicloud-integrations --timeout=120s

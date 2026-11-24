@@ -49,7 +49,7 @@ import (
 //     by positional index, so any other manifest config entry a ManifestWork might carry is
 //     left completely alone.
 //
-// Deliberately never deletes anything -- see CLAUDE.md for why deleting a pull-model
+// Deliberately never deletes anything -- see AGENT.md for why deleting a pull-model
 // ManifestWork is destructive to the real workload it delivered.
 func SweepManifestWorksToReadOnly(ctx context.Context, c client.Client) error {
 	var mwList workv1.ManifestWorkList
