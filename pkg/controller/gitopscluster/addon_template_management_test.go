@@ -778,10 +778,14 @@ func TestExtractDeploymentImage(t *testing.T) {
 	})
 }
 
-// TestAddOnTemplateNeedsUpdate covers the targeted comparison that replaced the previous
-// unconditional Update(): only the addon image and the CA/argoNamespace can ever legitimately
-// differ across reconciles of the same GitOpsCluster, so those are the only two things compared.
+// TestAddOnTemplateNeedsUpdate covers the comparison that replaced the previous unconditional
+// Update(): the addon image, the CA/argoNamespace, and the rendered manifest list (compared
+// semantically, so a code upgrade with an unchanged image tag is still applied).
 func TestAddOnTemplateNeedsUpdate(t *testing.T) {
+	const argoNamespace = "openshift-gitops"
+	wantV1 := buildAddonManifests(argoNamespace, "quay.io/example/addon:v1")
+	wantV2 := buildAddonManifests(argoNamespace, "quay.io/example/addon:v2")
+
 	buildExisting := func(image, argoNamespace string) *addonv1alpha1.AddOnTemplate {
 		return &addonv1alpha1.AddOnTemplate{
 			Spec: addonv1alpha1.AddOnTemplateSpec{
@@ -802,21 +806,21 @@ func TestAddOnTemplateNeedsUpdate(t *testing.T) {
 
 	t.Run("identical inputs need no update", func(t *testing.T) {
 		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
-		if addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+		if addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", argoNamespace, wantV1) {
 			t.Error("addOnTemplateNeedsUpdate() = true for identical inputs, want false")
 		}
 	})
 
 	t.Run("image change needs update", func(t *testing.T) {
 		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
-		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v2", "openshift-gitops") {
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v2", argoNamespace, wantV2) {
 			t.Error("addOnTemplateNeedsUpdate() = false after image change, want true")
 		}
 	})
 
 	t.Run("argoNamespace change needs update", func(t *testing.T) {
 		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
-		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "custom-argocd-ns") {
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "custom-argocd-ns", wantV1) {
 			t.Error("addOnTemplateNeedsUpdate() = false after argoNamespace change, want true")
 		}
 	})
@@ -829,15 +833,53 @@ func TestAddOnTemplateNeedsUpdate(t *testing.T) {
 				},
 			},
 		}
-		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", argoNamespace, wantV1) {
 			t.Error("addOnTemplateNeedsUpdate() = false with no Registration, want true (fail open)")
+		}
+	})
+
+	t.Run("manifest content change with identical image needs update", func(t *testing.T) {
+		// Simulates a controller upgrade that renders a different manifest (for example a new
+		// env var) while the controller image tag itself stays the same.
+		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
+
+		index := -1
+		for i, m := range existing.Spec.AgentSpec.Workload.Manifests {
+			var probe map[string]interface{}
+			if err := json.Unmarshal(m.Raw, &probe); err != nil {
+				t.Fatalf("decode manifest: %v", err)
+			}
+			if probe["kind"] == "Deployment" {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			t.Fatal("test setup: no Deployment manifest found")
+		}
+
+		var deployment map[string]interface{}
+		if err := json.Unmarshal(existing.Spec.AgentSpec.Workload.Manifests[index].Raw, &deployment); err != nil {
+			t.Fatalf("decode deployment: %v", err)
+		}
+		containers := deployment["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})
+		env := containers[0].(map[string]interface{})["env"].([]interface{})
+		containers[0].(map[string]interface{})["env"] = env[:len(env)-1]
+		mutated, err := json.Marshal(deployment)
+		if err != nil {
+			t.Fatalf("marshal deployment: %v", err)
+		}
+		existing.Spec.AgentSpec.Workload.Manifests[index].Raw = mutated
+
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", argoNamespace, wantV1) {
+			t.Error("addOnTemplateNeedsUpdate() = false after a manifest change, want true")
 		}
 	})
 
 	t.Run("undecodable manifests fail open to needs-update", func(t *testing.T) {
 		existing := buildExisting("quay.io/example/addon:v1", "openshift-gitops")
 		existing.Spec.AgentSpec.Workload.Manifests = nil
-		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", "openshift-gitops") {
+		if !addOnTemplateNeedsUpdate(existing, "quay.io/example/addon:v1", argoNamespace, wantV1) {
 			t.Error("addOnTemplateNeedsUpdate() = false with no manifests, want true (fail open)")
 		}
 	})

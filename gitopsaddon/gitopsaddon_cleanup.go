@@ -111,6 +111,16 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 		errors = append(errors, fmt.Errorf("failed to delete ArgoCD CR: %w", err))
 	}
 
+	// Step 2b: Let the operator finalize any other terminating ArgoCD CR before its RBAC and
+	// Deployment are removed. Removing the operator while one is still terminating would wedge
+	// that CR in Terminating forever, so fail the Job (OCM retries the hook) instead.
+	if err := waitForTerminatingArgoCDCRs(ctx, c, 2*time.Minute); err != nil {
+		if delErr := deletePauseMarker(ctx, c); delErr != nil {
+			klog.Warningf("Failed to remove pause marker before retrying cleanup: %v", delErr)
+		}
+		return fmt.Errorf("ArgoCD CR termination did not complete; retrying cleanup: %w", err)
+	}
+
 	// Step 3: Remove the operator. Only runs AFTER ArgoCD CR is fully gone (step 2
 	// waited for the finalizer). This ordering is critical — if we remove the operator
 	// before the ArgoCD CR finalizer is processed, the operator can't clean up its
@@ -147,6 +157,11 @@ func uninstallOnManagedCluster(ctx context.Context, c client.Client, gitopsOpera
 		if err := deleteOperatorResources(ctx, c, gitopsOperatorNS); err != nil {
 			klog.Warningf("Final operator cleanup pass: %v", err)
 		}
+
+		// The work-agent can still start a fresh agent pod during the hook, which
+		// re-installs the operator. Keep re-deleting anything it recreates until the
+		// hook finishes and OCM removes the agent.
+		waitAndVerifyCleanup(ctx, c, gitopsOperatorNS, getCleanupVerificationWaitDuration())
 	}
 
 	// If the pause marker has an ownerReference to the addon Deployment, leave it for
@@ -647,6 +662,43 @@ func deleteArgoCDCR(ctx context.Context, c client.Client) error {
 	}
 }
 
+// waitForTerminatingArgoCDCRs waits until no ArgoCD CR has a deletionTimestamp.
+func waitForTerminatingArgoCDCRs(ctx context.Context, c client.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	checkInterval := 5 * time.Second
+
+	for {
+		argoCDList := &unstructured.UnstructuredList{}
+		argoCDList.SetAPIVersion("argoproj.io/v1beta1")
+		argoCDList.SetKind("ArgoCDList")
+
+		if err := c.List(ctx, argoCDList); err != nil {
+			if isNoKindMatchError(err) || apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		var terminating []string
+		for i := range argoCDList.Items {
+			if argoCDList.Items[i].GetDeletionTimestamp() != nil {
+				terminating = append(terminating,
+					argoCDList.Items[i].GetNamespace()+"/"+argoCDList.Items[i].GetName())
+			}
+		}
+		if len(terminating) == 0 {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ArgoCD CR(s) still terminating after %v: %v", timeout, terminating)
+		}
+
+		klog.Infof("Waiting for ArgoCD CR(s) to finish terminating: %v", terminating)
+		time.Sleep(checkInterval)
+	}
+}
+
 // deleteOperatorResources deletes openshift-gitops-operator resources
 // Resources from gitopsaddon/charts/openshift-gitops-operator/templates/ (excluding CRDs)
 func deleteOperatorResources(ctx context.Context, c client.Client, gitopsOperatorNS string) error {
@@ -657,6 +709,7 @@ func deleteOperatorResources(ctx context.Context, c client.Client, gitopsOperato
 		{"Deployment", "apps/v1"},
 		{"Service", "v1"},
 		{"ConfigMap", "v1"},
+		{"Secret", "v1"},
 		{"ServiceAccount", "v1"},
 		{"Role", "rbac.authorization.k8s.io/v1"},
 		{"RoleBinding", "rbac.authorization.k8s.io/v1"},
@@ -848,9 +901,27 @@ func collectRemainingResources(ctx context.Context, c client.Client, namespacedT
 	return remaining
 }
 
-// createPauseMarker creates a ConfigMap marker to pause the gitops-addon controller
-// The pause marker is owned by the gitops-addon Deployment, so it will be automatically
-// garbage collected when the Deployment is deleted
+// pauseMarkerMaxAge bounds how long a pause marker is honoured. A cleanup Job lives at most
+// 600s (activeDeadlineSeconds); anything older than this was left behind by an interrupted
+// cleanup and must not pause the addon forever.
+const pauseMarkerMaxAge = 15 * time.Minute
+
+// pauseMarkerAge returns how long ago the marker was created, when the timestamp is usable.
+func pauseMarkerAge(cm *corev1.ConfigMap) (time.Duration, bool) {
+	raw, ok := cm.Data["timestamp"]
+	if !ok {
+		return 0, false
+	}
+	created, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return 0, false
+	}
+	return time.Since(created), true
+}
+
+// createPauseMarker creates a ConfigMap marker to pause the gitops-addon controller.
+// The marker is owned by the gitops-addon Deployment when it exists, so it is garbage
+// collected together with the Deployment.
 func createPauseMarker(ctx context.Context, c client.Client) error {
 	klog.Infof("Creating pause marker ConfigMap '%s' in namespace: %s", PauseMarkerName, AddonNamespace)
 
@@ -902,7 +973,26 @@ func createPauseMarker(ctx context.Context, c client.Client) error {
 	}
 
 	err := c.Create(ctx, pauseMarker)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	if apierrors.IsAlreadyExists(err) {
+		// A marker from an earlier (possibly interrupted) cleanup must not keep its old
+		// timestamp: the staleness check would then treat this cleanup as finished.
+		existing := &corev1.ConfigMap{}
+		key := types.NamespacedName{Name: PauseMarkerName, Namespace: AddonNamespace}
+		if getErr := c.Get(ctx, key, existing); getErr != nil {
+			return fmt.Errorf("failed to read existing pause marker: %w", getErr)
+		}
+		existing.Data = pauseMarker.Data
+		existing.OwnerReferences = pauseMarker.OwnerReferences
+		if existing.Labels == nil {
+			existing.Labels = pauseMarker.Labels
+		}
+		if updateErr := c.Update(ctx, existing); updateErr != nil {
+			return fmt.Errorf("failed to refresh pause marker: %w", updateErr)
+		}
+		klog.Infof("Pause marker refreshed in namespace: %s", AddonNamespace)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("failed to create pause marker: %w", err)
 	}
 
@@ -954,8 +1044,10 @@ func deleteOrphanedPauseMarker(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-// ClearStalePauseMarker deletes the pause marker ConfigMap if it exists.
-// Called at controller startup to clear markers left over from a previous cleanup cycle.
+// ClearStalePauseMarker deletes the pause marker if it was left behind by an interrupted
+// cleanup. A marker that is still owned by a live addon Deployment, or one created within
+// the cleanup window, is kept: a cleanup is in progress and a resurrected agent pod must
+// stay paused. Called at controller startup.
 // On OCP (OLM mode), the pause marker can't use owner references because the Deployment
 // and the marker are in different namespaces, so the marker is never garbage collected.
 //
@@ -986,10 +1078,48 @@ func ClearStalePauseMarker(ctx context.Context, c client.Client, readers ...clie
 		return
 	}
 
+	// A marker that owns a still-existing addon Deployment belongs to a cleanup that is
+	// still running (the Deployment is scaled to 0, or the work-agent just restored it).
+	// Keeping it is what stops a resurrected agent pod from re-installing the operator.
+	for _, ref := range pauseMarker.OwnerReferences {
+		if ref.Kind != "Deployment" {
+			continue
+		}
+		deployment := &appsv1.Deployment{}
+		err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: AddonNamespace}, deployment)
+		if err == nil && (ref.UID == "" || ref.UID == deployment.UID) {
+			klog.Infof("Pause marker is owned by the current Deployment %s; a cleanup is in progress, keeping it", ref.Name)
+			return
+		}
+		if err == nil {
+			klog.Infof("Pause marker owner %s has been replaced (UID %s != %s); falling back to the age check",
+				ref.Name, ref.UID, deployment.UID)
+			continue
+		}
+		if !apierrors.IsNotFound(err) {
+			klog.Warningf("Error checking pause marker owner Deployment: %v", err)
+			return
+		}
+	}
+
+	if age, known := pauseMarkerAge(pauseMarker); known && age <= pauseMarkerMaxAge {
+		klog.Infof("Pause marker is recent (age %v); a cleanup is in progress, keeping it", age.Truncate(time.Second))
+		return
+	}
+
 	klog.Infof("Found stale pause marker from previous cleanup (timestamp: %s), deleting it",
 		pauseMarker.Data["timestamp"])
-	if err := c.Delete(ctx, pauseMarker); err != nil && !apierrors.IsNotFound(err) {
-		klog.Warningf("Failed to delete stale pause marker: %v", err)
+	// Delete only the version that was checked: a concurrent cleanup may have refreshed the
+	// marker in the meantime, in which case it must stay.
+	preconditions := client.Preconditions{ResourceVersion: &pauseMarker.ResourceVersion}
+	if err := c.Delete(ctx, pauseMarker, preconditions); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+		case apierrors.IsConflict(err):
+			klog.Infof("Pause marker was refreshed while checking it; keeping it")
+		default:
+			klog.Warningf("Failed to delete stale pause marker: %v", err)
+		}
 	} else {
 		klog.Info("Successfully deleted stale pause marker")
 	}
@@ -1048,6 +1178,11 @@ func IsPaused(ctx context.Context, c client.Client) bool {
 
 	// Check if the pause marker indicates paused state
 	if pauseMarker.Data["paused"] == "true" {
+		if age, known := pauseMarkerAge(pauseMarker); known && age > pauseMarkerMaxAge {
+			klog.Warningf("Ignoring stale pause marker (age %v): a cleanup must have been interrupted",
+				age.Truncate(time.Second))
+			return false
+		}
 		klog.Infof("GitOps addon is paused (reason: %s, timestamp: %s)",
 			pauseMarker.Data["reason"], pauseMarker.Data["timestamp"])
 		return true
@@ -1065,15 +1200,23 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, gitopsOperatorNS
 	klog.Infof("Starting best-effort cleanup re-sweep for %v", waitDuration)
 
 	checkInterval := 5 * time.Second
-	elapsed := time.Duration(0)
+	start := time.Now()
 	checkCount := 0
 
-	for elapsed < waitDuration {
-		time.Sleep(checkInterval)
-		elapsed += checkInterval
-		checkCount++
+	// Track wall-clock time rather than counting sleeps. A deleteOperatorResources call can
+	// block for minutes; counting only sleeps would let one such call per check stretch the
+	// re-sweep far past waitDuration and toward the cleanup Job's 600s activeDeadlineSeconds.
+	// At most one in-flight re-delete can now run past the window.
+	for time.Since(start) < waitDuration {
+		sleep := checkInterval
+		if remaining := waitDuration - time.Since(start); remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
 
-		klog.Infof("Cleanup re-sweep check %d (elapsed: %v/%v)", checkCount, elapsed, waitDuration)
+		checkCount++
+		klog.Infof("Cleanup re-sweep check %d (elapsed: %v/%v)",
+			checkCount, time.Since(start).Round(time.Second), waitDuration)
 
 		operatorResourcesExist, err := verifyNamespaceCleanup(ctx, c, gitopsOperatorNS)
 		if err != nil {
@@ -1091,7 +1234,7 @@ func waitAndVerifyCleanup(ctx context.Context, c client.Client, gitopsOperatorNS
 		}
 	}
 
-	klog.Infof("Cleanup re-sweep completed after %v", waitDuration)
+	klog.Infof("Cleanup re-sweep completed after %v", time.Since(start).Round(time.Second))
 }
 
 // verifyNamespaceCleanup checks if there are any resources with the gitops-addon label in the namespace

@@ -33,9 +33,8 @@ import (
 )
 
 //nolint:all
-//go:embed charts/openshift-gitops-operator/**
+//go:embed all:charts/openshift-gitops-operator/**
 var ChartFS embed.FS
-
 
 // GitOpsNamespace is exported from pkg/utils for backward compatibility
 const GitOpsNamespace = utils.GitOpsNamespace

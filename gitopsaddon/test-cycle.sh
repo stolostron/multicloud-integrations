@@ -7,8 +7,9 @@
 # then deletes from the hub and verifies clean cleanup on every managed cluster.
 #
 # OCP clusters use OLM for operator installation (latest channel from redhat-operators).
-# Non-OCP clusters (Kind, EKS) use the embedded Helm chart with hardcoded image SHAs
-# from pkg/utils/config.go. The agent image on all clusters is set by the hub
+# Non-OCP clusters (Kind, EKS) use the embedded Helm chart; its image digests are
+# generated into pkg/utils/operator_images_generated.go. The agent image on all
+# clusters is set by the hub
 # controller's drift heal mechanism (reads principal pod image, writes to each
 # managed cluster's AddOnDeploymentConfig ARGOCD_AGENT_IMAGE -- never the shared Policy).
 #
@@ -166,16 +167,14 @@ for item in d.get('items',[]):
     # Delete stale cleanup jobs and addon pods
     on_cluster "$cluster" delete jobs -n open-cluster-management-agent-addon --all --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
-    # Delete CRDs on non-OCP clusters only (OCP CRDs are managed by OLM)
+    # Leave the ArgoCD CRDs in place on non-OCP clusters. Deleting a CRD starts a
+    # cluster-wide instance cleanup that stalls while any CR still carries a finalizer, and a
+    # terminating CRD cannot be re-created - the addon then fails to install until the CRD
+    # finally disappears. The addon creates/updates these CRDs itself on every install.
     local has_clusterversion
     has_clusterversion=$(on_cluster "$cluster" get crd clusterversions.config.openshift.io -o name 2>/dev/null || true)
     if [ -z "$has_clusterversion" ]; then
-        log "  $cluster is non-OCP, deleting ArgoCD CRDs..."
-        local crd_list
-        crd_list=$(on_cluster "$cluster" get crd -o name 2>/dev/null | grep -i "argoproj\|argocd\|gitops" || true)
-        for crd in $crd_list; do
-            on_cluster "$cluster" delete "$crd" --ignore-not-found --wait=false 2>/dev/null || true
-        done
+        log "  $cluster is non-OCP, keeping ArgoCD CRDs (the addon owns their content)"
     else
         log "  $cluster is OCP, keeping CRDs (managed by OLM)"
     fi
@@ -208,7 +207,7 @@ EORBAC
 clean_hub_stale() {
     log "Cleaning stale hub resources..."
     # Only this test run's own script-specific binding - never the "openshift-gitops-
-    # appcontroller-cluster-admin" name a real hybrid-mode deployment manages (see CLAUDE.md).
+    # appcontroller-cluster-admin" name a real hybrid-mode deployment manages (see AGENT.md).
     hub delete clusterrolebinding "$HUB_APPCONTROLLER_RBAC_NAME" --ignore-not-found 2>/dev/null || true
     local stale_csrs
     stale_csrs=$(hub get csr -o name 2>/dev/null | grep "gitops-addon" || true)
@@ -409,7 +408,7 @@ EOF
 # the app-controller on non-OCP managed clusters (see force_clean_cluster's pre-created binding).
 #
 # Uses a script-specific ClusterRoleBinding name (not the "openshift-gitops-appcontroller-
-# cluster-admin" name documented in CLAUDE.md for real hybrid-mode setups) so this test run never
+# cluster-admin" name documented in AGENT.md for real hybrid-mode setups) so this test run never
 # overwrites or fights over a binding a real deployment already manages under that name; it's
 # torn down in clean_hub_stale so repeated runs start from a clean slate.
 #
@@ -577,12 +576,19 @@ wait_for_status_match() {
 # --- Verify managed clusters ---
 verify_managed() {
     for cluster in "${CLUSTER_NAMES[@]}"; do
-        local nodes
-        nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l)
+        local nodes=0
+        for _ in 1 2 3; do
+            nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l || true)
+            [[ "$nodes" -gt 0 ]] && break
+            sleep 5
+        done
+        if [[ "$nodes" -eq 0 ]]; then
+            fail "$cluster NOT accessible after 3 attempts (transient errors are retried; persistent failure is fatal)"
+        fi
         pass "$cluster accessible ($nodes nodes)"
 
         # A freshly-installed agent can crash-loop for a few minutes while the argocd-agent-ca
-        # secret propagates from the hub via ManifestWork (documented, expected - see CLAUDE.md's
+        # secret propagates from the hub via ManifestWork (documented, expected - see AGENT.md's
         # "Principal CrashLoopBackOff" note). Observed live: while crash-looping, the agent can
         # drop its locally-managed Application on a reconnect/resync, and that never gets
         # redispatched until the agent is actually stable. Wait for stability FIRST so the
@@ -740,7 +746,7 @@ verify_agent_e2e() {
             # 2. App reconciled on spoke (resources created)
             local spoke_resources=0
             if [ "$cluster_ok" = "true" ]; then
-                spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l)
+                spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l || true)
                 [ "$spoke_resources" -lt 1 ] && cluster_ok=false
             fi
 
@@ -786,7 +792,7 @@ verify_agent_e2e() {
         spoke_app=$(on_cluster "$cluster" get application.argoproj.io "guestbook-${cluster}" \
             -n openshift-gitops -o jsonpath='{.metadata.name}' 2>/dev/null || echo "none")
         local spoke_resources
-        spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l)
+        spoke_resources=$(on_cluster "$cluster" get deploy,svc -n guestbook --no-headers 2>/dev/null | wc -l || true)
         local hub_sync
         hub_sync=$(hub get application.argoproj.io "guestbook-${cluster}" -n openshift-gitops \
             -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "none")
@@ -820,7 +826,7 @@ verify_pods_stable() {
     # Poll until every pod converges to STABLE: Running+Ready with an unchanged restart count
     # across two consecutive checks. A pod may restart once or twice on the way there (e.g. the
     # well-known argocd-agent-ca/client-tls secret propagation race - see "Expected Waits" in
-    # CLAUDE.md, which can transiently crash-loop a fresh agent pod for up to a couple minutes
+    # AGENT.md, which can transiently crash-loop a fresh agent pod for up to a couple minutes
     # before self-healing) without failing this check, as long as it eventually settles. It only
     # fails a pod that never reaches that stable state within the recovery window - a single
     # snapshot right after settle_secs can't tell "still recovering" apart from "actually broken."
@@ -1365,9 +1371,13 @@ verify_autonomous_cleanup() {
             pass "$cluster: addon deployment removed (autonomous)"
         fi
 
-        local nodes
-        nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l)
-        if [ "$nodes" -gt 0 ]; then
+        local nodes=0
+        for _ in 1 2 3; do
+            nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l || true)
+            [[ "$nodes" -gt 0 ]] && break
+            sleep 5
+        done
+        if [[ "$nodes" -gt 0 ]]; then
             pass "$cluster still accessible ($nodes nodes)"
         else
             log "CLEANUP ISSUE: $cluster NOT accessible!"; issues=$((issues+1))
@@ -1392,7 +1402,7 @@ delete_from_hub() {
     #    actually owns it: the connected agent for guestbook-<cluster> (spoke-managed,
     #    cluster secret carries skip-reconcile), and the hub's own application controller
     #    for guestbook-local-cluster (plain in-cluster secret, no skip-reconcile). This
-    #    matches the documented "Cleanup (Manual Deletion Order)" in CLAUDE.md
+    #    matches the documented "Cleanup (Manual Deletion Order)" in AGENT.md
     #    (ApplicationSet first) and needs no manual finalizer stripping — deleting MCAs
     #    first would disconnect the agents before they can process the finalizer.
     hub delete applicationset "$APPSET_NAME" -n "$ARGOCD_NS" --ignore-not-found --wait=false 2>/dev/null || true
@@ -1669,9 +1679,13 @@ verify_cleanup() {
         on_cluster "$cluster" delete pod --all -n guestbook --force --grace-period=0 --ignore-not-found 2>/dev/null || true
 
         # Cluster still accessible (critical check)
-        local nodes
-        nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l)
-        if [ "$nodes" -gt 0 ]; then
+        local nodes=0
+        for _ in 1 2 3; do
+            nodes=$(on_cluster "$cluster" get nodes --no-headers 2>/dev/null | wc -l || true)
+            [[ "$nodes" -gt 0 ]] && break
+            sleep 5
+        done
+        if [[ "$nodes" -gt 0 ]]; then
             pass "$cluster still accessible ($nodes nodes)"
         else
             log "CLEANUP ISSUE: $cluster NOT accessible!"; issues=$((issues+1))

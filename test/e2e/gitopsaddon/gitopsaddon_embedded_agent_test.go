@@ -40,6 +40,10 @@ var _ = Describe("GitOps Addon - Embedded Operator + Agent (Kind)", Label("embed
 			verifyEmbeddedOperator(5 * time.Minute)
 		})
 
+		It("should propagate every chart component image to the spoke", func() {
+			verifyChartComponentImagePropagation(3 * time.Minute)
+		})
+
 		It("should deploy ArgoCD CR and application-controller on spoke", func() {
 			verifyArgoCDOnSpoke(8 * time.Minute)
 		})

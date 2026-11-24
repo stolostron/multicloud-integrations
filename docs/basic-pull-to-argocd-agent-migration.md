@@ -1,9 +1,9 @@
 # Migrating from the Basic Pull Model to argocd-agent
 
 This is a runbook for moving apps off the classic ManifestWork-based "basic pull model" (see
-CLAUDE.md → "Basic Pull Model" under Architecture) and onto argocd-agent, without creating a new
+AGENT.md → "Basic Pull Model" under Architecture) and onto argocd-agent, without creating a new
 `Application`/`ApplicationSet` and without disrupting the real workload underneath. For the
-architectural background and the two rejected designs that led to the approach below, see CLAUDE.md
+architectural background and the two rejected designs that led to the approach below, see AGENT.md
 → "Migrating an App from Basic Pull Model to argocd-agent".
 
 ## What this achieves
@@ -70,7 +70,7 @@ You need:
 - Agent-mode prerequisites already on the hub: `ManagedClusterSetBinding` for `global` in the
   ArgoCD namespace, the default `AppProject` patched with `destinations: [{name: "*", ...}]`, and
   the hub's own ArgoCD instance already running as an argocd-agent principal
-  (`spec.argoCDAgent.principal.enabled: true`). See CLAUDE.md → "Agent Mode Setup — Full YAML" if
+  (`spec.argoCDAgent.principal.enabled: true`). See AGENT.md → "Agent Mode Setup — Full YAML" if
   any of this isn't done yet.
 - For each app you're migrating: the hub `GitOpsCluster` object managing its target cluster (call
   its name `$GITOPSCLUSTER`), the app's name (`$APP_NAME`) and namespace (`$ARGOCD_NS`, normally
@@ -79,7 +79,7 @@ You need:
 
 This works whether the pull model was set up via `gitopsAddon.enabled: true` or via
 `createBlankClusterSecrets: true` directly — the latter is how the pull model can exist completely
-independent of the addon; see CLAUDE.md → "Basic Pull Model" under Architecture.
+independent of the addon; see AGENT.md → "Basic Pull Model" under Architecture.
 
 **Basic pull model is OCP-only.** This runbook applies to apps delivered to OCP managed clusters.
 
@@ -243,7 +243,7 @@ kubectl get addondeploymentconfig gitops-addon-config -n $CLUSTER_NAME \
 
 # agent cluster secret appears on the hub, correctly labeled AND annotated skip-reconcile: "true"
 # (skip-reconcile is what keeps the hub's own app-controller from fighting the agent for this
-# cluster -- see CLAUDE.md -> "Skip-Reconcile Annotation on Agent Cluster Secrets"). Assert both
+# cluster -- see AGENT.md -> "Skip-Reconcile Annotation on Agent Cluster Secrets"). Assert both
 # explicitly rather than just eyeballing the printed value -- proceeding with either one missing
 # means either the agent was never actually wired up, or the hub app-controller will fight the
 # agent for this cluster once Step 4 dispatches to it.
@@ -483,7 +483,7 @@ from Step 1 is the only leftover either way; leave it in place permanently.
 
 **An immediate post-action check is not proof that a step was safe.** A pod `uid` unchanged one
 second after a risky operation only means nothing had cascaded *yet* — some failure modes (see
-CLAUDE.md → "Designs that were rejected" for a real example) take real wall-clock minutes to
+AGENT.md → "Designs that were rejected" for a real example) take real wall-clock minutes to
 finish. Re-verify after a wait, not just immediately, at every step above.
 
 **Never delete an `ApplicationSet` whose generated `Application` has an active

@@ -10,11 +10,54 @@ HUB_CLUSTER=${HUB_CLUSTER:-hub}
 SPOKE_CLUSTER=${SPOKE_CLUSTER:-cluster1}
 HUB_CTX="kind-${HUB_CLUSTER}"
 SPOKE_CTX="kind-${SPOKE_CLUSTER}"
-E2E_IMG=${E2E_IMG:-quay.io/stolostron/multicloud-integrations:latest}
-ARGOCD_OPERATOR_IMAGE=${ARGOCD_OPERATOR_IMAGE:-quay.io/argoprojlabs/argocd-operator:latest}
+E2E_IMG=${E2E_IMG:-quay.io/stolostron/multicloud-integrations:e2e}
+# Docker config JSON with registry.redhat.io credentials for the chart's images.
+RH_PULL_SECRET_FILE=${RH_PULL_SECRET_FILE:-}
+
+# The hub-side gitopsaddon process started below; the Makefile kills it on exit.
+ADDON_PID_FILE=${ADDON_PID_FILE:-/tmp/gitopsaddon-e2e.pid}
+ADDON_LOG=${ADDON_LOG:-/tmp/gitopsaddon-e2e.log}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+
+if [[ -z "${RH_PULL_SECRET_FILE}" ]]; then
+  echo "ERROR: RH_PULL_SECRET_FILE is not set. The embedded chart pulls its operator and ArgoCD" >&2
+  echo "ERROR: images from registry.redhat.io, which cannot be pulled anonymously." >&2
+  exit 1
+fi
+
+# seed_pull_secret writes the klusterlet's source pull-secret in a namespace.
+seed_pull_secret() {
+  local kctx=$1
+  local ns=$2
+  ${KUBECTL} --context "${kctx}" create namespace "${ns}" --dry-run=client -o yaml | ${KUBECTL} --context "${kctx}" apply -f -
+  ${KUBECTL} --context "${kctx}" -n "${ns}" create secret generic open-cluster-management-image-pull-credentials \
+    --from-file=.dockerconfigjson="${RH_PULL_SECRET_FILE}" \
+    --type=kubernetes.io/dockerconfigjson \
+    --dry-run=client -o yaml | ${KUBECTL} --context "${kctx}" apply -f -
+  echo ">> Seeded open-cluster-management-image-pull-credentials in ${kctx}/${ns}"
+}
+
+# wait_for_ready_pod polls a selector until a pod is Ready.
+wait_for_ready_pod() {
+  local kctx=$1
+  local ns=$2
+  local selector=$3
+  local timeout=$4
+  local deadline=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $deadline ]]; do
+    local ready
+    ready=$(${KUBECTL} --context "${kctx}" get pods -n "${ns}" -l "${selector}" \
+      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+      | grep -c '^True$' || true)
+    if [[ "${ready:-0}" -gt 0 ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
 
 echo "============================================"
 echo "E2E Setup: OCM + ArgoCD + Controller"
@@ -73,6 +116,10 @@ ${KUBECTL} --context ${HUB_CTX} label managedcluster local-cluster local-cluster
 echo ">> Waiting for local-cluster to be available"
 ${KUBECTL} --context ${HUB_CTX} wait managedcluster local-cluster --for=condition=ManagedClusterConditionAvailable --timeout=120s
 
+# Seed each cluster's klusterlet source pull-secret (no MCE in this environment).
+seed_pull_secret "${HUB_CTX}" "open-cluster-management"
+seed_pull_secret "${SPOKE_CTX}" "open-cluster-management"
+
 # ------- Step 2: Install governance-policy-framework -------
 echo "===== Step 2: Installing governance-policy-framework ====="
 ${KUBECTL} config use-context ${HUB_CTX}
@@ -106,24 +153,55 @@ wait_for_addon governance-policy-framework local-cluster
 wait_for_addon config-policy-controller ${SPOKE_CLUSTER}
 wait_for_addon config-policy-controller local-cluster
 
-# ------- Step 3: Install ArgoCD operator on hub -------
-# NOTE: We install the ArgoCD CRDs and operator here, but we do NOT create
-# the ArgoCD CR yet. The ArgoCD principal requires argocd-agent-resource-proxy-tls
-# to exist before it can start. That secret is created by the hub controller
-# when it reconciles a GitOpsCluster. We deploy the controller first (Step 4),
-# trigger cert generation via a stub GitOpsCluster, then create the ArgoCD CR.
-echo "===== Step 3: Installing ArgoCD operator on hub (CRDs + operator only) ====="
+# ------- Step 3: Install the GitOps operator on hub -------
+# The hub is non-OCP, so install the operator from the embedded chart by running the
+# addon against it. Keep it running: it also handles pull secrets and SA patching.
+echo "===== Step 3: Installing GitOps operator on hub (embedded chart via gitopsaddon) ====="
 ${KUBECTL} config use-context ${HUB_CTX}
 
-# Apply ArgoCD CRDs
-${KUBECTL} --context ${HUB_CTX} apply --server-side --force-conflicts -f "${REPO_DIR}/test/e2e/fixtures/argocd-operator-crds.yaml"
+# Kill a leftover addon from an interrupted run.
+if [[ -f "${ADDON_PID_FILE}" ]]; then
+  kill "$(cat "${ADDON_PID_FILE}")" 2>/dev/null || true
+  rm -f "${ADDON_PID_FILE}"
+fi
 
-# Apply ArgoCD operator (substitute image from Makefile)
-sed "s|image: quay.io/argoprojlabs/argocd-operator:[^ ]*|image: ${ARGOCD_OPERATOR_IMAGE}|" "${REPO_DIR}/test/e2e/fixtures/argocd-operator-deployment.yaml" | ${KUBECTL} --context ${HUB_CTX} apply -f -
+# The klusterlet already propagated the seeded secret into the addon namespaces.
 
-# Wait for operator
-echo ">> Waiting for ArgoCD operator deployment"
-${KUBECTL} --context ${HUB_CTX} wait deployment argocd-operator-controller-manager -n argocd-operator-system --for=condition=Available --timeout=180s
+# Pin a hub kubeconfig; the script switches contexts but the addon must stay on the hub.
+ADDON_BIN="$(mktemp -d)/gitopsaddon"
+( cd "${REPO_DIR}" && go build -o "${ADDON_BIN}" ./cmd/gitopsaddon )
+HUB_KUBECONFIG="$(mktemp -d)/hub.kubeconfig"
+${KUBECTL} --context ${HUB_CTX} config view --minify --flatten > "${HUB_KUBECONFIG}"
+
+KUBECONFIG="${HUB_KUBECONFIG}" \
+  POD_NAMESPACE="open-cluster-management-agent-addon" \
+  GITOPS_ADDON_NAMESPACE="open-cluster-management-agent-addon" \
+  ARGOCD_NAMESPACE="openshift-gitops" \
+  nohup "${ADDON_BIN}" > "${ADDON_LOG}" 2>&1 &
+echo $! > "${ADDON_PID_FILE}"
+echo ">> gitopsaddon running against the hub (pid $(cat "${ADDON_PID_FILE}"), log ${ADDON_LOG})"
+
+echo ">> Waiting for the embedded GitOps operator deployment"
+# Poll for the Deployment before waiting: it does not exist until the first reconcile.
+for i in $(seq 1 120); do
+  if ${KUBECTL} --context ${HUB_CTX} get deployment openshift-gitops-operator-controller-manager \
+    -n openshift-gitops-operator &>/dev/null; then
+    break
+  fi
+  if [[ "$i" -eq 120 ]]; then
+    echo "ERROR: GitOps operator Deployment was not created within 10 minutes" >&2
+    tail -50 "${ADDON_LOG}" || true
+    exit 1
+  fi
+  sleep 5
+done
+if ! ${KUBECTL} --context ${HUB_CTX} wait deployment openshift-gitops-operator-controller-manager \
+  -n openshift-gitops-operator --for=condition=Available --timeout=600s; then
+  echo "ERROR: GitOps operator did not become Available within 10 minutes" >&2
+  tail -50 "${ADDON_LOG}" || true
+  exit 1
+fi
+echo "GitOps operator is Available on the hub"
 
 # Create openshift-gitops namespace (needed by both the controller and ArgoCD)
 ${KUBECTL} --context ${HUB_CTX} create namespace openshift-gitops --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
@@ -142,18 +220,15 @@ done
 # Create namespace
 ${KUBECTL} --context ${HUB_CTX} create namespace open-cluster-management --dry-run=client -o yaml | ${KUBECTL} --context ${HUB_CTX} apply -f -
 
-# Apply RBAC and controller
+# Apply RBAC and controller, pinning every controller container to the locally built image;
+# operator images stay the chart's defaults.
 for f in "${REPO_DIR}"/deploy/controller/*.yaml; do
-  ${KUBECTL} --context ${HUB_CTX} apply -f "$f"
+  sed "s|quay.io/stolostron/multicloud-integrations:latest|${E2E_IMG}|g" "$f" | ${KUBECTL} --context ${HUB_CTX} apply -f -
 done
-
-# Patch the deployment image and set operator image env var in a single rollout
-${KUBECTL} --context ${HUB_CTX} set image deployment/multicloud-integrations-gitops -n open-cluster-management manager="${E2E_IMG}"
-${KUBECTL} --context ${HUB_CTX} set env deployment/multicloud-integrations-gitops -n open-cluster-management \
-  GITOPS_OPERATOR_IMAGE="${ARGOCD_OPERATOR_IMAGE}"
 
 echo ">> Waiting for controller rollout to complete"
 ${KUBECTL} --context ${HUB_CTX} rollout status deployment/multicloud-integrations-gitops -n open-cluster-management --timeout=180s
+${KUBECTL} --context ${HUB_CTX} rollout status deployment/multicloud-integrations -n open-cluster-management --timeout=180s
 
 # ------- Step 5: Apply ClusterManagementAddon + AddOnTemplates -------
 echo "===== Step 5: Applying ClusterManagementAddon and AddOnTemplates ====="
@@ -164,10 +239,8 @@ ${KUBECTL} --context ${HUB_CTX} apply -f "${REPO_DIR}/gitopsaddon/addonTemplates
 
 # ------- Step 3.5: Bootstrap argocd-agent certs before ArgoCD CR -------
 #
-# The new argocd-operator:latest requires argocd-agent-resource-proxy-tls to exist
-# when the principal pod starts (it FATALs if the secret is missing). The hub
-# controller generates all three certs (CA, principal TLS, resource proxy TLS)
-# during GitOpsCluster reconciliation.
+# The principal requires argocd-agent-resource-proxy-tls at startup; the hub controller
+# generates the certs during GitOpsCluster reconciliation.
 #
 # We create a stub GitOpsCluster here — with the same name and namespace the test
 # uses — to trigger cert generation before the ArgoCD CR is created. The test's
@@ -247,21 +320,6 @@ for secret_name in argocd-agent-principal-tls argocd-agent-resource-proxy-tls ar
 done
 echo "All agent secrets are ready"
 
-# ------- Step 3b2: Patch operator ClusterRole for upstream argocd-operator -------
-# The embedded chart's ClusterRole is extracted from the Red Hat CSV which removed
-# argocdexports. The upstream argocd-operator (used in e2e) still watches ArgoCDExport
-# resources and needs list/watch permission. Without this, the operator's informer cache
-# fails to sync and it never reconciles ArgoCD CRs.
-echo "===== Step 3b2: Patching operator ClusterRole for upstream argocd-operator ====="
-${KUBECTL} --context ${HUB_CTX} patch clusterrole openshift-gitops-operator-manager-role --type=json -p='[
-  {"op":"add","path":"/rules/-","value":{
-    "apiGroups":["argoproj.io"],
-    "resources":["argocdexports","argocdexports/finalizers"],
-    "verbs":["create","delete","get","list","patch","update","watch"]
-  }}
-]' 2>/dev/null || true
-echo ">> Patched ClusterRole with argocdexports for upstream operator"
-
 # ------- Step 3c: Create ArgoCD instance on hub -------
 #
 # All three argocd-agent certs now exist (argocd-agent-ca, argocd-agent-principal-tls,
@@ -280,6 +338,8 @@ metadata:
   namespace: openshift-gitops
 spec:
   applicationSet:
+    enabled: true
+  controller:
     enabled: true
   sourceNamespaces:
     - "*"
@@ -302,18 +362,29 @@ spec:
         secretName: argocd-agent-jwt
 EOF
 
-echo ">> Waiting for ArgoCD server pods"
-for i in $(seq 1 30); do
-  POD_COUNT=$(${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-server --no-headers 2>/dev/null | wc -l)
-  if [ "$POD_COUNT" -gt 0 ]; then
-    echo "ArgoCD server pod found, waiting for Ready condition..."
-    break
-  fi
-  echo "  Waiting for ArgoCD server pod to appear... ($i/30)"
-  sleep 10
-done
-if ! ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait --for=condition=Ready pod -l app.kubernetes.io/name=openshift-gitops-server --timeout=300s; then
+# Hybrid-mode prerequisite: the hub app-controller needs cluster-admin for
+# in-cluster Applications before the first sync.
+echo ">> Granting cluster-admin to the hub ArgoCD application controller"
+cat <<'RBAC_EOF' | ${KUBECTL} --context ${HUB_CTX} apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openshift-gitops-appcontroller-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: openshift-gitops-argocd-application-controller
+  namespace: openshift-gitops
+RBAC_EOF
+
+echo ">> Waiting for a Ready ArgoCD server pod"
+# Poll: the addon replaces pods that hit image-pull errors, kubectl wait would not.
+if ! wait_for_ready_pod "${HUB_CTX}" "openshift-gitops" "app.kubernetes.io/name=openshift-gitops-server" 300; then
   echo "ERROR: ArgoCD server pod did not become Ready within 5 minutes"
+  ${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops || true
   exit 1
 fi
 echo "ArgoCD server is Ready"
@@ -323,20 +394,7 @@ echo "ArgoCD server is Ready"
 # The principal should start cleanly on the first attempt since all required TLS
 # secrets exist. We no longer expect CrashLoopBackOff here.
 echo ">> Waiting for ArgoCD agent principal pod to become Ready"
-for i in $(seq 1 36); do
-  POD_COUNT=$(${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops \
-    -l app.kubernetes.io/name=openshift-gitops-agent-principal --no-headers 2>/dev/null | wc -l)
-  if [ "$POD_COUNT" -gt 0 ]; then
-    echo "  Principal pod found, waiting for Ready..."
-    break
-  fi
-  echo "  Waiting for principal pod to appear... ($i/36)"
-  sleep 10
-done
-if ! ${KUBECTL} --context ${HUB_CTX} -n openshift-gitops wait \
-  --for=condition=Ready pod \
-  -l app.kubernetes.io/name=openshift-gitops-agent-principal \
-  --timeout=180s; then
+if ! wait_for_ready_pod "${HUB_CTX}" "openshift-gitops" "app.kubernetes.io/name=openshift-gitops-agent-principal" 180; then
   echo "WARN: principal pod did not become Ready within 180s — checking for crashes"
   ${KUBECTL} --context ${HUB_CTX} get pods -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-agent-principal
   ${KUBECTL} --context ${HUB_CTX} logs -n openshift-gitops -l app.kubernetes.io/name=openshift-gitops-agent-principal --tail=30 || true
@@ -348,19 +406,11 @@ fi
 echo ">> Confirming resource proxy service exists"
 ${KUBECTL} --context ${HUB_CTX} get service openshift-gitops-agent-principal-resource-proxy -n openshift-gitops
 
-# Apply ArgoCD CRDs on spoke (needed for ArgoCD operator to work)
-${KUBECTL} --context ${SPOKE_CTX} apply --server-side --force-conflicts -f "${REPO_DIR}/test/e2e/fixtures/argocd-operator-crds.yaml"
-if [ -f "${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml" ]; then
-  ${KUBECTL} --context ${SPOKE_CTX} apply --server-side --force-conflicts -f "${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml"
-else
-  echo "WARN: argocd-export-crd.yaml not found at ${REPO_DIR}/test/e2e/fixtures/argocd-export-crd.yaml, skipping"
-fi
-
-# Route and Monitoring CRDs are NOT installed here. The operator handles missing APIs
-# gracefully via API discovery (argoutil.VerifyAPI / InspectCluster) and skips
-# Route/Monitoring watches and reconciliation when those APIs don't exist.
+# The spoke addon copies the propagated pull secret into its ArgoCD namespaces.
 
 echo ""
 echo "============================================"
 echo "E2E Setup Complete!"
 echo "============================================"
+echo ">> The hub gitopsaddon (pid $(cat "${ADDON_PID_FILE}" 2>/dev/null || echo unknown)) stays running"
+echo ">> for the suite; the Makefile target kills it after the tests finish."

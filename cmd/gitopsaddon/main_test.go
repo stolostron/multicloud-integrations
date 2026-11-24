@@ -154,6 +154,22 @@ func TestOperatorImageOverrides(t *testing.T) {
 		g.Expect(config.OperatorImages[utils.EnvBackendImage]).To(gomega.Equal("custom.registry.io/backend:test"))
 		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePlugin]).To(gomega.Equal("custom.registry.io/console-plugin:test"))
 	})
+
+	t.Run("NewChartComponentImagesOverride", func(t *testing.T) {
+		// The chart gained these images in 1.22.3; the addon must read them from its pod
+		// environment so disconnected-registry mirrored values reach the rendered chart.
+		t.Setenv(utils.EnvGitOpsConsolePluginPF5, "mirror.example.com/console-plugin-pf5:test")
+		t.Setenv(utils.EnvMustGatherImage, "mirror.example.com/must-gather:test")
+		t.Setenv(utils.EnvPromoterExtensionImage, "mirror.example.com/promoter-extension:test")
+		t.Setenv(utils.EnvGitOpsPromoterImage, "mirror.example.com/gitops-promoter:test")
+
+		config := utils.NewGitOpsAddonConfig()
+
+		g.Expect(config.OperatorImages[utils.EnvGitOpsConsolePluginPF5]).To(gomega.Equal("mirror.example.com/console-plugin-pf5:test"))
+		g.Expect(config.OperatorImages[utils.EnvMustGatherImage]).To(gomega.Equal("mirror.example.com/must-gather:test"))
+		g.Expect(config.OperatorImages[utils.EnvPromoterExtensionImage]).To(gomega.Equal("mirror.example.com/promoter-extension:test"))
+		g.Expect(config.OperatorImages[utils.EnvGitOpsPromoterImage]).To(gomega.Equal("mirror.example.com/gitops-promoter:test"))
+	})
 }
 
 func TestProxyEnvironmentVariables(t *testing.T) {

@@ -41,11 +41,21 @@ $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest
 
-.PHONY: build
+.PHONY: generate-operator-images verify-operator-images
 
 -include /opt/build-harness/Makefile.prow
 
-build:
+generate-operator-images:
+	@go run ./hack/gen-operator-images
+
+verify-operator-images:
+	@go run ./hack/gen-operator-images -check
+
+.DEFAULT_GOAL := build
+
+.PHONY: build
+
+build: generate-operator-images
 	@common/scripts/gobuild.sh build/_output/bin/gitopscluster ./cmd/gitopscluster
 	@common/scripts/gobuild.sh build/_output/bin/gitopssyncresc ./cmd/gitopssyncresc
 	@common/scripts/gobuild.sh build/_output/bin/multiclusterstatusaggregation ./cmd/multiclusterstatusaggregation
@@ -91,6 +101,7 @@ test-unit: setup-envtest
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./gitopsaddon/...
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./maestroapplication/...
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -timeout 300s -v ./cmd/...
+	go test -timeout 300s -v ./hack/...
 
 test-integration: setup-envtest
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags=integration -timeout 300s -v ./pkg/...

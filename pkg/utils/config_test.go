@@ -250,6 +250,10 @@ func TestDefaultOperatorImages(t *testing.T) {
 		EnvArgoRolloutsImage,
 		EnvArgoCDPrincipalImage,
 		EnvArgoCDImageUpdaterImage,
+		EnvGitOpsConsolePluginPF5,
+		EnvMustGatherImage,
+		EnvPromoterExtensionImage,
+		EnvGitOpsPromoterImage,
 	}
 
 	for _, img := range requiredImages {

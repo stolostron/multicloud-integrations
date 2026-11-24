@@ -37,8 +37,6 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: ${{ env.GO_VERSION }}
-      - name: install imagebuilder
-        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
       - name: build-images
         run: make build-images
       - name: setup kind
@@ -103,10 +101,10 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Add GOPATH/bin to PATH
         run: echo "$GOPATH/bin" >> "$GITHUB_PATH"
-      - name: install imagebuilder
-        run: go install github.com/openshift/imagebuilder/cmd/imagebuilder@v1.2.3
       - name: build-images
-        run: make build-images
+        # Non-:latest: the dynamic AddOnTemplate uses PullAlways for :latest, which
+        # would run the published image instead of the Kind-loaded one.
+        run: make build-images IMAGE_NAME_AND_VERSION=quay.io/stolostron/multicloud-integrations:e2e
       - name: setup kind (cluster1)
         uses: engineerd/setup-kind@v0.5.0
         with:
@@ -117,10 +115,26 @@ jobs:
         with:
           version: v0.25.0
           name: hub
+      - name: Configure registry.redhat.io pull secret (optional)
+        # Optional RH_PULL_SECRET (docker config JSON): when set, the scenarios run;
+        # otherwise the suite skips itself and the job still passes.
+        env:
+          RH_PULL_SECRET: ${{ secrets.RH_PULL_SECRET }}
+        run: |
+          if [ -n "${RH_PULL_SECRET}" ]; then
+            printf '%s' "${RH_PULL_SECRET}" > /tmp/rh-pull.json
+            chmod 600 /tmp/rh-pull.json
+            echo "RH_PULL_SECRET_FILE=/tmp/rh-pull.json" >> "$GITHUB_ENV"
+            echo "registry.redhat.io pull secret configured"
+          else
+            echo "RH_PULL_SECRET secret is not configured; the gitopsaddon suite will skip itself."
+          fi
       - name: Load locally built image into Kind clusters
         run: |
-          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
-          docker save quay.io/stolostron/multicloud-integrations:latest | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          # Only the locally built image needs loading; the chart's images are pulled
+          # at runtime by the Kind nodes.
+          docker save quay.io/stolostron/multicloud-integrations:e2e | docker exec -i hub-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+          docker save quay.io/stolostron/multicloud-integrations:e2e | docker exec -i cluster1-control-plane ctr --namespace=k8s.io images import --snapshotter=overlayfs -
       - name: Run e2e gitopsaddon (${{ matrix.scenario }})
         env:
           KUBECONFIG: /home/runner/.kube/config

@@ -26,15 +26,9 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 		}
 		createBaseResources()
 		createGitOpsCluster(opts)
-		// e2e-Kind-only: see disableHubAppController's doc comment (ArgoCD version gap,
-		// argo-cd#26425/#26442) - not needed/used by gitopsaddon/test-cycle.sh against a real hub.
-		// The Local-Cluster Verification context below only checks secret/health shape, not app
-		// reconciliation, so it doesn't need the hub app-controller on.
-		disableHubAppController()
 	})
 
 	AfterAll(func() {
-		enableHubAppController()
 		safeCleanup(opts)
 	})
 
@@ -45,6 +39,10 @@ var _ = Describe("GitOps Addon - Embedded Operator + Autonomous Agent (Kind)", L
 
 		It("should deploy embedded operator on spoke", func() {
 			verifyEmbeddedOperator(5 * time.Minute)
+		})
+
+		It("should propagate every chart component image to the spoke", func() {
+			verifyChartComponentImagePropagation(3 * time.Minute)
 		})
 
 		It("should deploy ArgoCD CR and application-controller on spoke", func() {

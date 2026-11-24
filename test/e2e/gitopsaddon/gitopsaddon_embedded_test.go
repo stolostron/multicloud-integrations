@@ -40,7 +40,12 @@ var _ = Describe("GitOps Addon - Embedded Operator (Kind, No Agent)", Label("emb
 			verifyEmbeddedOperator(5 * time.Minute)
 		})
 
+		It("should propagate every chart component image to the spoke", func() {
+			verifyChartComponentImagePropagation(3 * time.Minute)
+		})
+
 		It("should NOT create OLM subscription on non-OCP spoke", func() {
+			verifyNoOLMSubscription("openshift-gitops-operator", operatorNamespace)
 			verifyNoOLMSubscription("openshift-gitops-operator", "openshift-operators")
 		})
 

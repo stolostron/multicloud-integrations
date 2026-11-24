@@ -18,15 +18,18 @@ package gitopsaddon
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/engine"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,117 +38,206 @@ import (
 	k8syaml "sigs.k8s.io/yaml"
 )
 
-// templateAndApplyChart templates a Helm chart and applies the rendered manifests
+// templateAndApplyChart templates a Helm chart and applies the rendered manifests.
 func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, releaseName string) error {
 	klog.Infof("Templating and applying chart %s in namespace %s", releaseName, namespace)
 
-	// Create temp directory for chart files
 	tempDir, err := os.MkdirTemp("", "helm-chart-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Copy embedded chart files to temp directory
-	err = r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir)
-	if err != nil {
+	if err := r.copyEmbeddedToTemp(ChartFS, chartPath, tempDir); err != nil {
 		return fmt.Errorf("failed to copy files: %v", err)
 	}
 
-	// Load the chart
 	chart, err := loader.Load(tempDir)
 	if err != nil {
 		return fmt.Errorf("failed to load chart: %v", err)
 	}
 
-	// Prepare values for templating
-	values := map[string]interface{}{}
-
-	// Populate values based on chart path
-	switch chartPath {
-	case "charts/openshift-gitops-operator":
-		operatorImages := make(map[string]interface{})
-
-		// Get the operator image
-		operatorImage := r.AddonConfig.OperatorImages[utils.EnvGitOpsOperatorImage]
-		operatorImages[utils.EnvGitOpsOperatorImage] = operatorImage
-
-		// Only pass component image overrides for the Red Hat operator
-		// The community argocd-operator uses its own built-in defaults
-		// and doesn't support the same environment variable names
-		if !strings.Contains(operatorImage, "argoprojlabs") {
-			// This is the Red Hat operator, pass all image overrides
-			for key, value := range r.AddonConfig.OperatorImages {
-				operatorImages[key] = value
-			}
-		} else {
-			klog.Info("Using community argocd-operator - skipping Red Hat image overrides")
-		}
-
-		// Set up global values for openshift-gitops-operator chart
-		global := map[string]interface{}{
-			"operatorImages": operatorImages,
-			"proxyConfig": map[string]interface{}{
-				"HTTP_PROXY":  r.AddonConfig.HTTPProxy,
-				"HTTPS_PROXY": r.AddonConfig.HTTPSProxy,
-				"NO_PROXY":    r.AddonConfig.NoProxy,
-			},
-		}
-		values["global"] = global
+	// Apply the chart's crds/ directory: Helm does not render it.
+	for _, crd := range chart.CRDObjects() {
+		r.applyCRDYAML(crd.Name, crd.File.Data)
 	}
 
-	// Set up release options
 	options := chartutil.ReleaseOptions{
 		Name:      releaseName,
 		Namespace: namespace,
 	}
 
-	// Prepare values to render
-	valuesToRender, err := chartutil.ToRenderValues(chart, values, options, nil)
+	valuesToRender, err := chartutil.ToRenderValues(chart, r.chartValues(chartPath), options, nil)
 	if err != nil {
 		return fmt.Errorf("failed to prepare chart values: %v", err)
 	}
 
-	// Render the chart templates
 	files, err := engine.Engine{}.Render(chart, valuesToRender)
 	if err != nil {
 		return fmt.Errorf("failed to render chart templates: %v", err)
 	}
 
-	// Apply each rendered manifest
-	for name, content := range files {
-		// Skip empty files and notes
+	r.applyRenderedManifests(files, namespace)
+
+	klog.Infof("Successfully templated and applied chart %s in namespace %s", releaseName, namespace)
+
+	return nil
+}
+
+// chartValues builds the Helm values for the embedded operator chart.
+func (r *GitopsAddonReconciler) chartValues(chartPath string) map[string]interface{} {
+	values := map[string]interface{}{}
+	if chartPath != "charts/openshift-gitops-operator" {
+		return values
+	}
+
+	operatorImage := r.AddonConfig.OperatorImages[utils.EnvGitOpsOperatorImage]
+
+	if operatorImage != "" {
+		repository, tag, parseErr := ParseImageReference(operatorImage)
+		if parseErr != nil {
+			// No explicit tag: use the whole reference as the repository.
+			klog.Warningf("Operator image %q has no explicit tag, defaulting to latest: %v", operatorImage, parseErr)
+			repository = operatorImage
+			tag = "latest"
+		}
+		registry := ""
+		repo := repository
+		if idx := strings.Index(repository, "/"); idx >= 0 {
+			registry = repository[:idx]
+			repo = repository[idx+1:]
+		}
+		values["image"] = map[string]interface{}{
+			"manager": map[string]interface{}{
+				"registry":   registry,
+				"repository": repo,
+				"tag":        tag,
+				"pullPolicy": "IfNotPresent",
+			},
+		}
+	}
+
+	operatorImages := map[string]interface{}{}
+	for key, value := range r.AddonConfig.OperatorImages {
+		if key == utils.EnvGitOpsOperatorImage || value == "" {
+			continue
+		}
+		operatorImages[key] = value
+	}
+	// The chart renamed the extension image env vars; honour the legacy name.
+	if extensionImage, ok := operatorImages[utils.EnvArgoCDExtensionImage]; ok {
+		operatorImages["ARGOCD_ROLLOUTS_IMAGE"] = extensionImage
+		operatorImages["ROLLOUTS_EXTENSION_IMAGE"] = extensionImage
+	}
+	values["operatorImageEnv"] = operatorImages
+
+	envValues := map[string]interface{}{
+		"ARGOCD_CLUSTER_CONFIG_NAMESPACES":        "*",
+		"CLUSTER_SCOPED_ARGO_ROLLOUTS_NAMESPACES": "openshift-gitops",
+		"DISABLE_DEFAULT_ARGOCD_INSTANCE":         "true",
+		"ENABLE_CONVERSION_WEBHOOK":               "false",
+		"OPERATOR_NAME":                           "gitops-operator",
+	}
+	if r.AddonConfig.HTTPProxy != "" {
+		envValues[utils.EnvHTTPProxy] = r.AddonConfig.HTTPProxy
+	}
+	if r.AddonConfig.HTTPSProxy != "" {
+		envValues[utils.EnvHTTPSProxy] = r.AddonConfig.HTTPSProxy
+	}
+	if r.AddonConfig.NoProxy != "" {
+		envValues[utils.EnvNoProxy] = r.AddonConfig.NoProxy
+	}
+	values["env"] = envValues
+
+	values["args"] = []interface{}{
+		"--health-probe-bind-address=:8081",
+		"--metrics-bind-address=127.0.0.1:8080",
+		"--leader-elect",
+	}
+	values["livenessProbe"] = map[string]interface{}{
+		"httpGet":             map[string]interface{}{"path": "/healthz", "port": 8081},
+		"initialDelaySeconds": 15,
+		"periodSeconds":       20,
+	}
+	values["readinessProbe"] = map[string]interface{}{
+		"httpGet":             map[string]interface{}{"path": "/readyz", "port": 8081},
+		"initialDelaySeconds": 5,
+		"periodSeconds":       10,
+	}
+	values["securityContext"] = map[string]interface{}{
+		"allowPrivilegeEscalation": false,
+		"capabilities":             map[string]interface{}{"drop": []interface{}{"ALL"}},
+		"readOnlyRootFilesystem":   true,
+		"runAsNonRoot":             true,
+		"seccompProfile":           map[string]interface{}{"type": "RuntimeDefault"},
+	}
+	values["podSecurityContext"] = map[string]interface{}{"runAsNonRoot": true}
+
+	// The chart's service-account-token secret hardcodes this name.
+	values["serviceAccount"] = map[string]interface{}{
+		"create": true,
+		"name":   "openshift-gitops-operator-controller-manager",
+	}
+	// The chart creates the Secret the operator propagates into ArgoCD
+	// ServiceAccounts on non-OCP clusters.
+	pullSecretValues := map[string]interface{}{"create": false}
+	if pullSecretData, getErr := r.getAddonImagePullSecretData(); getErr != nil {
+		klog.V(2).Infof("Image pull credentials not available for chart propagation yet: %v", getErr)
+	} else if len(pullSecretData) > 0 {
+		pullSecretValues = map[string]interface{}{
+			"create":           true,
+			"name":             "redhat-registry-pull-secret",
+			"dockerConfigJson": string(pullSecretData),
+			"labels": map[string]interface{}{
+				"operator.argoproj.io/propagate-image-pull-secret": "true",
+			},
+		}
+	}
+	values["pullSecret"] = pullSecretValues
+	values["imagePullSecrets"] = []interface{}{
+		map[string]interface{}{"name": addonImagePullSecretName},
+	}
+	// No Prometheus operator on non-OCP clusters.
+	values["monitoring"] = map[string]interface{}{"enabled": false}
+	values["installMode"] = "AllNamespaces"
+
+	return values
+}
+
+// applyRenderedManifests applies every rendered manifest in a stable order, so a binding is
+// never applied before the role it references.
+func (r *GitopsAddonReconciler) applyRenderedManifests(files map[string]string, namespace string) {
+	fileNames := make([]string, 0, len(files))
+	for name := range files {
+		fileNames = append(fileNames, name)
+	}
+	sort.Strings(fileNames)
+
+	for _, name := range fileNames {
+		content := files[name]
 		if len(strings.TrimSpace(content)) == 0 || strings.HasSuffix(name, "NOTES.txt") {
 			continue
 		}
 
-		// Parse YAML documents in the file
-		yamlDocs := strings.Split(content, "\n---\n")
-		for _, doc := range yamlDocs {
+		for _, doc := range strings.Split(content, "\n---\n") {
 			doc = strings.TrimSpace(doc)
 			if len(doc) == 0 {
 				continue
 			}
 
-			// Parse the YAML into an unstructured object
 			var obj unstructured.Unstructured
 			if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
 				klog.Warningf("Failed to parse YAML document in %s: %v", name, err)
 				continue
 			}
-
-			// Skip if no kind or metadata
 			if obj.GetKind() == "" || obj.GetName() == "" {
 				continue
 			}
 
-			// Set the namespace if it's a namespaced resource and doesn't have one
 			if obj.GetNamespace() == "" {
 				obj.SetNamespace(namespace)
 			}
 
-			// Stamp every resource with the gitopsaddon ownership label so cleanup
-			// can identify exactly what we deployed (vs system-managed resources).
 			labels := obj.GetLabels()
 			if labels == nil {
 				labels = make(map[string]string)
@@ -153,17 +245,125 @@ func (r *GitopsAddonReconciler) templateAndApplyChart(chartPath, namespace, rele
 			labels[GitOpsAddonLabelKey] = GitOpsAddonLabelValue
 			obj.SetLabels(labels)
 
-			// Apply the manifest
 			if err := r.applyManifest(&obj); err != nil {
 				klog.Errorf("Failed to apply manifest %s/%s %s: %v",
 					obj.GetKind(), obj.GetName(), obj.GetNamespace(), err)
-				// Continue with other manifests even if one fails
 			}
 		}
 	}
+}
 
-	klog.Infof("Successfully templated and applied chart %s in namespace %s", releaseName, namespace)
-	return nil
+// crdHashAnnotation stores the hash of the CRD content last applied.
+const crdHashAnnotation = "gitops-addon.open-cluster-management.io/crd-hash"
+
+// serviceAccountTokenSecretType is the Kubernetes Secret type populated by the token controller.
+const serviceAccountTokenSecretType = "kubernetes.io/service-account-token" // #nosec G101 -- Secret type
+
+const addonImagePullSecretName = "open-cluster-management-image-pull-credentials"
+
+// getAddonImagePullSecretData returns the pull credentials for the addon namespace.
+func (r *GitopsAddonReconciler) getAddonImagePullSecretData() ([]byte, error) {
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{
+		Name:      addonImagePullSecretName,
+		Namespace: utils.GetComponentNamespace("open-cluster-management-agent-addon"),
+	}
+	if err := r.Get(context.TODO(), key, secret); err != nil {
+		return nil, err
+	}
+
+	return secret.Data[corev1.DockerConfigJsonKey], nil
+}
+
+// applyCRDYAML applies a CRD file, skipping unchanged content.
+func (r *GitopsAddonReconciler) applyCRDYAML(name string, data []byte) {
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return
+	}
+
+	for _, doc := range strings.Split(content, "\n---\n") {
+		doc = strings.TrimSpace(doc)
+		if len(doc) == 0 {
+			continue
+		}
+
+		var obj unstructured.Unstructured
+		if err := k8syaml.Unmarshal([]byte(doc), &obj); err != nil {
+			klog.Warningf("Failed to parse CRD document in %s: %v", name, err)
+			continue
+		}
+		if obj.GetKind() == "" || obj.GetName() == "" {
+			continue
+		}
+
+		contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(doc)))
+
+		existing := &unstructured.Unstructured{}
+		existing.SetAPIVersion(obj.GetAPIVersion())
+		existing.SetKind(obj.GetKind())
+		if getErr := r.Get(context.TODO(), types.NamespacedName{Name: obj.GetName()}, existing); getErr == nil {
+			if existing.GetAnnotations()[crdHashAnnotation] == contentHash && crdShapeMatches(existing, &obj) {
+				continue
+			}
+		}
+
+		annotations := obj.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[crdHashAnnotation] = contentHash
+		obj.SetAnnotations(annotations)
+
+		if err := r.applyManifest(&obj); err != nil {
+			klog.Errorf("Failed to apply CRD %s: %v", obj.GetName(), err)
+		}
+	}
+}
+
+// crdShapeMatches compares the identity-relevant parts of a CRD with the desired one. The
+// content hash alone only proves which content was last written by this addon; if someone else
+// changed the group, kind names, scope or served versions, the CRD is re-applied.
+func crdShapeMatches(live, desired *unstructured.Unstructured) bool {
+	stringFields := [][]string{
+		{"spec", "group"},
+		{"spec", "names", "plural"},
+		{"spec", "names", "kind"},
+		{"spec", "scope"},
+	}
+	for _, field := range stringFields {
+		liveValue, _, _ := unstructured.NestedString(live.Object, field...)
+		desiredValue, _, _ := unstructured.NestedString(desired.Object, field...)
+		if liveValue != desiredValue {
+			return false
+		}
+	}
+
+	liveVersions, _, _ := unstructured.NestedSlice(live.Object, "spec", "versions")
+	desiredVersions, _, _ := unstructured.NestedSlice(desired.Object, "spec", "versions")
+	if len(liveVersions) != len(desiredVersions) {
+		return false
+	}
+	liveNames := map[string]bool{}
+	for _, version := range liveVersions {
+		if entry, ok := version.(map[string]interface{}); ok {
+			if name, ok := entry["name"].(string); ok {
+				liveNames[name] = true
+			}
+		}
+	}
+	for _, version := range desiredVersions {
+		entry, ok := version.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		name, ok := entry["name"].(string)
+		if !ok || !liveNames[name] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // copyEmbeddedToTemp copies embedded chart files to a temporary directory
@@ -282,6 +482,15 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 			klog.Infof("Skipping %s/%s %s: pre-existing resource without gitopsaddon label", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 			return nil
 		}
+
+		// Leave the populated token Secret alone.
+		if obj.GetKind() == "Secret" {
+			if secretType, _, _ := unstructured.NestedString(obj.Object, "type"); secretType == serviceAccountTokenSecretType {
+				klog.V(2).Infof("Skipping existing service-account-token Secret %s/%s",
+					obj.GetNamespace(), obj.GetName())
+				return nil
+			}
+		}
 	}
 
 	// Add management label to indicate this resource is managed by gitops-addon
@@ -303,7 +512,6 @@ func (r *GitopsAddonReconciler) applyManifest(obj *unstructured.Unstructured) er
 	klog.Infof("Updating %s/%s %s", obj.GetKind(), obj.GetName(), obj.GetNamespace())
 	return r.Update(context.TODO(), obj)
 }
-
 
 // ParseImageReference parses an image reference into repository and tag
 func ParseImageReference(imageRef string) (string, string, error) {

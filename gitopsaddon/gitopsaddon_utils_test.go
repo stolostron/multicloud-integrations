@@ -20,6 +20,7 @@ import (
 	"context"
 	"embed"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/onsi/gomega"
@@ -27,16 +28,31 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	utils "open-cluster-management.io/multicloud-integrations/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // Test embedded file system for tests
 //
-//go:embed charts/openshift-gitops-operator/**
+//go:embed all:charts/openshift-gitops-operator/**
 var testFS embed.FS
 
+// newChartTestClient returns an isolated fake client for the chart tests, so cluster-scoped
+// resources they create (CRDs, ClusterRoles) cannot leak into other tests.
+func newChartTestClient(t *testing.T) client.Client {
+	t.Helper()
 
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to build scheme: %v", err)
+	}
+
+	return fake.NewClientBuilder().WithScheme(scheme).Build()
+}
 
 func TestParseImageReference(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -383,7 +399,7 @@ func TestTemplateAndApplyChartLabelsAllResources(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	reconciler := &GitopsAddonReconciler{
-		Client: getTestEnv().Client,
+		Client: newChartTestClient(t),
 		Config: getTestEnv().Config,
 		AddonConfig: &utils.GitOpsAddonConfig{
 			OperatorImages: map[string]string{
@@ -440,4 +456,266 @@ func TestTemplateAndApplyChartLabelsAllResources(t *testing.T) {
 	g.Expect(cm.GetLabels()).To(gomega.HaveKeyWithValue(
 		"apps.open-cluster-management.io/gitopsaddon", "true",
 	), "ConfigMap must have gitopsaddon label")
+}
+
+func TestCRDShapeMatches(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	newCRD := func(scope string, versions ...string) *unstructured.Unstructured {
+		versionList := make([]interface{}, 0, len(versions))
+		for _, name := range versions {
+			versionList = append(versionList, map[string]interface{}{
+				"name":    name,
+				"served":  true,
+				"storage": name == versions[0],
+			})
+		}
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apiextensions.k8s.io/v1",
+			"kind":       "CustomResourceDefinition",
+			"spec": map[string]interface{}{
+				"group":    "argoproj.io",
+				"scope":    scope,
+				"names":    map[string]interface{}{"plural": "argocds", "kind": "ArgoCD"},
+				"versions": versionList,
+			},
+		}}
+	}
+
+	g.Expect(crdShapeMatches(newCRD("Namespaced", "v1alpha1", "v1beta1"), newCRD("Namespaced", "v1alpha1", "v1beta1"))).
+		To(gomega.BeTrue())
+	g.Expect(crdShapeMatches(newCRD("Namespaced", "v1alpha1", "v1beta1"), newCRD("Namespaced", "v1beta1", "v1alpha1"))).
+		To(gomega.BeTrue(), "version order must not matter")
+	g.Expect(crdShapeMatches(newCRD("Namespaced", "v1alpha1"), newCRD("Namespaced", "v1alpha1", "v1beta1"))).
+		To(gomega.BeFalse(), "a version added by someone else must trigger a re-apply")
+	g.Expect(crdShapeMatches(newCRD("Namespaced", "v1beta1"), newCRD("Cluster", "v1beta1"))).
+		To(gomega.BeFalse(), "a scope change must trigger a re-apply")
+}
+
+func TestChartValuesImageHandling(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	cases := []struct {
+		name    string
+		image   string
+		wantTag string
+	}{
+		{name: "digest", image: "registry.example.com/team/operator@sha256:abc123", wantTag: "sha256:abc123"},
+		{name: "tag", image: "registry.example.com/team/operator:v1.2.3", wantTag: "v1.2.3"},
+		{name: "no_tag", image: "registry.example.com/team/operator", wantTag: "latest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reconciler := &GitopsAddonReconciler{
+				Client: getTestEnv().Client,
+				AddonConfig: &utils.GitOpsAddonConfig{
+					OperatorImages: map[string]string{utils.EnvGitOpsOperatorImage: tc.image},
+				},
+			}
+
+			values := reconciler.chartValues("charts/openshift-gitops-operator")
+			image, ok := values["image"].(map[string]interface{})
+			g.Expect(ok).To(gomega.BeTrue())
+			manager, ok := image["manager"].(map[string]interface{})
+			g.Expect(ok).To(gomega.BeTrue())
+			g.Expect(manager["tag"]).To(gomega.Equal(tc.wantTag))
+		})
+	}
+
+	t.Run("extension_image_maps_to_chart_keys", func(t *testing.T) {
+		reconciler := &GitopsAddonReconciler{
+			Client: getTestEnv().Client,
+			AddonConfig: &utils.GitOpsAddonConfig{
+				OperatorImages: map[string]string{
+					utils.EnvGitOpsOperatorImage:  "registry.example.com/team/operator:v1",
+					utils.EnvArgoCDExtensionImage: "registry.example.com/team/extensions:v1",
+				},
+			},
+		}
+
+		values := reconciler.chartValues("charts/openshift-gitops-operator")
+		envValues, ok := values["operatorImageEnv"].(map[string]interface{})
+		g.Expect(ok).To(gomega.BeTrue())
+		g.Expect(envValues["ARGOCD_ROLLOUTS_IMAGE"]).To(gomega.Equal("registry.example.com/team/extensions:v1"))
+		g.Expect(envValues["ROLLOUTS_EXTENSION_IMAGE"]).To(gomega.Equal("registry.example.com/team/extensions:v1"))
+	})
+}
+
+func TestChartValuesUnknownChartPath(t *testing.T) {
+	g := gomega.NewWithT(t)
+	reconciler := &GitopsAddonReconciler{Client: getTestEnv().Client, AddonConfig: &utils.GitOpsAddonConfig{}}
+	g.Expect(reconciler.chartValues("charts/other")).To(gomega.BeEmpty())
+}
+
+func TestTemplateAndApplyChartCreatesLabeledPullSecret(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: newChartTestClient(t),
+		Config: getTestEnv().Config,
+		AddonConfig: &utils.GitOpsAddonConfig{
+			OperatorImages: map[string]string{utils.EnvGitOpsOperatorImage: "quay.io/test/operator:latest"},
+		},
+	}
+
+	// getAddonImagePullSecretData reads from the addon pod's own namespace, which is the pod's
+	// service-account namespace when running inside a cluster (e.g. the Prow test pod) and the
+	// default otherwise.
+	addonNS := utils.GetComponentNamespace("open-cluster-management-agent-addon")
+	addonNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: addonNS}}
+	if err := reconciler.Create(context.TODO(), addonNamespace); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create addon namespace: %v", err)
+	}
+
+	pullSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: addonImagePullSecretName, Namespace: addonNS},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: []byte(`{"auths":{"registry.redhat.io":{"auth":"dGVzdA=="}}}`),
+		},
+	}
+	if err := reconciler.Create(context.TODO(), pullSecret); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create addon pull secret: %v", err)
+	}
+	defer func() { _ = reconciler.Delete(context.TODO(), pullSecret) }()
+
+	testNS := "pull-secret-chart-test"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
+	if err := reconciler.Create(context.TODO(), ns); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create test namespace: %v", err)
+	}
+	defer func() { _ = reconciler.Delete(context.TODO(), ns) }()
+
+	g.Expect(reconciler.templateAndApplyChart("charts/openshift-gitops-operator", testNS, "openshift-gitops-operator")).
+		ToNot(gomega.HaveOccurred())
+
+	created := &corev1.Secret{}
+	g.Expect(reconciler.Get(context.TODO(), types.NamespacedName{
+		Name: "redhat-registry-pull-secret", Namespace: testNS,
+	}, created)).ToNot(gomega.HaveOccurred(), "the chart must create the operator-propagated pull secret")
+	g.Expect(created.Labels).To(gomega.HaveKeyWithValue("operator.argoproj.io/propagate-image-pull-secret", "true"))
+}
+
+func TestChartValuesMirroredImagesLeaveNoExternalRegistryReferences(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	// Mirror every known image at the registry-host prefix, exactly like the disconnected
+	// image mirroring controller rewrites AddOnDeploymentConfig values. If any chart image key
+	// is missing from the configuration, the chart falls back to its own registry.redhat.io
+	// default and the operator Deployment still references the external registry.
+	mirrored := map[string]string{}
+	for key, value := range utils.DefaultOperatorImages {
+		mirrored[key] = strings.Replace(value, "registry.redhat.io", "mirror.example.com", 1)
+	}
+
+	reconciler := &GitopsAddonReconciler{
+		Client: newChartTestClient(t),
+		Config: getTestEnv().Config,
+		AddonConfig: &utils.GitOpsAddonConfig{
+			OperatorImages: mirrored,
+		},
+	}
+
+	testNS := "mirrored-images-test"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
+	if err := reconciler.Create(context.TODO(), ns); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create test namespace: %v", err)
+	}
+	defer func() { _ = reconciler.Delete(context.TODO(), ns) }()
+
+	g.Expect(reconciler.templateAndApplyChart("charts/openshift-gitops-operator", testNS, "openshift-gitops-operator")).
+		ToNot(gomega.HaveOccurred())
+
+	deploy := &unstructured.Unstructured{}
+	deploy.SetAPIVersion("apps/v1")
+	deploy.SetKind("Deployment")
+	g.Expect(reconciler.Get(context.TODO(), types.NamespacedName{
+		Name: "openshift-gitops-operator-controller-manager", Namespace: testNS,
+	}, deploy)).ToNot(gomega.HaveOccurred())
+
+	containers, found, err := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "containers")
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(found).To(gomega.BeTrue())
+
+	for _, rawContainer := range containers {
+		container, ok := rawContainer.(map[string]interface{})
+		g.Expect(ok).To(gomega.BeTrue())
+
+		image, _, _ := unstructured.NestedString(container, "image")
+		g.Expect(image).NotTo(gomega.ContainSubstring("registry.redhat.io"),
+			"mirrored operator image must not reference the external registry")
+
+		env, _, err := unstructured.NestedSlice(container, "env")
+		g.Expect(err).ToNot(gomega.HaveOccurred())
+		for _, rawEnv := range env {
+			entry, ok := rawEnv.(map[string]interface{})
+			g.Expect(ok).To(gomega.BeTrue())
+			name, _, _ := unstructured.NestedString(entry, "name")
+			value, _, _ := unstructured.NestedString(entry, "value")
+			g.Expect(value).NotTo(gomega.ContainSubstring("registry.redhat.io"),
+				"env var %s still references the external registry; every chart image key must be configurable", name)
+		}
+	}
+}
+
+func TestTemplateAndApplyChartIsIdempotent(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{
+		Client: newChartTestClient(t),
+		Config: getTestEnv().Config,
+		AddonConfig: &utils.GitOpsAddonConfig{
+			OperatorImages: map[string]string{utils.EnvGitOpsOperatorImage: "quay.io/test/operator:latest"},
+		},
+	}
+
+	testNS := "chart-idempotent-test"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
+	if err := reconciler.Create(context.TODO(), ns); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create test namespace: %v", err)
+	}
+	defer func() { _ = reconciler.Delete(context.TODO(), ns) }()
+
+	g.Expect(reconciler.templateAndApplyChart("charts/openshift-gitops-operator", testNS, "openshift-gitops-operator")).
+		ToNot(gomega.HaveOccurred())
+	g.Expect(reconciler.templateAndApplyChart("charts/openshift-gitops-operator", testNS, "openshift-gitops-operator")).
+		ToNot(gomega.HaveOccurred(), "a second apply must skip unchanged CRDs and succeed")
+}
+
+func TestApplyRenderedManifestsSkipsInvalidEntries(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	reconciler := &GitopsAddonReconciler{Client: getTestEnv().Client, Config: getTestEnv().Config}
+	testNS := "rendered-manifests-test"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
+	if err := reconciler.Create(context.TODO(), ns); err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("create namespace: %v", err)
+	}
+	defer func() { _ = reconciler.Delete(context.TODO(), ns) }()
+
+	reconciler.applyRenderedManifests(map[string]string{
+		"empty.yaml":  "",
+		"notes.txt":   "NOTES.txt",
+		"bad.yaml":    "metadata: [unclosed",
+		"nokind.yaml": "apiVersion: v1\nmetadata:\n  name: no-kind\n",
+		"mixed.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: rendered-cm-a\n" +
+			"\n---\n" +
+			"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: rendered-cm-b\n",
+	}, testNS)
+
+	for _, name := range []string{"rendered-cm-a", "rendered-cm-b"} {
+		cm := &corev1.ConfigMap{}
+		g.Expect(reconciler.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: testNS}, cm)).
+			ToNot(gomega.HaveOccurred(), "valid documents must be applied")
+		g.Expect(cm.Labels).To(gomega.HaveKeyWithValue("apps.open-cluster-management.io/gitopsaddon", "true"))
+	}
+}
+
+func TestApplyCRDYAMLHandlesInvalidInput(t *testing.T) {
+	reconciler := &GitopsAddonReconciler{Client: getTestEnv().Client, Config: getTestEnv().Config}
+
+	// Invalid YAML, empty content and a document without a kind must all be skipped quietly.
+	reconciler.applyCRDYAML("bad", []byte("goodness: [not-closed"))
+	reconciler.applyCRDYAML("empty", []byte("   \n"))
+	reconciler.applyCRDYAML("nokind", []byte("apiVersion: apiextensions.k8s.io/v1\n"))
 }
